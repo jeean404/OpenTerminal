@@ -128,7 +128,6 @@ class ClientMsg:
     accept: bool = False           # rescue：失败救援卡决策（true = 交给 AI）
 
 
-
 class InteractiveRunner:
     """交互式模式的 AI 工具通道：为 PtyShellBackend 鸭子类型 ShellSession。
 
@@ -383,6 +382,14 @@ class PipelineCore:
     def detach(self, sink) -> None:
         if self._sink is sink:
             self._sink = None
+
+    async def feed_input(self, data: bytes) -> None:
+        """前端 → 核心键盘字节（CLI 输入泵 / web 二进制帧同一入口）。
+
+        等价 ClientMsg(type="raw")；必须走 _inbox → _dispatch → _on_keys
+        保持 web 既有顺序语义（直调 _on_keys 会插队到已排队的
+        resize/mode/close 之前）。"""
+        await self.feed_msg(ClientMsg(type="raw", data=data))
 
     async def feed_msg(self, msg: ClientMsg) -> None:
         """前端 → 核心结构化上行（原 web handle_client）。"""
@@ -678,7 +685,6 @@ class PipelineCore:
             raise ConnectionError("连接已关闭")
         return val
 
-    # --- 输出：全部经 outbox 串行（保持顺序）---
     # --- 前端抽象出口：子类覆写（web=TabWorker 进 outbox；CLI=CliCore 进渲染队列）---
     async def emit_msg(self, msg: "ServerMsg") -> None:
         raise NotImplementedError
@@ -689,6 +695,7 @@ class PipelineCore:
     def _emit_nowait(self, msg: "ServerMsg") -> None:
         raise NotImplementedError
 
+    # --- 输出：全部经 outbox 串行（保持顺序）---
     async def _sender_loop(self) -> None:
         while True:
             kind, payload = await self._outbox.get()

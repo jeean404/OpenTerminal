@@ -45,7 +45,9 @@ class TabWorker(PipelineCore):
 class _PatchBridge(type(sys.modules[__name__])):
     def __setattr__(cls, name, value):
         super().__setattr__(name, value)
-        if hasattr(_core, name):
+        # dunder 不转发：__doc__/__name__ 等模块属性两模块各持一份，
+        # 单向桥会造成泄漏（pytest/monkeypatch 正常路径不会碰这些名字）
+        if not name.startswith("__") and hasattr(_core, name):
             setattr(_core, name, value)
 
 

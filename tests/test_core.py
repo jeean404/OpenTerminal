@@ -34,3 +34,29 @@ def test_clientmsg_upmoved_and_reexported():
     from openterminal.web.protocol import ClientMsg as ProtoClientMsg
     from openterminal.core import ClientMsg
     assert ProtoClientMsg is ClientMsg
+
+
+def test_feed_input_wraps_raw_and_routes_via_feed_msg():
+    """feed_input 必须等价 ClientMsg(type="raw") 且经 feed_msg（_inbox 顺序语义）。"""
+    core = PipelineCore(Config.load(), "default")
+    sent = []
+
+    async def _capture(msg):
+        sent.append(msg)
+
+    core.feed_msg = _capture
+    asyncio.run(core.feed_input(b"ls -al\r"))
+    assert len(sent) == 1
+    assert sent[0].type == "raw"
+    assert sent[0].data == b"ls -al\r"
+
+
+def test_patch_bridge_skips_dunders():
+    import openterminal.core as cmod
+    old_core_doc = cmod.__doc__
+    old_wmod_doc = wmod.__doc__
+    wmod.__doc__ = "bridge-leak-probe"
+    try:
+        assert cmod.__doc__ == old_core_doc   # dunder 不转发
+    finally:
+        wmod.__doc__ = old_wmod_doc
