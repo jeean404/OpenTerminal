@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700" font-family="-apple-system,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b949e"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="700" fill="#0d1117"/>
+  <text x="550" y="38" text-anchor="middle" fill="#e6edf3" font-size="20" font-weight="600">OpenTerminal 架构总览</text>
+
+  <!-- 用户输入 -->
+  <rect x="420" y="60" width="260" height="40" rx="20" fill="#21262d" stroke="#388bfd" stroke-width="1.5"/>
+  <text x="550" y="85" text-anchor="middle" fill="#58a6ff" font-size="15">自然语言 / 命令输入</text>
+
+  <line x1="550" y1="100" x2="550" y2="128" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- 入口层 -->
+  <rect x="90" y="130" width="920" height="230" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="110" y="158" fill="#8b949e" font-size="13">入口 · src/openterminal/app.py</text>
+
+  <!-- CLI 分支 -->
+  <rect x="120" y="172" width="440" height="60" rx="8" fill="#1c2128" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="340" y="197" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="600">CLI REPL</text>
+  <text x="340" y="218" text-anchor="middle" fill="#8b949e" font-size="12">cli.py · prompt_toolkit + rich</text>
+
+  <!-- Web 分支 -->
+  <rect x="590" y="172" width="390" height="60" rx="8" fill="#1c2128" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="785" y="197" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="600">Web 终端（ot web）</text>
+  <text x="785" y="218" text-anchor="middle" fill="#8b949e" font-size="12">web/server.py · FastAPI + WS + xterm.js 前端</text>
+
+  <!-- CLI 内部四模块 -->
+  <rect x="120" y="252" width="100" height="52" rx="6" fill="#21262d" stroke="#30363d"/>
+  <text x="170" y="274" text-anchor="middle" fill="#e6edf3" font-size="12.5">intent.py</text>
+  <text x="170" y="292" text-anchor="middle" fill="#8b949e" font-size="11">命令 vs 任务</text>
+
+  <rect x="230" y="252" width="120" height="52" rx="6" fill="#21262d" stroke="#d29922"/>
+  <text x="290" y="274" text-anchor="middle" fill="#e6edf3" font-size="12.5">agent.py</text>
+  <text x="290" y="292" text-anchor="middle" fill="#8b949e" font-size="11">deepagents Agent</text>
+
+  <rect x="360" y="252" width="100" height="52" rx="6" fill="#21262d" stroke="#f85149"/>
+  <text x="410" y="274" text-anchor="middle" fill="#e6edf3" font-size="12.5">policy.py</text>
+  <text x="410" y="292" text-anchor="middle" fill="#8b949e" font-size="11">auto/approve/deny</text>
+
+  <rect x="470" y="252" width="90" height="52" rx="6" fill="#21262d" stroke="#30363d"/>
+  <text x="515" y="274" text-anchor="middle" fill="#e6edf3" font-size="12.5">backend.py</text>
+  <text x="515" y="292" text-anchor="middle" fill="#8b949e" font-size="11">会话适配</text>
+
+  <!-- Web 内部 -->
+  <rect x="590" y="252" width="180" height="52" rx="6" fill="#21262d" stroke="#30363d"/>
+  <text x="680" y="274" text-anchor="middle" fill="#e6edf3" font-size="12.5">TabWorker</text>
+  <text x="680" y="292" text-anchor="middle" fill="#8b949e" font-size="11">每 tab 一个会话 + Agent</text>
+
+  <rect x="780" y="252" width="200" height="52" rx="6" fill="#21262d" stroke="#30363d"/>
+  <text x="880" y="274" text-anchor="middle" fill="#e6edf3" font-size="12.5">审批 / 认证弹窗</text>
+  <text x="880" y="292" text-anchor="middle" fill="#8b949e" font-size="11">浏览器交互</text>
+
+  <!-- open_session 汇合 -->
+  <line x1="340" y1="360" x2="540" y2="408" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="785" y1="360" x2="585" y2="408" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="550" y="398" text-anchor="middle" fill="#8b949e" font-size="12">open_session（connections.py：local / ~/.ssh/config / 记住的连接 / 跳板机）</text>
+
+  <!-- PTY 层 -->
+  <rect x="120" y="412" width="260" height="64" rx="8" fill="#1c2128" stroke="#30363d"/>
+  <text x="250" y="438" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">local_pty.py</text>
+  <text x="250" y="458" text-anchor="middle" fill="#8b949e" font-size="12">POSIX PTY · macOS / Linux</text>
+
+  <rect x="420" y="412" width="260" height="64" rx="8" fill="#1c2128" stroke="#30363d"/>
+  <text x="550" y="438" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">local_win.py</text>
+  <text x="550" y="458" text-anchor="middle" fill="#8b949e" font-size="12">Windows ConPTY · PowerShell</text>
+
+  <rect x="720" y="412" width="260" height="64" rx="8" fill="#1c2128" stroke="#30363d"/>
+  <text x="850" y="438" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">ssh_pty.py</text>
+  <text x="850" y="458" text-anchor="middle" fill="#8b949e" font-size="12">asyncssh · 跳板机 tunnel · TOFU</text>
+
+  <!-- 会话层 -->
+  <line x1="250" y1="476" x2="480" y2="524" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="550" y1="476" x2="550" y2="524" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="850" y1="476" x2="620" y2="524" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="230" y="528" width="640" height="64" rx="8" fill="#1c2128" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="550" y="554" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">shell_session.py · BasePtySession 哨兵捕获主循环</text>
+  <text x="550" y="574" text-anchor="middle" fill="#8b949e" font-size="12">BEGIN/END 标记 · 超时中断 · 输出截断 · 断线重连 · 密码提示兜底</text>
+
+  <!-- 支撑层 -->
+  <rect x="90" y="622" width="920" height="52" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="550" y="644" text-anchor="middle" fill="#8b949e" font-size="12.5">支撑组件</text>
+  <text x="550" y="663" text-anchor="middle" fill="#e6edf3" font-size="12.5">sysprobe 系统画像 · secrets_store 系统凭据库 · transcript 会话记录 · config 配置 · render / taskview / approval 展示</text>
+</svg>
