@@ -24,6 +24,7 @@ export class CardsStore {
     this._lastSummaryMd = null; // 换装去重：worker 连发 ai_card(md)+final(md) 同文
     this.onDecision = null;  // (decision, stateText, command, cardId) => void（app.js 结账后发 WS + 状态栏）
     this.onRescue = null;    // (accept) => void（app.js 发 rescue 决策 WS）
+    this.onNewSession = null; // (cardId) => void（app.js 发 new_session WS + 回车换行）
   }
 
   subscribe = (fn) => {
@@ -224,6 +225,16 @@ export class CardsStore {
         }
         if (evt.key === "Backspace") return this._decide("reject");
         return false;
+      }
+      case "new_session": {
+        // 总结卡底部「开启新会话」：本卡原位变「✓ 新会话已开启」，通知
+        // app.js 重置后端模型上下文（不清屏，界面等效按了一次回车）
+        const card = this._card(evt.id);
+        if (!card || card.newSession) return false;
+        card.newSession = true;
+        this._emit();
+        this.onNewSession && this.onNewSession(card.id);
+        return true;
       }
       case "clear":
         this.cards = [];

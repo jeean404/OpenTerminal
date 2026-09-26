@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 @dataclass
 class ClientMsg:
-    type: str                      # raw(键盘字节) | decision | auth | interrupt | mode | resize | change_model | close | submit | pad | boundary_settled
+    type: str                      # raw(键盘字节) | decision | auth | interrupt | mode | resize | change_model | close | submit | pad | boundary_settled | new_session
     text: str = ""                 # mode: "ssh" | "agent"；auth: 密码文本；submit: 前端拦截的自然语言整行
     data: bytes = b""              # raw 按键字节（二进制帧整帧直发 PTY）
     decision: dict | None = None
@@ -33,7 +33,7 @@ class ClientMsg:
 
 @dataclass
 class ServerMsg:
-    type: str                      # ready | event | approval | ask_password | ask_host_key | status | closed | usage | cmdset
+    type: str                      # ready | event | approval | ask_password | ask_host_key | status | closed | usage | cmdset | stage
     tab_id: str = ""
     host: str = ""
     user: str = ""

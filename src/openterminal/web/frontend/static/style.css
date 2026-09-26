@@ -131,8 +131,28 @@ body.sidebar-collapsed #sidebar { display: none; }
 .term {
   flex: 1; min-height: 0; padding: 4px 6px;
   background: var(--term-bg); overflow: hidden;
+  position: relative;   /* 连接中浮层（.connect-overlay）的定位上下文 */
 }
 .term .xterm { height: 100%; }
+
+/* 连接中浮层：盖住终端区居中显示，两阶段文案（连接中 → 初始化 Agent），
+   ready 即撤；SSH 弹窗（modal z-index 50）须压在其上 */
+.connect-overlay {
+  position: absolute; inset: 0; z-index: 40;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  background: color-mix(in srgb, var(--term-bg) 72%, transparent);
+  color: var(--muted); font-size: 15px; letter-spacing: 1px;
+}
+.connect-overlay[hidden] { display: none; }
+.connect-overlay .cspin {
+  width: 18px; height: 18px; flex: none; border-radius: 50%;
+  border: 2.5px solid var(--border); border-top-color: var(--text);
+  animation: spin 0.8s linear infinite;
+}
+.connect-overlay .cdots::after {
+  content: ""; display: inline-block; width: 1.2em; text-align: left;
+  animation: tdots 1.2s steps(1) infinite;
+}
 
 /* --- 装饰卡层：锚定终端行的 HTML 卡（样式参照 docs/prototype/deco-demo.html）--- */
 
@@ -424,6 +444,23 @@ body.sidebar-collapsed #sidebar { display: none; }
 }
 .statusbar.task-on {
   background: rgba(122, 167, 255, 0.06);
+}
+/* 「连接中」徽标：建连期（含 local shell 启动、SSH 握手）常显于状态栏左侧，
+   spinner + 循环滚动省略号；ready/closed/error 即撤。样式对齐 status-think */
+.statusbar .status-connect {
+  display: inline-flex; align-items: center; gap: 8px; flex: 1;
+  min-width: 0; overflow: hidden;
+  color: var(--muted); font-size: 12px; white-space: nowrap;
+}
+.statusbar .status-connect[hidden] { display: none; }
+.statusbar .status-connect .cspin {
+  width: 12px; height: 12px; flex: none; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--muted);
+  animation: spin 0.8s linear infinite;
+}
+.statusbar .status-connect .cdots::after {
+  content: ""; display: inline-block; width: 1.2em; text-align: left;
+  animation: tdots 1.2s steps(1) infinite;
 }
 .statusbar .status-think[hidden] { display: none; }
 .statusbar .status-think .tspin {

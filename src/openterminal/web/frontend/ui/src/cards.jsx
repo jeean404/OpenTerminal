@@ -67,6 +67,13 @@ function SummaryCard({ card, dispatch }) {
     <div className="scard">
       <Head card={card} label="总结" />
       <div className="sbody" dangerouslySetInnerHTML={body} />
+      <div className="sfoot">
+        {card.newSession
+          ? <span className="nsstate">✓ 新会话已开启</span>
+          : <button className="nsbtn" title="重置模型上下文，从 0 开始（不清屏）"
+                    onClick={() => dispatch({ kind: "new_session", id: card.id })}>
+              开启新会话</button>}
+      </div>
     </div>
   );
 }

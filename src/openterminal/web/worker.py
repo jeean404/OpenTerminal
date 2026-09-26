@@ -205,6 +205,10 @@ class TabWorker:
         self._pump: asyncio.Task | None = None
         self._closed = False
         self._closed_sent = False  # closed 消息已入 outbox（sender 退出门闩）
+        # 模型上下文轮次：/clear 自增 → TaskRunner 换新 thread_id，langgraph
+        # MemorySaver 按 thread 存历史，旧上下文不再进新任务的提示词（省 token，
+        # 语义同 CLI /clear 换 session_id）
+        self._ctx_epoch = 0
         # --- 交互式 shell 集成（单管线真终端）---
         self._interactive = False    # hook 集成就绪；False = 纯终端直通（无 AI）
         self._display = "agent"      # agent = hook 集成 / ssh = 纯透传（Shell 模式）
@@ -713,6 +717,10 @@ class TabWorker:
         # 断线自动重连成功后把历史命令重新灌进新 shell（裸 shell 阶段，
         # 回调内不可走 run()——彼时 _runner_lock 被恢复流程持有）
         self.session.on_reconnect = self._on_session_reconnect
+        # 阶段上报：建连（PTY/SSH+shell 启动）已完成，进入 agent 初始化
+        # （shell 能力探测 + 集成脚本注入，秒级），前端浮层据此换文案
+        await self._send_json(encode_server(ServerMsg(
+            type="stage", text="agent_init")))
         self._install_curtain_gate()
         # 画像选择与 CLI switch_target 一致：local 不跑探针（POSIX 探针语句
         # 在 PowerShell 下无哨兵输出，run 会挂满超时 → ready 永不到达）
@@ -1045,6 +1053,10 @@ class TabWorker:
             await self._change_model(msg.model)
         elif msg.type == "close":
             await self.close()
+        elif msg.type == "new_session":
+            # 总结卡「开启新会话」：只重置模型上下文，不清屏不动 PTY
+            #（界面等效回车，由前端发）；与 /clear 的区别就是没有清屏
+            self._reset_context()
 
     # --- 按键 / AI 取消 ---
     async def _on_keys(self, data: bytes) -> None:
@@ -1096,6 +1108,13 @@ class TabWorker:
             except Exception:  # noqa: BLE001 - 会话关闭竞态（fd 失效等）
                 pass
 
+    def _reset_context(self) -> None:
+        """模型上下文归零：换 thread_id（langgraph MemorySaver 按 thread 存
+        历史，新任务的提示词不再带旧上下文，省 token）+ 换 transcript 文件。
+        不碰 PTY——清屏与否由调用方决定（/clear 清屏，new_session 不清）。"""
+        self._ctx_epoch += 1
+        self.transcript = open_transcript(self.tab_id)
+
     async def _handle_slash(self, line: str) -> bool:
         """斜杠命令处理；返回 True 表示已消费（经 hook AI 报告进入）。"""
         if line == "/help":
@@ -1113,7 +1132,7 @@ class TabWorker:
             await self.close()
             return True
         if line == "/clear":
-            self.transcript = open_transcript(self.tab_id)
+            self._reset_context()
             await self._send_json(encode_server(ServerMsg(
                 type="status", text="已开启新任务。")))
             # 通知前端清掉本会话的全部 AI 卡片
@@ -1168,7 +1187,7 @@ class TabWorker:
                     type="event", event={"kind": "error", "text": ev.text}))))
 
         runner = TaskRunner(
-            self.agent, self.tab_id,
+            self.agent, f"{self.tab_id}#c{self._ctx_epoch}",
             max_tool_turns=self.cfg.shell.max_tool_turns,
             on_event=_live,
         )

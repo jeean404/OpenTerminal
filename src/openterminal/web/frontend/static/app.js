@@ -141,7 +141,7 @@ class Session {
     this._lineCur = 0;          // 半行镜像光标位（行内编辑同步用）
     this._lineDirty = false;    // 缓冲被无法镜像的转义/控制键清过（提交时随 submit 上报）
     this.status = "connecting"; // connecting | connected | closed
-    this.statusText = "连接中…";
+    this.statusText = "";       // 连接中文案由 status-connect 徽标（旋转+循环点）承担
     this.ws = null;
     this._clip = "";            // 页内最近复制的文本（http 局域网无剪贴板读权限时的粘贴兜底）
     this._feed = null;          // React island 句柄 {handle, mount, unmount, destroy}
@@ -205,6 +205,7 @@ class Session {
       </div>
       <div class="term" id="term-${this.tabId}"></div>
       <div class="statusbar">
+        <span class="status-connect" id="conn-${this.tabId}" title="正在建立连接"><i class="cspin"></i><span>连接中</span><span class="cdots"></span></span>
         <span class="status-think" id="think-${this.tabId}" hidden title="任务未结束：AI 正在分析或执行"><i class="tspin"></i><span class="ttext">AI 正在思考</span><span class="tdots"></span></span>
         <span class="status-text" id="status-${this.tabId}"></span>
         <span class="status-meta">
@@ -267,6 +268,14 @@ class Session {
     this.fitAddon = new FitAddon.FitAddon();
     term.loadAddon(this.fitAddon);
     term.open(this.paneEl.querySelector(`#term-${this.tabId}`));
+    // 连接中浮层：盖在终端区中央，两阶段文案（连接中 → 初始化 Agent，由
+    // worker 的 stage 事件切换），ready/closed/error 即撤（setStatus 统一
+    // 切换）；须在 term.open 之后插入，xterm 接管容器
+    const termEl = this.paneEl.querySelector(`#term-${this.tabId}`);
+    termEl.insertAdjacentHTML("beforeend",
+      `<div class="connect-overlay" id="connov-${this.tabId}">` +
+      `<i class="cspin"></i><span class="ctext">连接中</span>` +
+      `<span class="cdots"></span></div>`);
     // 键盘字节直发 PTY（契约：input 保留）。外部分类触发链：agent 模式下
     // 整行带自然语言特征（CJK/? 前缀）时不发回车，改送 submit 让 worker 直接
     // 起任务——触发不再依赖 shell hook（sudo su - 等 login shell 重置后仍可用）；
@@ -676,6 +685,12 @@ class Session {
           onRescue: accept => {
             // 失败救援卡决策回传（true = 交给 AI）
             this.sendJson({type: "rescue", accept});
+          },
+          onNewSession: cardId => {
+            // 总结卡「开启新会话」：后端只重置模型上下文（不清屏）；PTY 发
+            // 一个回车等效换行出新鲜提示符——界面上就像按了一下 Enter
+            this.sendJson({type: "new_session"});
+            this._sendInput("\r");
           },
         });
         return this._feed;
@@ -1905,7 +1920,21 @@ class Session {
     if (text != null) this.statusText = text;
     const el = document.getElementById(`status-${this.tabId}`);
     if (el) el.textContent = this.statusText;
+    // 连接中徽标+终端区浮层：ready/closed/error 一到即撤（浮层在 term.open
+    // 后插入，初始 connecting 应显示）
+    const conn = document.getElementById(`conn-${this.tabId}`);
+    if (conn) conn.hidden = state !== "connecting";
+    const ov = document.getElementById(`connov-${this.tabId}`);
+    if (ov) ov.hidden = state !== "connecting";
     refreshSidebarStatus();
+  }
+
+  // 浮层两阶段文案：stage 事件来自 worker（open_session 完成 → agent 初始化）
+  _setConnectStage(stage) {
+    const ov = document.getElementById(`connov-${this.tabId}`);
+    if (!ov) return;
+    const t = ov.querySelector(".ctext");
+    if (t) t.textContent = stage === "agent_init" ? "初始化 Agent" : "连接中";
   }
 
   _fmtDuration(ms) {
@@ -2012,9 +2041,8 @@ class Session {
 
   // --- WS JSON 事件 ---
   // 契约：ready/status/closed/usage/approval/ask_password/ask_host_key/
-  // interrupt/mode/auth/change_model/task_start/final/denied/limit/error +
-  // 新增 ai_token/ai_think/ai_collapse/ai_card。term_open/term_close/commit/
-  // command_done/user_change/clear 及 raw_mode 已随双 UI 删除。
+  // interrupt/mode/auth/change_model/task_start/final/denied/limit/error/
+  // stage + 新增 ai_token/ai_think/ai_collapse/ai_card。
   handleMsg(msg) {
     switch (msg.type) {
       case "ready": {
@@ -2048,6 +2076,9 @@ class Session {
           this._welcomeHold = {raw: null, cleared: 0, at: performance.now()};
         }
         this.setStatus(this.status, msg.text);
+        break;
+      case "stage":   // 连接两阶段：连接中 →（建连完成）→ 初始化 Agent
+        this._setConnectStage(msg.text);
         break;
       case "cmdset":
         this._renderCmdset(msg);
