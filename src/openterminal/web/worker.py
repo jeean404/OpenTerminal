@@ -45,6 +45,9 @@ from ..policy import Policy
 # 健康路径兜底：补发 \r 后等 hook AI 上报的最长时限（超时改走外部启动）
 SUBMIT_FALLBACK_DELAY = 1.2
 
+# 换壳探测（_probe_shell_kind）：等 __OTPROBE__ 输出的最长时限
+_PROBE_TIMEOUT = 1.5
+
 
 def _looks_ai(text: str) -> bool:
     """自然语言粗判（外部分类触发链）。与 shell hook 的分类语义对齐：只有
@@ -208,6 +211,14 @@ class TabWorker:
         self._router: StreamRouter | None = None
         self._shell_kind: str | None = None   # bash | zsh | powershell
         self._b64flag = "-d"
+        # su - / 嵌套 shell 探测：当前提示符后面的真实 shell 族不再是外层
+        # 会话的 _shell_kind。_ensure_integrated 探测不到可集成的 shell
+        # （bash 3.2 / 其他族 / 前台占用）时置 _hook_gone——标记流不足以
+        # 证明 hook 在位（zsh 版 PS1 落进 bash 照样发 OSC 133 标记，函数
+        # 却一个都没定义出来），pad/健康路径/兜底必须按 hook 不在位降级。
+        # 嵌套 shell 退出（_open_cmds 清空）后复位，外层 hook 自然恢复。
+        self._hook_gone = False
+        self._probe_buf: bytearray | None = None  # 探测行输出收集（_probe_shell_kind）
         self._cur_prompt = ""        # 最近一次 B 标记捕获的提示符纯文本
         self._pending_report = None  # C 标记前最近的行报告 (inst, kind, line)
         self._open_cmds: dict[int, str] = {}  # 用户命令记账 inst -> line（退出码）
@@ -416,11 +427,16 @@ class TabWorker:
         总结卡可达上百行占位，截断会让卡片悬在缓冲区外盖住提示符。
 
         hook 在位时半行保护走 shell 侧存档/接回原语（^U 存 __ot_saved、^Y
-        接回，空行零副作用，任务期打字与注入交错也能原样接回），mirror 仅作
-        hook 不在位时的降级：非空则先 \x15 收纳、pad 打完原样重打（旧行为）；
-        ``""`` 表示半行为空，无需收纳（不发 \x15）；None = 镜像不可信（dirty），
-        保持旧的丢弃路径。"""
+        接回，空行零副作用，任务期打字与注入交错也能原样接回）。hook 不在位
+        （su - 换壳探测失败等）直接 ack 返回：没有 __ot_pad 通道，旧降级往
+        提示符敲 ``__ot_pad N`` 只会连环 command not found + 提示符连排，
+        前置 \x15 还连环吞用户输入（真机「打字不显示」根因之一）。宁藏不盖：
+        不垫空行，卡由显隐/夹紧逻辑兜底。"""
         async with self._runner_lock:
+            if not self._hook_ok():
+                await self._send_json(encode_server(ServerMsg(
+                    type="event", event={"kind": "padded", "rows": rows})))
+                return
             remaining = max(1, rows)
             first = True
             hook = self._hook_ok()
@@ -456,7 +472,15 @@ class TabWorker:
         绑定，丢掉 OSC 133:D 提示符标记与 __ot_exec__/__ot_pad 通道，导致自然语言
         任务挂起。任务启动前重发分片注入脚本：幂等（healthy shell 只重定义同名函数/
         重设同款提示符，无副作用；su - 后则恢复全部集成）。回显经 _suppress_live 吞掉，
-        等 OSC:D 提示符标记确认注入落地。"""
+        等 OSC:D 提示符标记确认注入落地。
+
+        注入前先探测提示符后面的真实 shell 族（su - 换壳）：外层会话的
+        _shell_kind 是连接时探测的（如 zsh），而 macOS root = /bin/sh =
+        bash 3.2——把 zsh 脚本打进 bash 定义不出任何函数，且 zsh 版 PS1 在
+        bash 里照样发 OSC 133 标记，_hook_ok 由此假阳性（真机 su - 后
+        __ot_pad 连环 command not found、自然语言整行被 root shell 当命令
+        执行、\x15 连环吞输入）。探测不到可集成 shell 时置 _hook_gone 转
+        降级，本次任务外部启动。"""
         if not self._interactive or self.session is None:
             return False
         async with self._runner_lock:
@@ -464,8 +488,18 @@ class TabWorker:
             self._suppress_live = True
             try:
                 # 前置 \x15 收纳半行但不补 \x19 恢复：任务启动即丢弃该半行
-                #（若 yank 回 kill ring 里的旧文本，会在提示符行复活污染输入）
+                #（若 yank 回 kill ring 里的旧文本，会在提示符行复活污染输入）。
+                # 探测行必须敲在干净提示符上——半行没清，探测行会拼在用户
+                # 已敲文本后面整行执行。
                 await self.session.send_raw(b"\x15")
+                shell, flag = await self._probe_shell_kind()
+                if shell is None:
+                    self._hook_gone = True
+                    return False
+                self._hook_gone = False
+                if shell != self._shell_kind:
+                    self._shell_kind = shell
+                    self._b64flag = flag
                 for _ci, line in enumerate(
                         injection_lines(self._shell_kind, 1, self._b64flag)):
                     self._ev_stream.clear()
@@ -489,6 +523,38 @@ class TabWorker:
             finally:
                 self._suppress_live = False
                 self._suppressed_echo = False
+
+    async def _probe_shell_kind(self) -> tuple[str | None, str]:
+        """在当前提示符敲一行能力探测，识别 su - / 嵌套 shell 后的真实 shell 族。
+
+        复用 probe_command + parse_probe（bash>=4 门槛与 base64 参数判定与
+        连接时探测同一套）；行首加 ``_ot_inj=`` 前缀使 is_internal_line 成立
+        ——hook 恰好在位时该行按内部行静默记账，不入历史、不占用户命令帧。
+        输出经 _probe_buf 收集（_on_stream_event 的 live/exec 分支塞入），
+        回显与输出由调用方持有的 _suppress_live 窗口吞掉，不外显。
+
+        返回 (shell|None, b64flag)：超时 / 无标记（前台占用吃掉探测行、
+        其他 shell 族、bash 3.2）→ (None, "-d")。Windows 无 su - 语义，
+        维持连接时探测的原判。"""
+        if self.session is None:
+            return None, "-d"
+        if self.profile is not None and self.profile.os_family == "windows":
+            return self._shell_kind, self._b64flag
+        self._probe_buf = bytearray()
+        try:
+            await self.session.send_raw(
+                ('_ot_inj=""; ' + probe_command(self.profile.os_family)
+                 ).encode() + b"\r")
+            deadline = time.monotonic() + _PROBE_TIMEOUT
+            while time.monotonic() < deadline:
+                shell, flag = parse_probe(
+                    self._probe_buf.decode("utf-8", "replace"))
+                if shell is not None:
+                    return shell, flag
+                await asyncio.sleep(0.05)
+            return None, "-d"
+        finally:
+            self._probe_buf = None
 
     async def close(self) -> None:
         if self._closed:
@@ -1297,6 +1363,8 @@ class TabWorker:
              if kind in ("live", "exec", "prompt") else ev[1:])
         if kind == "live":
             self._ev_stream.set()   # 回显到达：重注入分片的逐片应答凭据
+            if self._probe_buf is not None:
+                self._probe_buf.extend(ev[1])
             if self._curtain:
                 # 幕帘扣留：live 文本（提示符段及后续杂散回显）按序暂存，
                 # 下一次注入（闸）或任务收尾才放行
@@ -1310,6 +1378,8 @@ class TabWorker:
                 await self._send_bytes(ev[1].encode("utf-8", "replace"))
         elif kind == "exec":
             self._ev_stream.set()
+            if self._probe_buf is not None:
+                self._probe_buf.extend(ev[1].encode("utf-8", "replace"))
             await self._on_exec_text(ev[1])
         elif kind == "prompt_start":
             self._ev_prompt.set()   # 模式切换等提示符重画
@@ -1443,6 +1513,10 @@ class TabWorker:
             line = self._open_cmds.pop(inst)
             if line:
                 self.transcript.append("direct", command=line, exit_code=ec)
+            if not self._open_cmds:
+                # 嵌套 shell（su - 等）退出：外层 hook 的标记/函数从未丢过，
+                # 复位换壳判定，健康路径/pad 恢复
+                self._hook_gone = False
             await self._maybe_rescue(line, ec)
         if not self._exec_stack:
             return    # 孤儿 D：无帧的执行周期，忽略
@@ -1574,15 +1648,21 @@ class TabWorker:
         await self._on_ai_line(t)
 
     def _hook_ok(self) -> bool:
-        """hook 在位判定：本会话见过 OSC 标记即在位。
+        """hook 在位判定：本会话见过 OSC 标记，且探测未判定「换了壳」。
 
         旧口径「标记时间戳不落后于纯文本」会把**按键回显**（纯文本）误判成
         标记绝迹：用户只要敲过字，live 必然新于最后一次提示符标记，健康路径
         永久退化——\\x03 + 整行重发，且 suppress 窗口吞掉 ^C 后的提示符重画
         使前端光标与 PTY 失步，重发回显拼在首段回显后（真机「同一行输入重复
         两遍」根因）。su - 等重置发生在用户命令帧内（_open_cmds 开着），已由
-        空闲门闩覆盖；帧闭合后外层 hook 仍在、标记恢复。"""
-        return self._interactive and self._last_mark_at > 0
+        空闲门闩覆盖；帧闭合后外层 hook 仍在、标记恢复。
+
+        但仅凭标记流也不够：su - 换壳后注入的外族 PS1 照样发标记而函数全空
+        （真机 zsh PS1 落进 bash 3.2），故 _ensure_integrated 探测失败置
+        _hook_gone 转假；嵌套 shell 退出（_open_cmds 清空）复位，外层 hook
+        的标记与函数从未丢过，自然恢复在位。"""
+        return (self._interactive and not self._hook_gone
+                and self._last_mark_at > 0)
 
     async def _submit_fallback(self, t: str) -> None:
         """健康路径兜底：补发 \\r 后 hook AI 上报迟迟未到（重置误判/路由丢报）

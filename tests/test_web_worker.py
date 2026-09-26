@@ -1286,19 +1286,20 @@ async def _padded_rows(sink):
 
 
 async def test_shell_pad_sends_bracketed_injection_and_acks_once(monkeypatch):
-    r"""pad：\x15…__ot_pad N\r 注入（与 InteractiveRunner 共用 _runner_lock
-    的半行收纳，不补 \x19 yank——防 kill ring 文本复活），等提示符重画后
-    一次 padded 应答。"""
+    r"""pad：\x15…__ot_pad N\r…\x19 注入（与 InteractiveRunner 共用
+    _runner_lock 的半行收纳，hook 在位走 shell 侧存档/接回原语），等提示符
+    重画后一次 padded 应答。"""
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
+    w._last_mark_at = 1.0        # 本会话见过标记 → hook 在位
     _wire_pad_prompt(w)
 
     await w.handle_client(ClientMsg(type="pad", pad=5))
     if w._pad_task is not None:  # pad 已挂任务：等打字完再验（非交互不挂）
         await asyncio.wait_for(w._pad_task, timeout=2)
     raws = [d for k, d in w.session.calls if k == "raw"]
-    assert raws == [b"\x15", b"__ot_pad 5\r"]
+    assert raws == [b"\x15", b"__ot_pad 5\r", b"\x19"]
     assert await _padded_rows(sink) == [5]
 
 
@@ -1307,6 +1308,7 @@ async def test_shell_pad_chunks_over_50(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
+    w._last_mark_at = 1.0        # 本会话见过标记 → hook 在位
     _wire_pad_prompt(w)
 
     await w.handle_client(ClientMsg(type="pad", pad=120))
@@ -1318,53 +1320,24 @@ async def test_shell_pad_chunks_over_50(monkeypatch):
     assert await _padded_rows(sink) == [120]
 
 
-async def test_shell_pad_mirror_empty_skips_kill(monkeypatch):
-    r"""mirror="" 半行为空可信：不发 \x15（无需收纳），pad 行照常，一次应答。"""
+async def test_shell_pad_hook_gone_sends_nothing_acks(monkeypatch):
+    r"""hook 不在位（su - 换壳探测失败等）：pad 零 PTY 写入仍应答 padded。
+
+    没有 __ot_pad 通道，旧降级往提示符敲 ``__ot_pad N`` 只会连环 command
+    not found + 提示符连排，前置 \x15 还连环吞用户输入（真机「打字不显示」
+    根因之一）。宁藏不盖：不垫空行，卡由显隐/夹紧逻辑兜底。"""
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
-    _wire_pad_prompt(w)
-
-    await w.handle_client(ClientMsg(type="pad", pad=5, mirror=""))
-    if w._pad_task is not None:  # pad 已挂任务：等打字完再验（非交互不挂）
-        await asyncio.wait_for(w._pad_task, timeout=2)
-    raws = [d for k, d in w.session.calls if k == "raw"]
-    assert raws == [b"__ot_pad 5\r"], "空半行不应有 \\x15 收纳"
-    assert await _padded_rows(sink) == [5]
-
-
-async def test_shell_pad_mirror_nonempty_stashes_and_restores(monkeypatch):
-    r"""mirror 非空可信：单发 \x15 收纳半行，pad 打完后原样复原（不发 \r），
-    用户正在敲的输入不被占位注入吞掉（P2-7）。"""
-    w, sink = await _make_worker(monkeypatch)
-    await asyncio.wait_for(w.connected.wait(), timeout=2)
-    w._interactive = True
-    _wire_pad_prompt(w)
+    w._last_mark_at = 1.0
+    w._hook_gone = True          # su - 换壳：探测判定不可集成
 
     await w.handle_client(ClientMsg(type="pad", pad=5, mirror="rm -rf /tmp/x"))
-    if w._pad_task is not None:  # pad 已挂任务：等打字完再验（非交互不挂）
+    if w._pad_task is not None:
         await asyncio.wait_for(w._pad_task, timeout=2)
     raws = [d for k, d in w.session.calls if k == "raw"]
-    assert raws == [b"\x15", b"__ot_pad 5\r", b"rm -rf /tmp/x"], \
-        "首块前 \\x15 收纳、pad 后原样复原半行（不带 \\r）"
+    assert raws == [], "hook 不在位：不发 \\x15/__ot_pad/mirror 任何字节"
     assert await _padded_rows(sink) == [5]
-
-
-async def test_shell_pad_mirror_nonempty_chunked_restores_once(monkeypatch):
-    r"""分块（>50）+ 非空 mirror：\x15 只在首块前发一次，复原在末块后发一次。"""
-    w, sink = await _make_worker(monkeypatch)
-    await asyncio.wait_for(w.connected.wait(), timeout=2)
-    w._interactive = True
-    _wire_pad_prompt(w)
-
-    await w.handle_client(ClientMsg(type="pad", pad=120, mirror="ls -la"))
-    if w._pad_task is not None:  # pad 已挂任务：等打字完再验（非交互不挂）
-        await asyncio.wait_for(w._pad_task, timeout=2)
-    raws = [d for k, d in w.session.calls if k == "raw"]
-    assert raws == [b"\x15",
-                    b"__ot_pad 50\r", b"__ot_pad 50\r", b"__ot_pad 20\r",
-                    b"ls -la"], "\\x15 首块前一次、复原末块后一次"
-    assert await _padded_rows(sink) == [120]
 
 
 async def test_shell_pad_hook_ok_uses_saved_yank_primitive(monkeypatch):
@@ -1387,11 +1360,12 @@ async def test_shell_pad_hook_ok_uses_saved_yank_primitive(monkeypatch):
 
 
 async def test_shell_pad_prompt_timeout_still_acks(monkeypatch):
-    """hook 无响应（超时容忍）也照常应答 padded——应答不作为凭据，
+    """hook 在位但无响应（超时容忍）也照常应答 padded——应答不作为凭据，
     前端按缓冲实测记账。"""
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
+    w._last_mark_at = 1.0        # hook 在位（否则走零写入早退）
     w._pad_prompt_timeout = 0.01   # 默认 FakeSession.send_raw 不置 _ev_prompt
 
     await w.handle_client(ClientMsg(type="pad", pad=5))
@@ -1412,6 +1386,119 @@ async def test_pad_requires_interactive(monkeypatch):
     assert not any(m.get("type") == "event"
                    and m.get("event", {}).get("kind") == "padded"
                    for m in sink.json())
+
+
+# --- su - 换壳探测：外层 shell 的脚本不能打进嵌套 shell（真机「打字不显示」）---
+
+
+async def test_probe_shell_kind_parses_probe_output(monkeypatch):
+    """探测行输出经 _probe_buf 收集并按 parse_probe 解析：bash5 → ("bash",
+    flag)、zsh → zsh；输出含探测行回显也不影响（PROBE_TAG 定位）。"""
+    import openterminal.web.worker as wmod
+    for out, want in [
+        ("__OTPROBE__bash5.1.8(1)-release|-d", ("bash", "-d")),
+        ("__OTPROBE__zsh5.9|-D", ("zsh", "-D")),
+    ]:
+        w, sink = await _make_worker(monkeypatch)
+        await asyncio.wait_for(w.connected.wait(), timeout=2)
+        w.profile.os_family = "linux"
+        base = w.session.send_raw
+
+        async def _send(data, _base=base):
+            await _base(data)
+            # 探测行回显 + 执行输出一起喂（真实流里回显在前）
+            await w._on_stream_event(("exec", data.decode()[:40]))
+            await w._on_stream_event(("exec", out + "\r\n"))
+
+        w.session.send_raw = _send
+        got = await w._probe_shell_kind()
+        assert got == want, out
+        assert w._probe_buf is None, "探测结束必须清 _probe_buf"
+
+
+async def test_probe_shell_kind_timeout_returns_none(monkeypatch):
+    """探测行被前台占用吃掉（无输出）：超时 → (None, "-d")。"""
+    import openterminal.web.worker as wmod
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    monkeypatch.setattr(wmod, "_PROBE_TIMEOUT", 0.05)
+    shell, flag = await w._probe_shell_kind()
+    assert (shell, flag) == (None, "-d")
+
+
+async def test_ensure_integrated_foreign_shell_no_inject(monkeypatch):
+    """su - 换壳（探测不到可集成 shell）：不注入、置 _hook_gone、返回 False；
+    _hook_ok 随之转假。不发 \x03 之外的注入分片/__ot_pad。"""
+    import openterminal.web.worker as wmod
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._shell_kind = "zsh"
+    monkeypatch.setattr(wmod, "_PROBE_TIMEOUT", 0.05)
+
+    ok = await w._ensure_integrated()
+    assert ok is False
+    assert w._hook_gone is True
+    assert not w._hook_ok(), "标记流不足以证明 hook 在位（外族 PS1 也发标记）"
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert not any(b"__ot_inj" in d for d in raws), "外族 shell 不注入脚本"
+    assert not any(b"__ot_pad" in d for d in raws)
+    # 探测行还是要发的（\x15 收纳 + 探测行本身）
+    assert any(b"__OTPROBE__" in d for d in raws)
+
+
+async def test_ensure_integrated_reinjects_matching_shell(monkeypatch):
+    """su - 换壳成 bash 5（Linux root 场景）：探测成功 → 按 bash 注入并更新
+    _shell_kind/_b64flag，_hook_gone 复位，提示符标记到达后返回 True。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._shell_kind = "zsh"
+    w._b64flag = "-D"
+
+    async def _fake_probe():
+        return "bash", "-d"
+    monkeypatch.setattr(w, "_probe_shell_kind", _fake_probe)
+    base = w.session.send_raw
+
+    async def _raw(data):
+        await base(data)
+        if b"__ot_inj" in data:
+            w._ev_prompt.set()   # 模拟注入落地后的提示符重画
+    w.session.send_raw = _raw
+
+    ok = await w._ensure_integrated()
+    assert ok is True
+    assert (w._shell_kind, w._b64flag) == ("bash", "-d")
+    assert w._hook_gone is False
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert any(b"__ot_inj" in d for d in raws)
+
+
+async def test_hook_gone_clears_when_nested_shell_exits(monkeypatch):
+    """嵌套 shell（su -）退出、_open_cmds 清空：_hook_gone 复位，外层
+    hook 的标记/函数从未丢过，健康路径恢复。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._open_cmds[7] = "sudo su -"
+    w._hook_gone = True
+    assert not w._hook_ok()
+
+    await w._on_exec_end(7, 0, "/tmp")
+    assert w._hook_gone is False
+    assert w._hook_ok()
+    # 嵌套 shell 未退出（还有别的命令帧开着）不复位
+    w._hook_gone = True
+    w._open_cmds[8] = "sudo su -"
+    w._open_cmds[9] = "echo hi"
+    await w._on_exec_end(9, 0, "/tmp")
+    assert w._hook_gone is True
+    await w._on_exec_end(8, 0, "/tmp")
+    assert w._hook_gone is False
 
 
 async def test_hooked_flag_threads_through_start_ai(monkeypatch):
