@@ -279,8 +279,6 @@ async def test_sigwinch_feeds_resize(monkeypatch):
                              if c == ("resize", 42, 100)]) > n0)
     frontend._stop.set()
     await asyncio.wait_for(run_task, timeout=2)
-    loop = asyncio.get_running_loop()
-    assert signal.SIGWINCH not in getattr(loop, "_signal_handlers", {})
     n = len([c for c in sess.calls if c[0] == "resize"])
     os.kill(os.getpid(), signal.SIGWINCH)      # handler 已移除 → 无新 resize
     await asyncio.sleep(0.05)

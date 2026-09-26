@@ -43,7 +43,9 @@ class CliCore(PipelineCore):
     """
 
     def __init__(self, cfg: Config, target_name: str,
-                 frontend: "TermFrontend") -> None:
+                 frontend: "TermFrontend | None") -> None:
+        # frontend 允许暂 None（两段构造：先建 core 再建 TermFrontend 后
+        # 回填），但 attach/emit 发生前必须就位
         # 先设 _frontend 再 super().__init__：core __init__ 不碰 frontend，
         # 顺序防未来踩坑（基类构造期若出现 emit 也能找到出口）
         self._frontend = frontend
@@ -168,8 +170,13 @@ class TermFrontend:
     async def _win_reader(self) -> bytes:
         loop = asyncio.get_running_loop()
         ch = await loop.run_in_executor(None, _read_one_key)
-        if not ch or ch == b"\x00":   # None / Ctrl+Z（win32 EOF）→ 停泵
+        if not ch or ch == b"\x1a":   # None / Ctrl+Z（win32 EOF）→ 停泵
             return b""
+        if ch in (b"\x00", b"\xe0"):
+            # 特殊键（方向键/功能键）前缀字节：续读第二字节原样透传，
+            # 绝不能当 EOF（msvcrt 的 EOF 是 \x1a，前缀是 \x00/\xe0）
+            ch2 = await loop.run_in_executor(None, _read_one_key)
+            return ch + (ch2 or b"")
         return ch
 
     # --- 生命周期 ---
@@ -217,11 +224,15 @@ class TermFrontend:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._remove_winch()
             self._remove_stdin_reader()
-            _restore_input(state)
             try:
-                self._writer(b"\r\n")
-            except Exception:  # noqa: BLE001 - 收尾换行失败不掩盖主异常
-                pass
+                _restore_input(state)
+            finally:
+                # 收尾换行必须执行：即使 tcsetattr 抛（fd 失效等）也不能
+                # 跳过，且不掩盖主异常
+                try:
+                    self._writer(b"\r\n")
+                except Exception:  # noqa: BLE001 - 收尾换行失败不掩盖主异常
+                    pass
 
     def _remove_stdin_reader(self) -> None:
         """注销默认 POSIX reader 的 add_reader（同一 loop 内多次连接不残留
@@ -271,8 +282,9 @@ class TermFrontend:
             raise
         except Exception as e:  # noqa: BLE001 - 泵死亡记日志后向外传播：
             # run() 对 _stop/泵任务的等待会感知（finally 还原终端后抛出），
-            # 不允许裸抛打死 run() 的清理路径
-            print(f"[ot] 输入泵异常：{type(e).__name__}: {e}",
+            # 不允许裸抛打死 run() 的清理路径。前缀 \r\n：raw 态无 ONLCR，
+            # 直接打 stderr 会阶梯错位
+            print(f"\r\n[ot] 输入泵异常：{type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             raise
 
