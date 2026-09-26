@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from ..core import ServerMsg  # noqa: F401 —— 再导出（旧 import 路径继续可用）
+
 
 @dataclass
 class ClientMsg:
@@ -29,33 +31,6 @@ class ClientMsg:
     dirty: bool = False            # submit：半行缓冲被转义/控制键清过（历史召回
                                    # 后镜像不可信）→ worker 走 \x03 安全路径不补 \r
     accept: bool = False           # rescue：失败救援卡决策（true = 交给 AI）
-
-
-@dataclass
-class ServerMsg:
-    type: str                      # ready | event | approval | ask_password | ask_host_key | status | closed | usage | cmdset | stage
-    tab_id: str = ""
-    host: str = ""
-    user: str = ""
-    distro: str = ""
-    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_card/final/denied/limit/error
-    command: str = ""              # approval：待审批命令
-    reasons: str = ""
-    label: str = ""
-    message: str = ""
-    text: str = ""
-    model: str = ""                # 当前模型 id（ready）
-    models: list[str] | None = None   # 可切换模型列表（ready）
-    prompt: str = ""               # ready：真实提示符纯文本（OSC 133 B 捕获）
-    risk: str = ""                 # 审批风险级（approval）：high 红框 | normal 蓝框
-    tokens_in: int = 0             # 会话累计输入 token（usage）
-    tokens_out: int = 0            # 会话累计输出 token（usage）
-    estimated: bool = False        # usage：当前累计为 tiktoken 估算口径（前端加 ≈）
-    interactive: int = 0           # ready：hook 集成就绪（1 = AI 可用）
-    state: str = ""                # cmdset:running | done
-    index: int = 0                 # cmdset 当前行号（1 起；encode_server 省略 0）
-    total: int = 0                 # cmdset 总行数
-    auth_kind: str = ""            # ask_password：省略=主机认证；"cmdset"=命令集密码弹窗
 
 
 def parse_client(frame: bytes | str) -> ClientMsg:
