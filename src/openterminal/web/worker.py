@@ -1686,8 +1686,11 @@ class TabWorker:
     async def _ai_flow(self, line: str, hooked: bool = False) -> None:
         try:
             if line.startswith("/"):
-                await self._handle_slash(line.strip())
-                return
+                if await self._handle_slash(line.strip()):
+                    return
+                # 未知斜杠命令（/clearn 打错字、无 +x 的 /x.sh）：不静默吞——
+                # 落回正常任务（与 CLI 语义一致：未知 / 交 LLM 判定），否则
+                # hook 蓝色重绘后用户零反馈（真机：以为终端卡死）
             text = line.lstrip("?").strip() or line
             await self._run_task(text, hooked)
         except asyncio.CancelledError:

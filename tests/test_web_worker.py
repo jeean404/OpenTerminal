@@ -633,6 +633,22 @@ async def test_worker_ai_line_strips_question_prefix(monkeypatch):
     assert ts["text"] == "df -h 是干嘛的"
 
 
+async def test_worker_unknown_slash_falls_through_to_task(monkeypatch):
+    """未知斜杠命令不静默吞：/clearn 打错字、无 +x 的 /x.sh 落回正常任务。
+
+    真机症状：hook 蓝色重绘后零反馈（不执行、不进 AI、不报错），用户以为
+    终端卡死。已知斜杠命令仍被 _handle_slash 消费（见 slash_clear 用例）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    await _install_fake_runner(monkeypatch)
+    _wire_presenter(w)
+
+    w._start_ai("/tmp/no_such_script.sh --prod")
+    await _wait(lambda: w._ai_task is None)
+    ts = _events(sink, "task_start")
+    assert [e["text"] for e in ts] == ["/tmp/no_such_script.sh --prod"]
+
+
 async def test_worker_slash_clear_resets_transcript(monkeypatch):
     """/clear：新 transcript + 状态提示 + session_cleared 事件 + 原生 Ctrl+L 清屏。"""
     w, sink = await _make_worker(monkeypatch)

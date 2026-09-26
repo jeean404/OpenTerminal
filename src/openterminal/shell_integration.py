@@ -181,8 +181,45 @@ __ot_exec_run() {
   __ot_repaint "$d"
   __ot_run "$1"
 }
+# 首词可解析性判定（回显 CMD/AI）：先剥反斜杠转义；$VAR 与 $VAR/剩余 形式先
+# 替换变量值再查——type -t 按字面查 "$EDITOR"、"$JAVA_HOME/bin/java" 恒落空，
+# 会把真命令误送 AI（真机复现）。变量未设值时展开为空 → 判 AI 交模型兜底。
+__ot_resolve() {
+  local w="$1" vn val
+  case "$w" in "\\"*) w="${w#\\}" ;; esac
+  case "$w" in
+    '$'*)
+      vn="${w#\$}"; vn="${vn%%[!A-Za-z0-9_]*}"; val=""
+      [ -n "$vn" ] && val="${!vn-}"
+      w="${val}${w#\$"$vn"}"
+      [ -z "$w" ] && { echo AI; return; } ;;
+  esac
+  case "$(type -t "$w" 2>/dev/null)" in
+    alias|builtin|file|function|keyword) echo CMD ;;
+    *) echo AI ;;
+  esac
+}
+# 高危英文自然语言：首词是「一跑就错/阻塞/静默成功」的裸 builtin（read/wait
+# 阻塞 stdin、clear/exit 退出码 0 连救援卡都不弹），且行内含英文虚词 → 判自然
+# 语言。真命令（read -r line、kill -9 123、set -o vi）不含虚词，不受影响。
+__ot_nl_en() {
+  case "$1" in
+    read|wait|clear|exit|logout|help|test|time|export|source|kill|jobs|history|set|let|dirs|pushd|popd) ;;
+    *) return 1 ;;
+  esac
+  set -f
+  local w
+  for w in $2; do
+    case "$w" in
+      the|a|an|and|or|but|for|to|from|with|into|about|after|before|then|than|me|my|your|our|their|this|that|these|those|please|is|are|was|were|be|will|would|should|could|again|up)
+        set +f; return 0 ;;
+    esac
+  done
+  set +f
+  return 1
+}
 __ot_submit() {
-  local line="$READLINE_LINE" kind t first exp
+  local line="$READLINE_LINE" kind t first exp rest r0 r1
   # readline 裸模式快照：__ot_run 在 eval 前按 __ot_tty_save 恢复正常态（子命令
   # 所需），eval 后必须按本快照还回 readline 裸模式——readline 自认终端仍预置、
   # 不会重新 prep，不还则下个提示符跑在 canonical 态：Tab 补全/↑ 历史/Ctrl+R
@@ -238,43 +275,52 @@ __ot_submit() {
     '?'*) kind=AI ;;
     '!'*) t="${t:1}"; kind=CMD ;;
     '('*) kind=CMD ;;   # 子 shell 开头必是 shell 语法（首词被 ( 截空须直判）
+    '$('*) kind=CMD ;;  # 命令替换开头（$(which py) x.py）：$ 不在操作符集里，落默认分支首词截成 $ 会误 AI
+    '`'*) kind=CMD ;;   # 反引号替换开头同理
+    '{'*) kind=CMD ;;   # 花括号组 { ls; }：首词 { 查不到会被误 AI
+    '#'*) kind=CMD ;;   # 注释行交 shell 按注释 eval（无副作用），不为备注起 AI 任务
     *'|'*|*'&'*|*';'*|*'>'*|*'<'*|*'`'*)
        # 含操作符：首个操作符前的首词须可解析为命令（或赋值）才算命令，
        # 否则是自然语言（"把日志保存>log.txt"、"注意a|b的区别"不再整行执行）
-       first="${t%%[[:space:]]*}"; first="${first%%[;|&()]*}"
+       first="${t%%[[:space:]]*}"; first="${first%%[;|&()<>]*}"
        case "$first" in
+         '') kind=CMD ;;   # 重定向开头（>log / >>a cmd）：剥掉 <> 后首词空，合法 shell 语法
          [A-Za-z_]*=*) kind=CMD ;;
          *)
-           case "$(type -t "$first" 2>/dev/null)" in
-             alias|builtin|file|function|keyword) kind=CMD ;;
-             *) kind=AI ;;
-           esac ;;
+           kind=$(__ot_resolve "$first")
+           if [ "$kind" = CMD ] && __ot_nl_en "$first" "$t"; then kind=AI; fi ;;
        esac ;;
-    *) first="${t%%[[:space:]]*}"; first="${first%%[;|&()]*}"
+    *) first="${t%%[[:space:]]*}"; first="${first%%[;|&()<>]*}"
        # 赋值/环境前缀只在首词是合法标识符时才算命令（FOO=bar / arr[0]=x）：
        # 自然语言里带 "="（"把ll=ls设为别名"）首词非标识符，落回 type -t
        # 判成 AI——原 "*=*" 会把整行当命令执行报 "command not found"
        case "$first" in
          [A-Za-z_]*=*)
            # NAME=value 后还有词 = 环境前缀，仅当后续首词可解析为命令；
-           # 否则是自然语言（裸 "ll=ls -al的别名设置为永久" 由此兜住）
+           # 否则是自然语言（裸 "ll=ls -al的别名设置为永久" 由此兜住）。
+           # 连续多变量前缀（A=1 B=2 cmd）须逐个剥——旧版只看 rest 首词，
+           # r1 取到第二个赋值查不到，真命令被误 AI（真机复现）
            rest="${t#"$first"}"
            rest="${rest#"${rest%%[![:space:]]*}"}"
+           while :; do
+             case "$rest" in
+               [A-Za-z_]*=*)
+                 r0="${rest%%[[:space:]]*}"
+                 rest="${rest#"$r0"}"
+                 rest="${rest#"${rest%%[![:space:]]*}"}" ;;
+               *) break ;;
+             esac
+           done
            if [ -z "$rest" ]; then kind=CMD
            else
-             r1="${rest%%[[:space:]]*}"; r1="${r1%%[;|&()]*}"
-             case "$(type -t "$r1" 2>/dev/null)" in
-               alias|builtin|file|function|keyword) kind=CMD ;;
-               *) kind=AI ;;
-             esac
+             r1="${rest%%[[:space:]]*}"; r1="${r1%%[;|&()<>]*}"
+             kind=$(__ot_resolve "$r1")
            fi ;;
          *)
            # type -t 覆盖 keyword/builtin/alias/function/file——command -v 找不到
            # exit/if/for 等关键字，会把它们误判成自然语言吞掉
-           case "$(type -t "$first" 2>/dev/null)" in
-             alias|builtin|file|function|keyword) kind=CMD ;;
-             *) kind=AI ;;
-           esac ;;
+           kind=$(__ot_resolve "$first")
+           if [ "$kind" = CMD ] && __ot_nl_en "$first" "$t"; then kind=AI; fi ;;
        esac ;;
   esac
   printf '\033]6337;%s;%s;%s\007' "$__ot_i" "$kind" "$t"
@@ -336,10 +382,42 @@ if [[ -z "$__ot_ps1_orig" ]]; then __ot_ps1_orig="$PS1"; fi
 # 单引号里的 \033 会按字面输出，OSC 133 标记永远不出现。必须用 $'...'
 # ANSI-C 引用让 ESC/BEL 在赋值期就变成真实字节。
 PS1=$'%{\e]133;A;'"$__ot_i"$'\a%}[%n@%m %~]# %{\e]133;B;'"$__ot_i"$'\a%}'
+# 首词可解析性判定（回显 CMD/AI）：先剥反斜杠转义；$VAR 与 $VAR/剩余 形式先
+# 替换变量值再查——whence 按字面查 "$EDITOR"、"$JAVA_HOME/bin/java" 恒落空，
+# 会把真命令误送 AI（真机复现）。变量未设值时展开为空 → 判 AI 交模型兜底。
+__ot_resolve() {
+  local w="$1" vn val
+  case "$w" in "\\"*) w="${w#\\}" ;; esac
+  case "$w" in
+    '$'*)
+      vn="${w#\$}"; vn="${vn%%[!A-Za-z0-9_]*}"; val=""
+      [[ -n "$vn" ]] && val="${(P)vn}"
+      w="${val}${w#\$"$vn"}"
+      [[ -z "$w" ]] && { echo AI; return; } ;;
+  esac
+  if whence -w -- "$w" >/dev/null 2>&1; then echo CMD; else echo AI; fi
+}
+# 高危英文自然语言（语义同 bash 侧 __ot_nl_en 注释）：裸 builtin 首词 + 英文虚词
+# → 判自然语言；read -r line / kill -9 123 这类真命令不含虚词，不受影响。
+__ot_nl_en() {
+  case "$1" in
+    read|wait|clear|exit|logout|help|test|time|export|source|kill|jobs|history|set|let|dirs|pushd|popd) ;;
+    *) return 1 ;;
+  esac
+  setopt localoptions noglob
+  local w
+  for w in ${=2}; do
+    case "$w" in
+      the|a|an|and|or|but|for|to|from|with|into|about|after|before|then|than|me|my|your|our|their|this|that|these|those|please|is|are|was|were|be|will|would|should|could|again|up)
+        return 0 ;;
+    esac
+  done
+  return 1
+}
 __ot_submit() {
   # extendedglob：strip 表达式里的 # 量词需要；localoptions 只在本函数内生效
   setopt localoptions extendedglob
-  local line="$BUFFER" kind t first show
+  local line="$BUFFER" kind t first show rest r0 r1
   # POSTEDIT 是持久参数：上一次 accept-line 设的青色重绘会在本次 accept-line
   # 时原样输出（pad/空行/off 早退路径每提交一次就泄一行旧回显，卡片盖住垃圾行）。
   # 先统一清掉，正常路径末尾再按本次 $show 重新赋值。
@@ -379,33 +457,47 @@ __ot_submit() {
         '?'*) kind=AI ;;
         '!'*) t="${t:1}"; kind=CMD; show="$t"; BUFFER="$t"; CURSOR=${#t} ;;
         '('*) kind=CMD ;;   # 子 shell 开头必是 shell 语法（首词被 ( 截空须直判）
+        '$('*) kind=CMD ;;  # 命令替换开头（$(which py) x.py）：$ 不在操作符集里，落默认分支首词截成 $ 会误 AI
+        '`'*) kind=CMD ;;   # 反引号替换开头同理
+        '{'*) kind=CMD ;;   # 花括号组 { ls; }：首词 { 查不到会被误 AI
+        '#'*) kind=CMD ;;   # 注释行交 shell 按注释 eval（无副作用），不为备注起 AI 任务
         *'|'*|*'&'*|*';'*|*'>'*|*'<'*|*'`'*)
           # 含操作符：首个操作符前的首词须可解析为命令（或赋值）才算命令，
           # 否则是自然语言（"把日志保存>log.txt"、"注意a|b的区别"不再整行执行）
-          first="${t%%[[:space:]]*}"; first="${first%%[;|&()]*}"
-          if [[ "$first" == [A-Za-z_]*=* ]]; then kind=CMD
-          elif whence -w -- "$first" >/dev/null 2>&1; then kind=CMD
-          else kind=AI; fi ;;
-        *) first="${t%%[[:space:]]*}"; first="${first%%[;|&()]*}"
+          first="${t%%[[:space:]]*}"; first="${first%%[;|&()<>]*}"
+          if [[ -z "$first" ]]; then kind=CMD   # 重定向开头（>log）：剥掉 <> 后首词空，合法 shell 语法
+          elif [[ "$first" == [A-Za-z_]*=* ]]; then kind=CMD
+          else
+            kind="$(__ot_resolve "$first")"
+            if [[ "$kind" == CMD ]] && __ot_nl_en "$first" "$t"; then kind=AI; fi
+          fi ;;
+        *) first="${t%%[[:space:]]*}"; first="${first%%[;|&()<>]*}"
            # 赋值/环境前缀只在首词是合法标识符时才算命令（FOO=bar / arr[0]=x）：
            # 自然语言里带 "="（"把ll=ls设为别名"）首词非标识符，落回 whence
            # 判成 AI——原 "*=*" 会把整行当命令执行报 "command not found"
            if [[ "$first" == [A-Za-z_]*=* ]]; then
              # NAME=value 后还有词 = 环境前缀，仅当后续首词可解析为命令；
-             # 否则是自然语言（裸 "ll=ls -al的别名设置为永久" 由此兜住）
-             rest="${t#$first}"; rest="${rest##[[:space:]]#}"
-             r1="${rest%%[[:space:]]*}"; r1="${r1%%[;|&()]*}"
-             if [[ -z "$rest" ]] || whence -w -- "$r1" >/dev/null 2>&1; then
-               kind=CMD
+             # 否则是自然语言（裸 "ll=ls -al的别名设置为永久" 由此兜住）。
+             # 连续多变量前缀（A=1 B=2 cmd）须逐个剥——旧版只看 rest 首词，
+             # r1 取到第二个赋值查不到，真命令被误 AI（真机复现）
+             rest="${t#"$first"}"; rest="${rest##[[:space:]]#}"
+             while [[ "$rest" == [A-Za-z_]*=* ]]; do
+               r0="${rest%%[[:space:]]*}"
+               rest="${rest#"$r0"}"; rest="${rest##[[:space:]]#}"
+             done
+             if [[ -z "$rest" ]]; then kind=CMD
              else
-               kind=AI
+               r1="${rest%%[[:space:]]*}"; r1="${r1%%[;|&()<>]*}"
+               kind="$(__ot_resolve "$r1")"
              fi
            # whence -w 覆盖 reserved word/builtin/alias/function/path，且必须按
            # 退出码判：zsh 5.9 对不存在的名字输出非空的"名字: none"，旧的
            # [[ -n "$(...)" ]] 恒真——zsh 侧自然语言曾被整判成 CMD（同 bash
            # 的 *=* 事故）。command -v 找不到 exit/if/for 等关键字，会误判
-           elif whence -w -- "$first" >/dev/null 2>&1; then kind=CMD
-           else kind=AI; fi ;;
+           else
+             kind="$(__ot_resolve "$first")"
+             if [[ "$kind" == CMD ]] && __ot_nl_en "$first" "$t"; then kind=AI; fi
+           fi ;;
       esac ;;
   esac
   printf '\033]6337;%s;%s;%s\007' "$__ot_i" "$kind" "$t"
@@ -540,6 +632,21 @@ function global:__ot_exec_inline([string]$cmd) {
   $global:__ot_skip_d = $true
   $global:LASTEXITCODE = $null
 }
+# 高危英文自然语言（语义同 bash/zsh 侧 __ot_nl_en 注释）：首词是「一跑就错/
+# 阻塞/静默成功」的裸命令且行内含英文虚词 → 自然语言。真命令不含虚词，不受影响。
+function global:Test-OtNlEn([string]$first, [string]$line) {
+  $risk = @('read','wait','clear','exit','logout','help','test','time',
+            'export','source','kill','jobs','history','set','let','dirs')
+  if ($risk -notcontains $first) { return $false }
+  $stop = @('the','a','an','and','or','but','for','to','from','with','into',
+            'about','after','before','then','than','me','my','your','our',
+            'their','this','that','these','those','please','is','are','was',
+            'were','be','will','would','should','could','again','up')
+  foreach ($w in ($line -split '\s+')) {
+    if ($stop -contains $w.ToLower()) { return $true }
+  }
+  return $false
+}
 Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
   $line = $null; $cur = 0
   [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cur)
@@ -589,8 +696,8 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
     return
   }
   $first = ($t -split '[\s;|&()]+')[0]
-  # 关键字（exit/if/for…）与路径/元字符行必须走原生执行：Get-Command 查不到
-  # 关键字，误判 AI 会把 exit 这类行直接吞掉
+  # 关键字（exit/if/for…）必须走原生执行：Get-Command 查不到关键字，误判 AI
+  # 会把 exit 这类行直接吞掉
   $kw = @('exit','quit','if','else','elseif','foreach','for','while','do',
           'switch','try','catch','finally','function','return','break',
           'continue','throw','param','begin','process','end','in')
@@ -600,13 +707,27 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
     return
   }
-  if ($t -match '[=|&;><`{}\(\)]' -or $first -match '[\\/]') {
+  $resolves = ($first -ne '') -and
+              [bool](Get-Command $first -ErrorAction SilentlyContinue)
+  if ($resolves -and (Test-OtNlEn $first $t)) {
+    # 高危英文自然语言（read the log… / clear up the mess…）：首词可解析但
+    # 整句是英文话——送 AI，避免 read/wait 阻塞 stdin、clear/exit 静默成功
+    __ot_osc("6337;$($global:__ot_i);AI;$line")
+    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)
+    __ot_clearline
+    return
+  }
+  if ($resolves) {
     __ot_osc("6337;$($global:__ot_i);CMD;$t")
     __ot_osc("133;C;$($global:__ot_i)")
     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
     return
   }
-  if (Get-Command $first -ErrorAction SilentlyContinue) {
+  # 首词不可解析时的原生执行白名单：shell 语法开头（$var=、(expr)、{组、
+  # `替换）、路径（.\x、/x、C:\x）、剥括号后首词空（(get-date).Day、>log）。
+  # 旧规则「整行任意位置含 =|&;><`{}() 即 CMD」不看首词，英文自然语言
+  # （what does a=b mean、rename "a(1).txt"）会被整行原生执行报错
+  if ($first -eq '' -or $t -match '^\s*[\$({`~]' -or $first -match '[\\/]') {
     __ot_osc("6337;$($global:__ot_i);CMD;$t")
     __ot_osc("133;C;$($global:__ot_i)")
     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()

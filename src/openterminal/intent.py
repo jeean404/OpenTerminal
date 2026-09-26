@@ -13,6 +13,18 @@ from typing import Literal
 
 Intent = Literal["task", "command"]
 
+#: 已知斜杠命令（cli REPL 与 web worker 拦截集）：只有这些才按「斜杠命令」
+#: 直接归 task；其余 `/` 开头行（/usr/bin/x 等绝对路径命令）交 LLM 判定，
+#: 避免把路径命令当斜杠命令吞进 AI 流程
+SLASH_COMMANDS = frozenset({
+    "/help", "/clear", "/model", "/exit", "/quit", "/target", "/system",
+})
+
+
+def is_slash_command(text: str) -> bool:
+    head = text.split(None, 1)[0] if text.split() else ""
+    return head in SLASH_COMMANDS
+
 
 class IntentClassifier:
     def __init__(
@@ -29,8 +41,8 @@ class IntentClassifier:
             return "command"      # 强制命令
         if text.startswith("?"):
             return "task"         # 强制 AI
-        if text.startswith("/"):
-            return "task"         # 斜杠命令：worker 拦截，不进 LLM
+        if text.startswith("/") and is_slash_command(text):
+            return "task"         # 斜杠命令：cli/worker 拦截，不进 LLM
         if self._llm is not None:
             try:
                 return await self._llm(text)

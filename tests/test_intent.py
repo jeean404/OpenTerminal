@@ -43,6 +43,17 @@ async def test_slash_is_task_without_llm():
 
 
 @pytest.mark.asyncio
+async def test_unknown_slash_falls_to_llm():
+    # 绝对路径命令不被斜杠命令分支吞掉（真机：/usr/bin/x 被整行送 AI）
+    calls = []
+    c = IntentClassifier(llm_classify=_llm("command", calls))
+    assert await c.classify("/usr/local/bin/tool --flag") == "command"
+    assert calls == ["/usr/local/bin/tool --flag"]
+    # 带参数的已知斜杠命令仍直接归 task
+    assert await c.classify("/target prod-web") == "task"
+
+
+@pytest.mark.asyncio
 async def test_llm_fallback_command():
     c = IntentClassifier(llm_classify=_llm("command"))
     assert await c.classify("systemctl restart nginx") == "command"
