@@ -1,0 +1,71 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openterminal"
+version = "0.1.0"
+description = "Natural-language terminal agent over local or SSH shells"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Shells",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "deepagents>=0.7.15",
+    "langchain-anthropic>=1.7.2",
+    "asyncssh>=2.24.0",
+    "python-dotenv>=1.0.0",
+    "prompt_toolkit>=3.0.0",
+    "rich>=13.0.0",
+    # 环境设了 SOCKS 代理（ALL_PROXY=socks5://…）时 httpx 构造传输层
+    # 需要 socksio，否则模型调用在客户端初始化即 ImportError
+    "socksio>=1.0.0",
+    # Windows 本地终端走 ConPTY；其它平台不安装
+    "pywinpty>=2.2; sys_platform == 'win32'",
+    # 记住的连接密码存系统凭据库：Windows 凭据管理器 / macOS Keychain /
+    # Linux Secret Service；不可用时自动降级为每次现场输入
+    "keyring>=25.0.0",
+    # Web 终端：FastAPI + uvicorn
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    # 会话 token 消耗估算（网关不回传 usage_metadata 时的兜底口径；
+    # 缺失/离线时代码内退化为字符启发式）
+    "tiktoken>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24", "httpx>=0.27"]
+
+[project.scripts]
+ot = "openterminal.app:main"
+openterminal = "openterminal.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# 内置 Agent Skills 数据（SKILL.md 非代码，需显式声明进包）
+[tool.setuptools.package-data]
+"openterminal.skills" = ["*/SKILL.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+markers = ["ssh: tests requiring a local sshd (deselect with -m 'not ssh')"]

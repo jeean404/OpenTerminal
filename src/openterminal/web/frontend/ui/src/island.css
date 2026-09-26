@@ -1,0 +1,55 @@
+/* 卡片层 island：单卡直挂 xterm decoration host（.ot-card-host 由 app.js
+   打在 decoration 元素上）。只管卡片本体的「实体底色 + 去投影」与折叠态；
+   定位/高度由 xterm decoration 管，这里不再有容器布局。 */
+
+/* 装饰宿主：与 decoration 盒同尺寸，内容超高直接裁（宁可矮不盖网格） */
+.ot-card-host {
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* 卡顶与上方输出行之间的呼吸距：卡顶原贴预留空白首行（= 紧贴上方内容行），
+   视觉上加一段透明顶外边距。_fitNeed 量的是 host.scrollHeight（overflow:hidden
+   下子节点外边距计入），pad 账目自动把这段距垫进预留行，不吃卡底保险行 */
+.ot-card-host > * {
+  margin-top: 10px;
+}
+
+/* 深色主题下实体底色（rgba over --term-bg 预混合）；去投影——浮层感主源 */
+.ablock {
+  background: #101827;
+}
+.scard {
+  background: #191411;
+}
+.dline {
+  background: #101a13;
+}
+
+/* 卡片贴 decoration 盒：高度由内容自撑（app.js 把 host 的 inline height 覆写
+   为 auto，量高/流式补差靠 ResizeObserver 感知内容增长）；夹紧态由 app.js 钉
+   死 inline height + overflow hidden 截断。去投影——浮层感主源 */
+.ablock, .scard, .acard, .aprobe, .dline {
+  box-sizing: border-box;
+  overflow: hidden;
+  box-shadow: none;
+  border-radius: 4px;
+}
+
+/* 分析卡内的模型思考过程（ai_think 流式灰字） */
+.areason {
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.ahead { cursor: pointer; user-select: none; }
+.afold {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+.afold.closed { transform: rotate(-90deg); }

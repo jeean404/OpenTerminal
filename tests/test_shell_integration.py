@@ -1,0 +1,409 @@
+# -*- coding: utf-8 -*-
+"""shell_integration 单测：StreamRouter 分块解析、探测、注入行构造。"""
+import base64
+
+import pytest
+
+from openterminal.shell_integration import (
+    EXEC_PREFIX,
+    PROBE_TAG,
+    StreamRouter,
+    agent_exec_line,
+    build_script,
+    injection_line,
+    injection_lines,
+    history_inject_line,
+    parse_probe,
+    probe_command,
+    strip_ansi,
+    toggle_line,
+)
+
+A = b"\x1b]133;A;1\x07"
+B = b"\x1b]133;B;1\x07"
+C = b"\x1b]133;C;1\x07"
+D = b"\x1b]133;D;0;1;/tmp\x07"
+
+
+def _feed_all(router, data, chunk=1):
+    """按 chunk 大小切块喂入，收集全部事件。"""
+    evs = []
+    for i in range(0, len(data), chunk):
+        evs.extend(router.feed(data[i:i + chunk]))
+    return evs
+
+
+# --- StreamRouter ---
+
+def test_router_prompt_cycle_whole_chunk():
+    r = StreamRouter()
+    r.phase = StreamRouter.INPUT
+    evs = r.feed(A + b"box:~$ " + B)
+    assert ("prompt_start", 1) in evs
+    assert ("prompt", "box:~$") in evs
+    assert any(e[0] == "live" and "box:~$" in e[1] for e in evs)
+
+
+def test_router_exec_cycle_and_phase_switch():
+    r = StreamRouter()
+    r.phase = StreamRouter.INPUT
+    evs = r.feed(C + b"out1" + D + b"tail")
+    kinds = [e[0] for e in evs]
+    assert "exec_start" in kinds
+    assert any(e[0] == "exec" and e[1] == "out1" for e in evs)
+    assert any(e[0] == "exec_end" and e[2] == 0 and e[3] == "/tmp"
+               for e in evs)
+    assert any(e[0] == "live" and e[1] == "tail" for e in evs)
+    assert r.phase == StreamRouter.INPUT
+
+
+def test_router_report_kinds():
+    r = StreamRouter()
+    r.phase = StreamRouter.INPUT
+    evs = r.feed(b"\x1b]6337;1;CMD;echo hi\x07"
+                 b"\x1b]6337;1;AI;\xe7\x9c\x8b\xe7\x9c\x8b\xe7\xa3\x81\xe7\x9b\x98\x07"
+                 b"\x1b]6337;1;EXEC;__ot_off=1\x07")
+    reports = [e for e in evs if e[0] == "report"]
+    assert reports[0] == ("report", 1, "CMD", "echo hi")
+    assert reports[1][2] == "AI" and "磁盘" in reports[1][3]
+    assert reports[2] == ("report", 1, "EXEC", "__ot_off=1")
+
+
+def test_router_split_across_chunks_every_boundary():
+    """标记序列在任意字节边界切开都能正确解析（分块传输核心保障）。"""
+    data = A + b"ps> " + B + C + b"hello" + D
+    whole = _feed_all(StreamRouter(), data, chunk=len(data))
+    for size in (1, 2, 3, 5, 7):
+        r = StreamRouter()
+        r.phase = StreamRouter.INPUT
+        evs = _feed_all(r, data, chunk=size)
+        marks = [e for e in evs if e[0] != "live" and e[0] != "exec"]
+        assert marks == [e for e in whole if e[0] != "live" and e[0] != "exec"]
+        # 逐字节喂时合并不跨调用：拼接后内容一致
+        assert "".join(e[1] for e in evs if e[0] == "live") == \
+               "".join(e[1] for e in whole if e[0] == "live")
+        assert "".join(e[1] for e in evs if e[0] == "exec") == "hello"
+
+
+def test_router_swallow_phase_drops_data_keeps_marks():
+    r = StreamRouter()          # 默认 SWALLOW：注入回显丢弃但标记仍解析
+    evs = r.feed(b"iex ...\r\n" + A)
+    assert not any(e[0] in ("live", "exec") for e in evs)
+    assert ("prompt_start", 1) in evs
+    # A 之后相位已转 INPUT：提示符文本正常放行（前端迷你终端要显示它）
+    evs = r.feed(b"PS> " + B)
+    assert ("prompt", "PS>") in evs
+    assert any(e[0] == "live" and "PS>" in e[1] for e in evs)
+
+
+def test_router_osc_st_terminator_and_csi_passthrough():
+    r = StreamRouter()
+    r.phase = StreamRouter.INPUT
+    evs = r.feed(b"\x1b]133;C;7\x1b\\out\x1b]133;D;1;7;\x07")
+    assert ("exec_start", 7) in evs
+    assert any(e[0] == "exec_end" and e[1] == 7 and e[2] == 1 for e in evs)
+    # CSI（颜色等）原样放行给前端渲染
+    evs = r.feed(b"\x1b[31mred\x1b[0m")
+    live = "".join(e[1] for e in evs if e[0] == "live")
+    assert "\x1b[31m" in live and "red" in live
+
+
+def test_router_cwd_with_semicolon():
+    r = StreamRouter()
+    r.phase = StreamRouter.EXEC
+    evs = r.feed(b"\x1b]133;D;2;1;/weird;path\x07")
+    e = [x for x in evs if x[0] == "exec_end"][0]
+    assert e[2] == 2 and e[3] == "/weird;path"
+
+
+def test_router_max_osc_guard():
+    r = StreamRouter()
+    r.phase = StreamRouter.INPUT
+    evs = r.feed(b"\x1b]" + b"x" * (StreamRouter.MAX_OSC + 10))
+    # 未终结 OSC 超限后按普通数据放行，不吞流
+    assert "".join(e[1] for e in evs if e[0] == "live").startswith("\x1b]")
+
+
+def test_router_utf8_split_mid_char():
+    r = StreamRouter()
+    r.phase = StreamRouter.INPUT
+    data = "中文输出".encode()
+    evs = _feed_all(r, data, chunk=1)
+    assert "".join(e[1] for e in evs if e[0] == "live") == "中文输出"
+
+
+# --- 探测 ---
+
+def test_parse_probe_bash_zsh_ps():
+    assert parse_probe(f"noise\n{PROBE_TAG}bash5.2.15|-d\n") == ("bash", "-d")
+    # $BASH_VERSION 真实值带括号/连字符（如 5.1.8(1)-release）：此前字符类
+    # 在 ( 截断导致整体不匹配，所有 bash 主机静默回退批处理模型
+    assert parse_probe(f"{PROBE_TAG}bash5.1.8(1)-release|-d") == ("bash", "-d")
+    assert parse_probe(f"{PROBE_TAG}bash3.2|-d") == (None, "-d")   # macOS 老 bash
+    assert parse_probe(f"{PROBE_TAG}zsh5.9|-D") == ("zsh", "-D")
+    assert parse_probe(f"{PROBE_TAG}powershell|ok") == ("powershell", "-d")
+    assert parse_probe(f"{PROBE_TAG}none|none") == (None, "-d")
+    assert parse_probe("") == (None, "-d")
+    assert parse_probe("command not found") == (None, "-d")
+
+
+def test_probe_command_families():
+    assert PROBE_TAG in probe_command("windows")
+    assert "Get-Module PSReadLine" in probe_command("windows")
+    p = probe_command("linux")
+    assert PROBE_TAG in p and "BASH_VERSION" in p and "-D" in p
+
+
+# --- 注入行构造 ---
+
+def test_injection_line_posix_and_ps():
+    # 分片注入：每片是完整 shell 行（\r 结尾），末片 eval 还原执行
+    chunks = injection_lines("bash", 3, "-d")
+    assert all(c.endswith(b"\r") for c in chunks)
+    assert all(len(c) < 1024 for c in chunks), "单片不得超 tty canonical 缓冲"
+    assert chunks[-1].decode().startswith("eval")
+    b64 = "".join(
+        c.decode().split("'")[1] for c in chunks[:-1])
+    script = base64.b64decode(b64).decode()
+    assert "__ot_i=3" in script and "bind -x" in script
+
+    # 单行版本内容与分片一致（拼接后等价）
+    line = injection_line("bash", 3, "-d")
+    assert line == b"".join(chunks)
+
+    line = injection_line("powershell", 1)
+    b64 = line.decode().split("FromBase64String('")[1].split("'")[0]
+    script = base64.b64decode(b64).decode()
+    assert "__ot_i = 1" in script and "Set-PSReadLineKeyHandler" in script
+
+
+def test_agent_exec_line_roundtrip():
+    cmd = 'echo "q\'uote $x" && ls | grep a\nsecond line'
+    line = agent_exec_line("bash", cmd, "-D")
+    assert line.startswith(EXEC_PREFIX.encode()) and line.endswith(b"\r")
+    b64 = line.decode()[len(EXEC_PREFIX):].split("echo ")[1].split(" |")[0]
+    assert base64.b64decode(b64).decode() == cmd
+
+    line = agent_exec_line("powershell", cmd)
+    b64 = line.decode().split("FromBase64String('")[1].split("'")[0]
+    assert base64.b64decode(b64).decode() == cmd
+
+
+def test_toggle_line_scopes():
+    assert toggle_line("bash", True) == (EXEC_PREFIX + "__ot_off=0\r").encode()
+    assert toggle_line("bash", False) == (EXEC_PREFIX + "__ot_off=1\r").encode()
+    # PS 赋值必须显式 $global:（handler 作用域）
+    assert b"$global:__ot_off=1" in toggle_line("powershell", False)
+
+
+def test_build_script_instance_substitution():
+    for shell in ("bash", "zsh", "powershell"):
+        s = build_script(shell, 7)
+        assert "@@INST@@" not in s
+        assert "7" in s
+
+
+def test_build_script_unknown_shell():
+    with pytest.raises(KeyError):
+        build_script("fish", 1)
+
+
+# --- 单管线 §5.6：历史自然回滚（clear=0）+ 青色输入回显 ---
+
+def test_build_script_clear_flag_off():
+    """__ot_clear=0：命令历史自然累积进唯一 xterm 的 scrollback，不再每命令清屏。"""
+    for shell in ("bash", "zsh"):
+        s = build_script(shell, 1)
+        assert "__ot_clear=0" in s
+        assert "__ot_clear=1" not in s
+    ps = build_script("powershell", 1)     # build_script 返回 str
+    assert "$global:__ot_clear = 0" in ps
+    assert "__ot_clear = 1" not in ps and "__ot_clear=1" not in ps
+
+
+def test_bash_script_cyan_repaint_default_ps1():
+    """bash：PS1 不配色（提示符用终端默认前景白，对齐 main 分支），提交后
+    __ot_repaint 重绘命令（readline 不支持输入中着色）；颜色参数化，缺省青。"""
+    s = build_script("bash", 1)
+    ps1 = s[s.index("PS1="):s.index("__ot_repaint")]
+    assert "38;5;51" not in ps1             # 提示符不再青色
+    assert "__ot_repaint" in s              # 提交后重绘函数
+    assert r"\033[38;5;%sm%s\033[0m\n" in s   # 颜色由 $2 参数化
+    assert "${2:-51}" in s                  # 缺省青（工具/用户命令）
+
+
+def test_zsh_script_cyan_postedit_default_ps1():
+    """zsh：PS1 不配色 + POSTEDIT 提交后重绘；颜色按 kind 参数化。"""
+    s = build_script("zsh", 1)
+    ps1 = s[s.index("PS1="):s.index("__ot_submit")]
+    assert "38;5;51" not in ps1
+    assert "POSTEDIT=" in s
+    assert 'col=51' in s and '[[ "$kind" == AI ]] && col=33' in s
+
+
+def test_bash_ai_branch_repaints_blue():
+    """Workbench 观感：用户自然语言行蓝色重绘（38;5;33），命令保持青。"""
+    s = build_script("bash", 1)
+    ai = s[s.index("if [ \"$kind\" = AI ]"):]
+    assert '__ot_repaint "$t" 33' in ai[:ai.index("fi")]
+    # EXEC 注入行仍走缺省青
+    assert "__ot_repaint \"$d\"" in s
+
+
+def test_bash_ai_and_exec_branches_repaint_cyan():
+    """M1：bash AI 行与 EXEC 注入行都经 __ot_repaint 青色重绘——默认色回显
+    与 __ot_exec__ 前缀/base64 包装不再残留屏上（此前 AI 分支只 printf 换行）。"""
+    s = build_script("bash", 1)
+    ai = s[s.index("if [ \"$kind\" = AI ]"):]
+    assert "__ot_repaint" in ai[:ai.index("fi")]
+    assert "__ot_exec_run" in s and "__ot_repaint" in s[s.index("__ot_exec_run"):]
+    # base64 包装注入体在回显前解码回原命令
+    assert "'eval \"$(echo '*" in s and "base64 -d" in s
+    assert "export -f __ot_prompt_cmd __ot_run __ot_submit __ot_repaint __ot_exec_run" in s
+
+
+def test_bash_script_restores_termios_for_child_shells():
+    """真机「sudo su - 后按键不可见」：bind -x 回调内 eval 自执行命令，bash 不
+    恢复 termios，su/ssh 子 shell 继承 readline 裸模式（-echo -icanon -isig）。
+    脚本须注入时检出 -echo 先 stty sane 自愈并快照，两处 eval 前按快照恢复。"""
+    s = build_script("bash", 1)
+    assert '__ot_tty_save=$(stty -g 2>/dev/null)' in s
+    assert '*" -echo "*) stty sane' in s
+    restore = '[ -n "$__ot_tty_save" ] && stty "$__ot_tty_save" 2>/dev/null'
+    assert s.count(restore) == 2, "__ot_run 与 off 路径各一处 eval 前恢复"
+    # 恢复必须落在 eval 之前（子 shell 起步即正常 tty）
+    for frag in ("__ot_run", ):
+        body = s[s.index(frag + "() {"):]
+        body = body[:body.index("eval ")]
+        assert restore in body
+    assert 'export __ot_tty_save' in s
+
+
+def test_zsh_ai_branch_postedit_and_exec_decode():
+    """M1：zsh AI 分支同样 POSTEDIT 青色重绘；EXEC 注入体显示前解码。"""
+    s = build_script("zsh", 1)
+    assert 'if [[ "$kind" == AI ]]; then' in s
+    assert "POSTEDIT=" in s[s.index('if [[ "$kind" == AI ]]; then') - 200:]
+    assert "show=" in s and 'base64 -d' in s   # EXEC 包装解码为可读命令
+
+
+def test_powershell_script_cyan():
+    """PowerShell：PSReadLine 输入即时青色 + prompt 函数提示符不配色
+    （默认前景白，对齐 main 分支）。"""
+    s = build_script("powershell", 1)
+    assert "Set-PSReadLineOption" in s and "#39c5cf" in s
+    prompt = s[s.index("function global:prompt"):]
+    assert "38;5;51" not in prompt[:prompt.index("}", prompt.index("return"))]
+
+
+# --- strip_ansi ---
+
+def test_strip_ansi():
+    assert strip_ansi("\x1b[31mred\x1b[0m") == "red"
+    assert strip_ansi("\x1b]133;A;1\x07ps> \x1b]133;B;1\x07") == "ps> "
+    assert strip_ansi("\x1b]0;title\x1b\\text") == "text"
+
+
+# --- history_inject_line ---
+
+def test_history_inject_line_bash():
+    line = history_inject_line("bash", ["ls -la", "ls -la", "df -h"])
+    assert line.endswith(b"\r")
+    b64 = line.decode().split("echo ")[1].split(" |")[0]
+    # 连续重复去重
+    assert base64.b64decode(b64).decode() == "ls -la\ndf -h"
+    assert b"history -r" in line
+    assert b'history -d "$HISTCMD"' in line   # 注入行自身不入历史
+
+
+def test_history_inject_line_zsh():
+    line = history_inject_line("zsh", ["ls"])
+    assert line.endswith(b"\r")
+    assert b"fc -R" in line
+
+
+def test_history_inject_line_powershell():
+    line = history_inject_line("powershell", ["Get-ChildItem"])
+    assert line.endswith(b"\r")
+    assert b"HistorySavePath" in line
+    b64 = line.decode().split("FromBase64String('")[1].split("'")[0]
+    assert base64.b64decode(b64).decode() == "Get-ChildItem"
+
+
+def test_history_inject_line_empty():
+    assert history_inject_line("bash", []) == b""
+    assert history_inject_line("bash", ["", "  "]) == b""
+
+
+def test_is_internal_line_filters_injection_junk():
+    """注入内部行判定：分片装配/回显包装不入历史，普通命令不误杀。"""
+    from openterminal.shell_integration import is_internal_line
+
+    assert is_internal_line("__ot_inj='X19vdF9pPTEK'")
+    assert is_internal_line('__ot_inj="$__ot_inj"\'MSDK…\'')
+    assert is_internal_line('eval "$(echo "$__ot_inj" | base64 -d)"')
+    assert is_internal_line("__ot_exec__ ls -la")
+    assert is_internal_line("  __ot_pad 3")
+    assert not is_internal_line("df -h")
+    assert not is_internal_line('echo __ot_inj 是变量名')
+
+
+def test_script_tail_absorbs_chunk_splice():
+    """分片二次追加（__ot_inj=B+C1）不得改写 export -f 名单。
+
+    实测根因：C1 解码恰以 ot_prompt_cmd 开头（__ 切在 C0/C1 边界），追加后
+    export 行末名被拼成假函数名，shell 报 "export: ... not a function"。
+    尾部 : __ot_script_end 把拼接点吸进无害参数。该性质与脚本字节布局无关
+    （旧实现钉死 b64[700:1400] 的巧合边界，脚本一改即失效）：直接用实测的
+    恶意断片做追加体验证。
+    """
+    s = build_script("bash", 1).encode()
+    assert s.endswith(b": __ot_script_end")
+    hostile = (b"ot_prompt_cmd __ot_run __ot_submit __ot_repaint __ot_exec_run\n"
+               b"echo spliced\n: __ot_script_end")
+    t = s + hostile
+    exp = [ln for ln in t.splitlines() if ln.startswith(b"export -f")]
+    assert exp == [
+        b"export -f __ot_prompt_cmd __ot_run __ot_submit __ot_repaint __ot_exec_run"]
+    # 拼接点落在吸收行：假函数名只作为 : 的参数，不产生可执行行
+    assert b": __ot_script_endot_prompt_cmd" in t
+    for ln in t.splitlines():
+        if ln.lstrip().startswith(b"#"):
+            continue
+        assert b"__ot_exec_runot_prompt_cmd" not in ln
+
+
+def test_bash_pad_branch_erases_echo_line():
+    """bash pad 分支不得上移擦行：bash 5.x 的 readline 进 bind -x 回调前已
+    自行发 \\r\\x1b[K 擦掉「提示符+__ot_pad N」回显行、光标停在回显行行首
+    （真机 CentOS bash 5.1.8 字节级实测），分支再 CUU 上移一行必然把上一行
+    内容吃掉（真机：AI 蓝色提交行/命令输出行被 pad 擦掉 = 「中文提交行消失」
+    根因）。分支只补 N 个换行：光标行（readline 已自清）+ N 个换行恰得 N 行
+    占位。zsh 的 zle 进 widget 前不换行、无自擦，zsh 分支保持同行 \\r\\033[2K
+    （parity 基准）。"""
+    from openterminal.shell_integration import _BASH_SCRIPT, _ZSH_SCRIPT
+    branch = _BASH_SCRIPT.split("'__ot_pad '*)", 1)[1].split("return 0 ;;", 1)[0]
+    assert "\\033[1A\\033[2K" not in branch, \
+        "bash pad 分支不得 CUU 上移擦行（bash 5.x 光标在回显行上，上移吃掉上一行）"
+    assert "\\n%.0s" in branch, "bash pad 分支缺 N 个换行占位"
+    repaint = _BASH_SCRIPT.split("__ot_repaint() {", 1)[1].split("__ot_run() {", 1)[0]
+    assert "\\033[1A\\033[2K" in repaint, "bash 重绘缺上移擦回显行（真机白回显行根因）"
+    assert "COLUMNS" in repaint and "for ((i=0; i<k; i++))" in repaint, \
+        "bash 重绘缺折行循环擦除（真机长命令白漏半行根因）"
+    assert "same" in repaint, "bash 重绘缺同行擦除模式（真机连按 Enter 吃横幅根因）"
+    empty = _BASH_SCRIPT.split("if [ -z \"$t\" ]; then", 1)[1].split("return 0", 1)[0]
+    assert "same" in empty, "空行分支未按真空行/空白行分流擦除模式"
+    zbranch = _ZSH_SCRIPT.split("'__ot_pad '*)", 1)[1].split("zle .accept-line", 1)[0]
+    assert "\\r\\033[2K" in zbranch, "zsh 分支擦行是 parity 基准，不得回退"
+
+
+def test_bash_run_restores_readline_tty_mode():
+    """__ot_run eval 后必须还回 readline 裸模式快照：eval 前按 __ot_tty_save 恢复
+    正常态供子命令，eval 后不还裸模式则下个提示符跑 canonical——Tab 补全/↑ 历史
+    /Ctrl+R 字面回显全失效（真机：首条命令后 ↑ 打出 ^[[A）。"""
+    from openterminal.shell_integration import _BASH_SCRIPT
+    run = _BASH_SCRIPT.split("__ot_run() {", 1)[1].split("__ot_exec_run() {", 1)[0]
+    assert "__ot_rl_tty" in run, "__ot_run 缺 readline 裸模式还原"
+    assert run.index('eval "$1"') < run.index('__ot_rl_tty')
+    submit = _BASH_SCRIPT.split("__ot_submit() {", 1)[1].split("__ot_run(", 1)[0]
+    assert "__ot_rl_tty=$(stty -g" in submit, "__ot_submit 缺裸模式快照"

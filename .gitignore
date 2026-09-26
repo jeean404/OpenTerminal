@@ -1,0 +1,37 @@
+.venv/
+.venv-win/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+.claude/
+.gstack/
+.codegraph/
+.tmp/
+*.stackdump
+scripts/t[0-9]_*.png
+
+# dev server 日志
+ot_web_debug.log*
+
+# 前端 island 构建依赖
+node_modules/
+
+# superpowers 调试工作区(计划台账/评审包/复现探针,本地临时)
+.superpowers/
+
+# 本地数据:误生成在仓库根目录的连接库(真实数据在 ~/.openterminal)
+connections.db
+connections.toml
+
+# 内部开发文档与脚本(本地保留,不进开源仓库)
+/WEB_UI_TEST_GUIDE.md
+/docs/superpowers/
+/docs/prototype/
+/docs/design-single-pipeline.md
+/scripts/smoke_*.py
+/scripts/run_main_worktree_web.py
+/.mcp.json
