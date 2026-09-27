@@ -10,6 +10,7 @@ writer（保持与 PTY 字节串行，Review Focus #3）；_make_renderer 把假
 接到同一个 sink，console 输出与字节流在断言里合流可见。
 """
 import asyncio
+import re
 import time
 from io import StringIO
 
@@ -177,15 +178,71 @@ async def test_token_stream_appends():
     assert sink.getvalue() == "hello"       # 流式拼接，无重复换行
 
 
+async def test_token_stream_multiline_translates_newlines():
+    """多行 token 的 \n 须翻成 \r\n：raw 态终端无 ONLCR，裸 \n 会阶梯错位。"""
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_token", text="row1\nrow2\n| 1 | a |"))
+    out = sink.getvalue()
+    assert out == "row1\r\nrow2\r\n| 1 | a |"
+    assert "\n" not in out.replace("\r\n", "")   # 无裸 \n 残留
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(line: str) -> str:
+    return _ANSI_RE.sub("", line)
+
+
 async def test_think_stream_dim():
     r, sink, _ = _make_renderer()
     await r.render(_ev("ai_think", text="想想"))
     out = sink.getvalue()
-    assert "想想" in out and "\x1b[2m" in out and "\x1b[22m" in out
+    assert "💭 思考" in out                    # 框顶标题
+    assert "\x1b[34m" in out                   # 蓝色边框（现有色板）
     await r.render(_ev("ai_collapse", command="ls"))
     out = sink.getvalue()
-    assert "思考 1 行" in out               # 思考段收束定格
-    assert "ls" in out                      # 命令面板
+    assert "想想" in out and "\x1b[2m" in out and "\x1b[22m" in out
+    assert "思考 1 行" in out                   # 思考段收束定格
+    assert "ls" in out                          # 命令面板
+    assert "╰" in out                          # 框底收齐
+
+
+async def test_think_box_lines_full_width():
+    """框内每行 pad 到 console.width：左右边框始终对齐成矩形。"""
+    from openterminal.term_frontend import _display_width
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_think", text="第一行"))
+    await r.render(_ev("ai_think", text="，第二行更长一点\n"))
+    await r.render(_ev("ai_think", text="尾巴没换行"))
+    await r.render(_ev("ai_collapse", command=""))
+    box = [l for l in sink.getvalue().split("\r\n")
+           if _plain(l)[:1] in ("╭", "│", "╰")]     # 只数框线（摘要行在外）
+    assert len(box) >= 4                          # 顶 + 2 内容 + 底
+    assert {_display_width(_plain(l)) for l in box} == {100}
+
+
+async def test_think_box_wraps_long_line():
+    """超内宽行软折行（CJK 计 2 列），折后仍封右边框。"""
+    from openterminal.term_frontend import _display_width
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_think", text="汉" * 80 + "\n"))
+    await r.render(_ev("ai_collapse", command=""))
+    lines = [l for l in sink.getvalue().split("\r\n") if l]
+    content = [_plain(l) for l in lines if _plain(l).startswith("│")]
+    assert len(content) >= 2                   # 160 列 > 内宽 96 → 折行
+    assert all(_display_width(l) == 100 for l in content)
+
+
+async def test_think_box_closed_by_token_without_summary():
+    """token 打断思考：关框收底但不打 `… 思考 N 行`（摘要归 ai_collapse）。"""
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_think", text="想一半\n"))
+    await r.render(_ev("ai_token", text="正文来了"))
+    out = sink.getvalue()
+    assert "╰" in out                          # 框已收底
+    assert "思考" not in _plain(out).replace("💭 思考", "")  # 无摘要行
+    assert "正文来了" in out
 
 
 async def test_erase_before_bytes():

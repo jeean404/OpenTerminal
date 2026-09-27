@@ -137,6 +137,33 @@ def test_ai_task_inline_stream_and_summary():
         app.close()
 
 
+# --- 2b. 多行流式无阶梯 + 思考框收齐 ---
+
+
+@_requires_hook_classify
+def test_ai_multiline_no_staircase():
+    """流式 \n 须翻 \r\n（raw 态无 ONLCR）+ 思考段走蓝色边框。
+
+    屏字节流是原始累积（非渲染网格）：阶梯错位会留下裸 \n（"row1\nrow2"），
+    修复后只应有 "row1\r\nrow2"；思考框断言顶/底收齐（╭/╰）且框内行
+    落在行首（\r\n 后紧跟边框色 │）。"""
+    app = _spawn("think")
+    try:
+        app.send(b"please think and stream a table\r")
+        app.expect("row1", timeout=30)
+        app.expect(re.escape("| 1 | a | b |"), timeout=30)
+        app.expect("总结", timeout=30)
+        raw = app.screen()
+        assert "row1\r\nrow2" in raw               # 换行已翻 \r\n
+        assert "row1\nrow2" not in raw.replace("\r\n", "\x00")  # 无裸 \n
+        assert "💭 思考" in raw and "╰" in raw     # 思考框开且收底
+        assert "\r\n\x1b[34m│" in raw              # 框内行从行首落笔
+        # token 打断思考 → 关框无摘要行（摘要归 ai_collapse，同原行为）
+        assert "思考 " not in raw.replace("💭 思考", "")
+    finally:
+        app.close()
+
+
 # --- 3. ? / ! 前缀 ---
 
 @_requires_hook_classify

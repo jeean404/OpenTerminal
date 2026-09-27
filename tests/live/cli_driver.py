@@ -114,6 +114,15 @@ def make_scripted_runner(scenario: str, core: "CliCore") -> type:
                     self._emit("token", tok)
                     await asyncio.sleep(0.15)
                 return [TaskEvent("final", text="hello world\n\n演示任务完成")]
+            if scenario == "think":
+                # 思考框 + 多行 token：钉死流式 \n 须翻 \r\n（raw 态无
+                # ONLCR，裸 \n 会阶梯错位）——屏行起始列与框收底都在
+                # test_ai_multiline_no_staircase 里断言
+                self._emit("think", "先想想\n再想想")
+                await asyncio.sleep(0.15)
+                self._emit("token", "row1\nrow2\n| 1 | a | b |")
+                await asyncio.sleep(0.15)
+                return [TaskEvent("final", text="思考与多行流式收尾")]
             if scenario == "approval":
                 # 一轮就挂起审批（真实链：HumanInTheLoopMiddleware 中断 →
                 # interrupt_payload 暴露 action_requests）
@@ -165,7 +174,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", default="local")
     ap.add_argument("--scenario", default="none",
-                    choices=["echo", "approval", "rescue", "slow", "none"])
+                    choices=["echo", "think", "approval", "rescue", "slow",
+                             "none"])
     ap.add_argument("--text", default="", help="预留（当前场景不消费）")
     args = ap.parse_args()
     try:

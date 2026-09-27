@@ -393,6 +393,33 @@ def _clip_display(s: str, max_cols: int) -> str:
     return s
 
 
+def _display_width(s: str) -> int:
+    """显示列宽（CJK 全角计 2 列；ambiguous 计 1 列，与 rich 面板一致）。"""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in s)
+
+
+def _wrap_display(s: str, max_cols: int) -> list[str]:
+    """按显示列宽软折行（CJK 全角计 2 列），思考框行内容用。
+
+    max_cols ≤ 0 时原样单行返回（窄终端护栏由调用方兜底）。"""
+    import unicodedata
+    if max_cols <= 0:
+        return [s]
+    lines: list[str] = []
+    cur, w = "", 0
+    for ch in s:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > max_cols:
+            lines.append(cur)
+            cur, w = "", 0
+        cur += ch
+        w += cw
+    lines.append(cur)
+    return lines
+
+
 class _StatusLine:
     """任务期单行状态（转轮 + 计时 + token 计数）。
 
@@ -508,7 +535,8 @@ class CliRenderer:
     - 面板/单行文本经注入的 rich console 输出；_print 会先擦状态行再写、
       写完重画（若状态行还活着），防止 rich 输出与状态行互相覆盖。
     - 流式（ai_token/ai_think）与状态行不经 console：增量文本直接经
-      frontend 的 writer 追加（think 用暗灰 ANSI \\x1b[2m…\\x1b[22m 包裹）。
+      frontend 的 writer 追加（think 行缓冲后走蓝色 ROUNDED 边框逐行
+      落笔——rich Panel 同款视觉；窄终端退回暗灰裸流）。
     - ai_boundary → 立即 ``feed_msg(boundary_settled)``（零占位协议），
       padded/new_session 忽略；decide/task_fail/rescue_decide 是
       web 前端本地合成的事件词汇（core 不发），渲染器按 spec 词汇表
@@ -516,6 +544,8 @@ class CliRenderer:
     - approval/rescue/ask_password/ask_host_key 渲染后进入本地截获态
       （frontend.capture.enter_*，按键语义由 _CaptureLayer 承接）。
     """
+
+    _THINK_BORDER = "\x1b[34m"   # 思考框边框色（蓝，对齐现有色板）
 
     def __init__(self, core, console, frontend=None):
         # frontend 允许缺省：取 core._frontend（CliCore 两段构造回填）；
@@ -528,6 +558,8 @@ class CliRenderer:
             else None
         self._think_open = False   # 暗灰思考流开着（未收束）
         self._think_text = ""      # 当前思考段累计文本（定格行数的事实源）
+        self._think_buf = ""       # 行缓冲残余半行（框内逐行落笔用）
+        self._think_box = False    # 本思考段走边框（窄终端退回裸暗灰流）
         self._token_open = False   # 常规流式行开着（写过未换行）
         self._last_summary = ""    # final 与 ai_card 同文去重（对齐 web store）
 
@@ -682,8 +714,11 @@ class CliRenderer:
         if not text or self._frontend is None:
             return
         if self._think_open:
-            # 暗灰思考流开着被 token 打断：先换行收束（摘要由 ai_collapse 定格）
-            self._stream_write("\r\n")
+            # 思考流开着被 token 打断：关框收底（摘要由 ai_collapse 定格）
+            if self._think_box:
+                self._close_think_box()
+            else:
+                self._stream_write("\r\n")
             self._think_open = False
             self._think_text = ""
         elif self.status is not None and self.status.active:
@@ -692,33 +727,84 @@ class CliRenderer:
         self._stream_write(text)
 
     def _on_ai_think(self, text: str) -> None:
-        """暗灰流式：\\x1b[2m…\\x1b[22m 包裹增量文本直接经 writer 追加。"""
+        """思考流式：蓝色 ROUNDED 边框逐行呈现（窄终端退回裸暗灰流）。
+
+        行缓冲后整行落笔（对齐 rich Panel 视觉）：凑齐 \\n 才出框内行，
+        因此每行都能 pad 到内宽再封右边框；残余半行由 _close_think_box 冲。"""
         if not text or self._frontend is None:
             return
         if self._token_open:
             self._stream_write("\r\n")
             self._token_open = False
-        elif self.status is not None and self.status.active:
-            self.status.erase()   # 状态行让位：思考流从其行首起写
         if not self._think_open:
             self._think_open = True
             self._think_text = ""
+            self._think_buf = ""
+            self._think_box = self._console.width >= 24   # 窄终端护栏
+            if self._think_box:
+                self._emit_think_line(self._think_top())
         self._think_text += text
-        self._stream_write(f"\x1b[2m{text}\x1b[22m")
+        if self._think_box:
+            self._think_buf += text.replace("\r\n", "\n")
+            while "\n" in self._think_buf:
+                line, self._think_buf = self._think_buf.split("\n", 1)
+                self._emit_think_content(line)
+        else:
+            if self.status is not None and self.status.active:
+                self.status.erase()   # 状态行让位：思考流从其行首起写
+            self._stream_write(f"\x1b[2m{text}\x1b[22m")
+
+    def _think_top(self) -> str:
+        """框顶 `╭─ 💭 思考 ────╮`（蓝色，总宽 = console.width）。"""
+        w = self._console.width
+        title = "💭 思考"
+        # ╭─ + title + 空格 + dashes + ╮ = w
+        dashes = max(1, w - _display_width(title) - 5)
+        return f"{self._THINK_BORDER}╭─ {title} " + "─" * dashes \
+            + f"╮\x1b[0m"
+
+    def _emit_think_line(self, raw: str) -> None:
+        """框线出笔：状态行让位（防重画嵌进框内行间）后整行落笔。"""
+        if self.status is not None and self.status.active:
+            self.status.erase()
+        self._stream_write(raw + "\r\n")
+
+    def _emit_think_content(self, line: str) -> None:
+        """框内一行：│ + 暗灰内容（软折行、pad 到内宽）+ │。"""
+        inner = max(1, self._console.width - 4)
+        for seg in _wrap_display(line, inner):
+            pad = " " * max(0, inner - _display_width(seg))
+            self._emit_think_line(
+                f"{self._THINK_BORDER}│\x1b[0m \x1b[2m{seg}{pad}\x1b[22m"
+                f" {self._THINK_BORDER}│\x1b[0m")
+
+    def _close_think_box(self) -> None:
+        """思考框收底：冲残余半行 + 底边（`… 思考 N 行` 摘要归调用方）。"""
+        if self._think_buf:
+            buf, self._think_buf = self._think_buf, ""
+            self._emit_think_content(buf)
+        self._emit_think_line(
+            f"{self._THINK_BORDER}╰" + "─" * max(1, self._console.width - 2)
+            + f"╯\x1b[0m")
 
     def _end_think(self) -> None:
         """思考段收束：定格一行摘要 `… 思考 N 行`（spec ai_collapse 映射）。"""
         if self._frontend is None:
             self._think_open = False
             self._think_text = ""
+            self._think_buf = ""
             return
         if self._think_open:
-            self._stream_write("\r\n")
+            if self._think_box:
+                self._close_think_box()
+            else:
+                self._stream_write("\r\n")
             self._think_open = False
         n = len([l for l in self._think_text.split("\n") if l.strip()])
         if n:
             self._stream_write(f"… 思考 {n} 行\r\n")
         self._think_text = ""
+        self._think_buf = ""
 
     def _on_ai_collapse(self, command: str) -> None:
         """段落定格：先收思考段，再呈现 AI 发起的命令面板（原 web 卡片头）。"""
@@ -807,8 +893,13 @@ class CliRenderer:
             self._print(Text("已忽略"))
 
     def _stream_write(self, data: str) -> None:
-        """流式直写（经 writer，不经 console）；同步状态行光标状态。"""
-        b = data.encode("utf-8")
+        """流式直写（经 writer，不经 console）；同步状态行光标状态。
+
+        raw 态终端 OPOST/ONLCR 已关（tty.setraw）：模型文本里的 \n 须翻译
+        成 \r\n，否则阶梯错位（与 _WriterFile 同法——先归一再翻译，
+        对既有 "\r\n" 字面量幂等）。PTY 字节不走这里（内层 PTY 行纪律
+        已做 ONLCR，不能再翻）。"""
+        b = data.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
         self._writer()(b)
         if self.status is not None:
             self.status.note_write(b)
