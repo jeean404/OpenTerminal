@@ -155,6 +155,9 @@ tool-call turns are budget-bounded.
   <img src="docs/images/architecture.svg" width="860" alt="OpenTerminal architecture">
 </div>
 
+Full docs: [Architecture](docs/architecture.md) · [Design notes](docs/design.md) ·
+[Flow diagrams](docs/flows.md)
+
 Three layers: the natural-language front end (terminal or web), a
 deepagents (LangGraph) agent, and persistent shell sessions. Natural
 language goes straight to the agent for multi-turn tool use; command
@@ -162,10 +165,14 @@ execution is a sub-capability of the agent, over the same session. The
 tiered policy is enforced as agent middleware, so the approval gate can't
 be bypassed by prompt content.
 
-Command output is delimited with BEGIN/END sentinels (`shell_session.py`)
-and streamed live to the UI; a per-session lock keeps commands strictly
-serial — one PTY is one interactive shell, so concurrent agent `execute`
-calls queue up.
+Display is a **single pipeline**: PTY bytes go straight to the terminal,
+shell-integration hooks keep the books via in-band OSC markers (history /
+exit codes / AI context), and agent tool commands are injected into the
+same PTY via `__ot_exec__`, so their output lands in place. A per-session
+lock keeps commands strictly serial — one PTY is one interactive shell, so
+concurrent agent `execute` calls queue up. BEGIN/END sentinel slicing
+(`shell_session.py`) remains only for non-display paths such as headless
+`ot exec` and capability probes.
 
 There is **no model-level long-term memory** — the agent's checkpointer is
 in-memory and cleared on restart. What persists is factual state:
@@ -174,6 +181,7 @@ in-memory and cleared on restart. What persists is factual state:
 |---|---|---|
 | Config | `~/.openterminal/config.toml` | gateway / shell budgets / policy / targets |
 | Connections | `~/.openterminal/connections.db` | remembered connections |
+| Command history | `~/.openterminal/history.db` | per-target history, replayed into the shell on reconnect |
 | Passwords | OS credential store (keyring) | never written to plaintext files |
 | Host profiles | `~/.openterminal/hosts.toml` | per-host system profile cache |
 | Transcripts | `~/.openterminal/sessions/<date>/` | JSONL of inputs/commands/approvals/summaries |

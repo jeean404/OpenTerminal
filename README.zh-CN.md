@@ -141,14 +141,19 @@ tab 想开几个开几个,Agent 视图和纯 Shell 视图随意切换。密码�
   <img src="docs/images/architecture.svg" width="860" alt="OpenTerminal 架构图">
 </div>
 
+详细文档:[架构文档](docs/architecture.md) · [设计说明](docs/design.md) ·
+[流程图](docs/flows.md)
+
 三层结构:自然语言前端(终端或 Web)、deepagents(LangGraph)Agent、
 持久 shell 会话。自然语言直接交给 Agent 多轮调用工具,命令执行是 Agent
 的子能力(经同一会话);三级策略在 Agent 中间件层强制,提示词内容绕不过
 审批闸门。
 
-命令输出用 BEGIN/END 哨兵标记切分(`shell_session.py`),实时流给界面;
-单会话内命令严格串行——一个 PTY 就是一条交互 shell,Agent 并发发起的
-execute 会排队。
+显示走**单管线**:PTY 字节流原样直达终端,shell 集成 hook 用带内 OSC 标记
+记账(历史/退出码/AI 上下文),AI 工具命令经 `__ot_exec__` 注入同一个 PTY,
+输出天然归位;单会话内命令严格串行——一个 PTY 就是一条交互 shell,Agent
+并发发起的 execute 会排队。哨兵切分(`shell_session.py`)只保留给无头
+`ot exec` 与能力探测等非显示路径。
 
 项目**没有模型级长期记忆**——Agent 的 checkpointer 在内存里,重启即清空。
 持久化的是"事实型"数据:
@@ -157,6 +162,7 @@ execute 会排队。
 |---|---|---|
 | 配置 | `~/.openterminal/config.toml` | 模型网关 / shell 超时 / 策略 / 目标 |
 | 连接 | `~/.openterminal/connections.db` | 记住的连接 |
+| 命令历史 | `~/.openterminal/history.db` | 每 target 的历史,重连灌回 shell |
 | 密码 | 系统凭据库(keyring) | 不落明文文件 |
 | 主机画像缓存 | `~/.openterminal/hosts.toml` | 免重复探测 |
 | 会话记录 | `~/.openterminal/sessions/<日期>/` | 输入/命令/审批/总结的 JSONL |
