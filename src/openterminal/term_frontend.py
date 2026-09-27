@@ -16,9 +16,8 @@
   暂停泵 → _restore_input → prompt_toolkit 多行输入 → _set_raw_input →
   恢复泵 → feed_msg；结果过 approval.reclassify_edited。
 
-raw 原语四件（_set_raw_input/_restore_input/_read_one_key/_term_size）
-自 rawmode.py 复制为私有函数——rawmode.py 旧 CLI 还在用，一个字节不动，
-Task 7 删除旧管线时一并退场。
+raw 原语四件（_set_raw_input/_restore_input/_read_one_key/_term_size）：
+本文件私有实现（原复制自 rawmode.py——旧双管线已于 Task 7 删除）。
 """
 from __future__ import annotations
 
@@ -1191,7 +1190,7 @@ class TermFrontend:
             ClientMsg(type="resize", rows=rows, cols=cols)))
 
 
-# --- raw 原语（自 rawmode.py 复制；rawmode.py 旧 CLI 还在用，Task 7 一并删）---
+# --- raw 原语（原复制自 rawmode.py；旧双管线已于 Task 7 删除）---
 
 def _set_raw_input():
     if sys.platform == "win32":

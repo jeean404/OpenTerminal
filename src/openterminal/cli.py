@@ -27,8 +27,8 @@ from .policy import Policy
 from .secrets_store import store_password
 from .term_frontend import CliCore, TermFrontend
 
-# 全屏/会话接管不再需要 CLI 白名单：单管线前端按输出序列自动升级透传，
-# 新全屏命令零登记（term_frontend 与 web ansi.js 同款检测）。
+# 全屏/会话接管不再需要 CLI 白名单：单管线前端是整条真终端直通
+# （PTY 字节原样进出），vim/top/tmux 等全屏程序天然原生，零登记。
 
 
 _ADD_NEW = "__add_new__"    # 管理主机里「添加主机」的哨兵键

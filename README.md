@@ -40,7 +40,8 @@ Here's what happens in the demo above:
   self-correction budget (10 turns), not infinite retry loops.
 - **Your shell stays yours.** Persistent session (`cd`, exports, venv all
   survive), and full-screen programs like vim/top/tmux take over the
-  terminal natively — detected automatically, right inline.
+  terminal natively — the pipeline is a true PTY passthrough, so
+  they just work inline.
 - **Two ways in.** A single-pipeline terminal (`ot`), or `ot web` — a
   browser UI with a server sidebar and multi-tab terminals, sharing the
   same core.
