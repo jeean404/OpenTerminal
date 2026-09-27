@@ -517,7 +517,7 @@ body.sidebar-collapsed #sidebar { display: none; }
 .modal-btns button:hover { background: var(--panel2); }
 .modal-btns button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 
-/* --- 连接表单弹窗（添加/编辑远程机器与跳板机）--- */
+/* --- 连接表单弹窗（添加/编辑远程机器）--- */
 .form-grid {
   display: grid; grid-template-columns: 76px 1fr;
   gap: 9px 10px; align-items: center;

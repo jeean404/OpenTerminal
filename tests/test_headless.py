@@ -145,11 +145,11 @@ def test_exec_host_key_unknown_blocked_before_connect():
 
 def test_list_targets_text_and_json():
     cfg = _cfg({"web": TargetConfig(name="web", mode="ssh", host="10.0.0.1",
-                                    user="root", port=2222, jump="j1"),
+                                    user="root", port=2222),
                 "default": TargetConfig(name="default", mode="local")})
     code, out, _ = _run(["list", "targets"], cfg)
     assert code == 0
-    assert "web\troot@10.0.0.1:2222 (经跳板机 j1)" in out
+    assert "web\troot@10.0.0.1:2222" in out
 
     code, out, _ = _run(["list", "targets", "--output", "json"], cfg)
     assert code == 0
@@ -157,7 +157,7 @@ def test_list_targets_text_and_json():
     names = {t["name"] for t in payload["targets"]}
     assert {"web", "default"} <= names
     web = next(t for t in payload["targets"] if t["name"] == "web")
-    assert web["port"] == 2222 and web["jump"] == "j1"
+    assert web["port"] == 2222 and "jump" not in web
 
 
 def test_list_unknown_what_is_usage_error():

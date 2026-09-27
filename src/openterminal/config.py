@@ -57,7 +57,6 @@ class TargetConfig:
     host: str | None = None
     user: str | None = None
     port: int | None = None
-    jump: str | None = None
     commands: list[str] = field(default_factory=list)  # 连接后自动执行的命令集(原样行,空行/# 注释由 runner 跳过)
 
 
@@ -94,7 +93,6 @@ class Config:
                 host=t.get("host"),
                 user=t.get("user"),
                 port=int(t["port"]) if t.get("port") else None,
-                jump=t.get("jump"),
                 commands=str(t["commands"]).splitlines() if t.get("commands") else [],
             )
         return cls(

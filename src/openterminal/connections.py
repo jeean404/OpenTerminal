@@ -27,7 +27,7 @@ def load_saved_targets(path: Path | None = None) -> list[TargetConfig]:
     try:
         return [TargetConfig(
             name=r["name"], mode="ssh", host=r["host"] or r["name"],
-            user=r["user"], port=r["port"], jump=r["jump"],
+            user=r["user"], port=r["port"],
             commands=(r["commands"] or "").splitlines(),
         ) for r in connections_db.fetch_saved(conn)]
     finally:
@@ -36,57 +36,21 @@ def load_saved_targets(path: Path | None = None) -> list[TargetConfig]:
 
 def save_saved_targets(targets: list[TargetConfig],
                        path: Path | None = None) -> None:
-    """整表重写记住的连接（跳板机表不受影响）。"""
+    """整表重写记住的连接。"""
     conn = connections_db.connect(path)
     try:
         connections_db.replace_saved(conn, [
             {"name": t.name, "host": t.host or t.name, "port": t.port,
-             "user": t.user, "jump": t.jump,
+             "user": t.user,
              "commands": "\n".join(t.commands)} for t in targets])
     finally:
         conn.close()
 
 
 @dataclass
-class JumpHost:
-    name: str
-    host: str
-    user: str | None = None
-    port: int | None = None
-
-
-@dataclass
-class JumpGroup:
-    jump: JumpHost
-    targets: list[TargetConfig]
-
-
-@dataclass
 class TargetList:
     local: bool = True
     direct: list[TargetConfig] = field(default_factory=list)
-    jumps: list[JumpGroup] = field(default_factory=list)
-
-
-def load_jump_hosts(path: Path | None = None) -> list[JumpHost]:
-    conn = connections_db.connect(path)
-    try:
-        return [JumpHost(name=r["name"], host=r["host"] or r["name"],
-                         user=r["user"], port=r["port"])
-                for r in connections_db.fetch_jumps(conn)]
-    finally:
-        conn.close()
-
-
-def save_jump_hosts(jumps: list[JumpHost], path: Path | None = None) -> None:
-    """整表重写跳板机（记住的连接表不受影响）。"""
-    conn = connections_db.connect(path)
-    try:
-        connections_db.replace_jumps(conn, [
-            {"name": j.name, "host": j.host, "port": j.port, "user": j.user}
-            for j in jumps])
-    finally:
-        conn.close()
 
 
 # --- 单条 CRUD（Web 表单：添加 / 编辑 / 删除）---
@@ -98,15 +62,8 @@ def find_saved_target(name: str, path: Path | None = None) -> TargetConfig | Non
     return None
 
 
-def find_jump_host(name: str, path: Path | None = None) -> JumpHost | None:
-    for j in load_jump_hosts(path):
-        if j.name == name:
-            return j
-    return None
-
-
 def upsert_saved_target(*, name: str, host: str, port: int | None = None,
-                        user: str | None = None, jump: str | None = None,
+                        user: str | None = None,
                         commands: str | None = None,
                         path: Path | None = None) -> None:
     """添加/编辑一条记住的连接（按 name 唯一键 upsert）。
@@ -117,7 +74,7 @@ def upsert_saved_target(*, name: str, host: str, port: int | None = None,
     try:
         connections_db.upsert_saved(conn, {
             "name": name, "host": host, "port": port, "user": user,
-            "jump": jump or None, "commands": commands})
+            "commands": commands})
     finally:
         conn.close()
 
@@ -132,12 +89,11 @@ def delete_saved_target(name: str, path: Path | None = None) -> TargetConfig | N
     if row is None:
         return None
     return TargetConfig(name=row["name"], mode="ssh", host=row["host"],
-                        user=row["user"], port=row["port"], jump=row["jump"])
+                        user=row["user"], port=row["port"])
 
 
 def rename_saved_target(old: str, *, name: str, host: str,
                         port: int | None = None, user: str | None = None,
-                        jump: str | None = None,
                         commands: str | None = None,
                         path: Path | None = None) -> TargetConfig | None:
     """编辑连接（name 可能改）：删旧行、写新行；返回被删的旧行。"""
@@ -145,64 +101,19 @@ def rename_saved_target(old: str, *, name: str, host: str,
     try:
         row = connections_db.rename_saved(conn, old, {
             "name": name, "host": host, "port": port, "user": user,
-            "jump": jump or None, "commands": commands})
+            "commands": commands})
     finally:
         conn.close()
     if row is None:
         return None
     return TargetConfig(name=row["name"], mode="ssh", host=row["host"],
-                        user=row["user"], port=row["port"], jump=row["jump"])
+                        user=row["user"], port=row["port"])
 
 
-def upsert_jump_host(*, name: str, host: str, port: int | None = None,
-                     user: str | None = None,
-                     path: Path | None = None) -> None:
-    conn = connections_db.connect(path)
-    try:
-        connections_db.upsert_jump(conn, {
-            "name": name, "host": host, "port": port, "user": user})
-    finally:
-        conn.close()
-
-
-def delete_jump_host(name: str, path: Path | None = None) -> JumpHost | None:
-    """删除跳板机；其下主机的 jump 引用置空（回落为直连）。"""
-    conn = connections_db.connect(path)
-    try:
-        row = connections_db.delete_jump(conn, name)
-    finally:
-        conn.close()
-    if row is None:
-        return None
-    return JumpHost(name=row["name"], host=row["host"], user=row["user"],
-                    port=row["port"])
-
-
-def jump_for(target: TargetConfig) -> JumpHost | None:
-    if not target.jump:
-        return None
-    for j in load_jump_hosts():
-        if j.name == target.jump:
-            return j
-    return None
-
-
-def build_target_list(saved: list[TargetConfig] | None = None,
-                      jumps: list[JumpHost] | None = None) -> TargetList:
+def build_target_list(saved: list[TargetConfig] | None = None) -> TargetList:
+    """记住的连接即直连列表（跳板机分组已随跳板机下线移除）。"""
     saved = saved if saved is not None else load_saved_targets()
-    jumps = jumps if jumps is not None else load_jump_hosts()
-    jump_names = {j.name for j in jumps}
-    direct: list[TargetConfig] = []
-    by_jump: dict[str, list[TargetConfig]] = {}
-    for t in saved:
-        if t.jump and t.jump in jump_names:
-            by_jump.setdefault(t.jump, []).append(t)
-        else:
-            direct.append(t)
-    return TargetList(
-        direct=direct,
-        jumps=[JumpGroup(jump=j, targets=by_jump.get(j.name, [])) for j in jumps],
-    )
+    return TargetList(direct=list(saved))
 
 
 @dataclass
@@ -212,7 +123,6 @@ class SshTarget:
     user: str | None = None
     port: int | None = None
     identity: str = ""
-    jump: str | None = None
 
 
 def parse_ssh_config(path: Path) -> dict[str, SshTarget]:
@@ -245,8 +155,6 @@ def parse_ssh_config(path: Path) -> dict[str, SshTarget]:
                 t.port = int(value)
             elif key == "identityfile":
                 t.identity = value
-            elif key == "proxyjump":
-                t.jump = value
     return hosts
 
 
@@ -313,19 +221,11 @@ async def open_session(target: TargetConfig, password: str | None = None,
         from .ssh_pty import SshPtySession
 
         host = target.host or target.name
-        jump = jump_for(target)
-        jump_pw = None
-        if jump is not None:
-            from .secrets_store import load_password
-
-            jump_pw = load_password(jump.host, jump.user, jump.port)
         s = SshPtySession(
             host,
             username=target.user,
             port=target.port,
             password=password,
-            jump=jump,
-            jump_password=jump_pw,
             **prompt_kwargs,
             **kwargs_session,
         )

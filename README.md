@@ -117,20 +117,15 @@ command runs in your real shell. `!` forces a command, `?` forces a task.
 new task, `/model` show model, `/exit` quit. Ctrl+C interrupts a running
 task and returns you to the prompt.
 
-**In the browser** (`ot web`) — pick a server from the sidebar (local,
-direct, or via jump host), open as many tabs as you like, and work in the
-Agent view or plain Shell view. Passwords and host keys are entered in
-browser dialogs; remembered passwords go through the OS credential store, so
-reconnecting is password-free.
+**In the browser** (`ot web`) — pick a server from the sidebar (local or
+direct SSH), open as many tabs as you like, and work in the Agent view or
+plain Shell view. Passwords and host keys are entered in browser dialogs;
+remembered passwords go through the OS credential store, so reconnecting is
+password-free.
 
 **LAN access**: `ot web --host 0.0.0.0 --token <TOKEN>` — a token is
 mandatory for non-loopback binds. Config: `[web] host/port/token` in
 `config.toml`.
-
-**Jump hosts** are managed under "Manage hosts" in the UI (stored in
-`~/.openterminal/connections.toml` as `[[jumps]]`). Connecting through one
-hops first to the jump, then tunnels to the target — password-authenticated
-jumps work, and remembered jump passwords use the credential store too.
 
 ## Security model
 
@@ -178,7 +173,7 @@ in-memory and cleared on restart. What persists is factual state:
 | Store | Location | Contents |
 |---|---|---|
 | Config | `~/.openterminal/config.toml` | gateway / shell budgets / policy / targets |
-| Connections | `~/.openterminal/connections.toml` | remembered connections + jump hosts |
+| Connections | `~/.openterminal/connections.db` | remembered connections |
 | Passwords | OS credential store (keyring) | never written to plaintext files |
 | Host profiles | `~/.openterminal/hosts.toml` | per-host system profile cache |
 | Transcripts | `~/.openterminal/sessions/<date>/` | JSONL of inputs/commands/approvals/summaries |

@@ -199,7 +199,7 @@ def cmd_list(args: argparse.Namespace, cfg: Config, out, err) -> int:
               as_json=args.json, file=err)
         return EXIT_USAGE
     targets = [{"name": t.name, "mode": t.mode, "host": t.host or t.name,
-                "user": t.user, "port": t.port, "jump": t.jump}
+                "user": t.user, "port": t.port}
                for t in all_targets(cfg)]
     if args.json:
         json.dump({"targets": targets}, out, ensure_ascii=False, indent=2)
@@ -210,8 +210,7 @@ def cmd_list(args: argparse.Namespace, cfg: Config, out, err) -> int:
             where += t["host"]
             if t["port"]:
                 where += f":{t['port']}"
-            suffix = f" (经跳板机 {t['jump']})" if t["jump"] else ""
-            out.write(f"{t['name']}\t{where}{suffix}\n")
+            out.write(f"{t['name']}\t{where}\n")
     return 0
 
 

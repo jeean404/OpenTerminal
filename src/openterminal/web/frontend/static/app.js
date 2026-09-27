@@ -2282,11 +2282,7 @@ function renderTargets() {
 
   if (matchesQuery({name: "local"})) nav.appendChild(localEntry());
 
-  // 跳板机 UI 已移除,但经跳板机引用的主机仍要可见可连:把分组里的
-  // 主机平铺进直接连接列表(后端 build_target_list 把它们归入 jumps 组)
-  const direct = (data.direct || [])
-    .concat(...(data.jumps || []).map(g => g.targets))
-    .filter(matchesQuery);
+  const direct = (data.direct || []).filter(matchesQuery);
   if (direct.length) {
     nav.appendChild(sep("直接连接"));
     direct.forEach(t => nav.appendChild(entry(t)));

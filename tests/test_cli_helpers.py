@@ -114,26 +114,6 @@ async def test_pick_startup_target_selects_saved(monkeypatch):
     assert await c._pick_startup_target() == "root@a"
 
 
-async def test_pick_startup_target_jump_submenu(monkeypatch):
-    # 经跳板机：选跳板机 → 子菜单选其下目标
-    import openterminal.cli as cli_mod
-    from openterminal.config import TargetConfig
-    from openterminal.connections import save_jump_hosts, save_saved_targets
-
-    monkeypatch.setattr("sys.platform", "linux")
-    save_jump_hosts([JumpHost(name="bastion01", host="10.0.0.5", user="admin")])
-    save_saved_targets([TargetConfig(name="web01", mode="ssh", host="10.0.0.20",
-                                     user="root", jump="bastion01")])
-    c = _make_cli()
-    picks = iter(["bastion01", "web01"])
-
-    async def pick(title, rows):
-        return next(picks)
-
-    monkeypatch.setattr(cli_mod, "pick_menu", pick)
-    assert await c._pick_startup_target() == "web01"
-
-
 async def test_pick_startup_target_cancel_returns_none(monkeypatch):
     # 光标菜单 Esc/q 取消 → 返回 None（回主菜单，不再 SystemExit）
     import openterminal.cli as cli_mod
@@ -224,109 +204,29 @@ async def test_maybe_remember_key_auth_skips_keyring(monkeypatch):
     await c._maybe_remember(name)  # 不抛即通过
 
 
-# --- 跳板机：层级子菜单与添加流程 ---
+# --- 连接目标列表（picker_rows）---
 
-from openterminal.cli import (
-    Cli, _ADD_JUMP, _ADD_NEW, _BACK, jump_submenu_rows,
-    picker_rows,
-)
+from openterminal.cli import Cli, _ADD_NEW, _BACK, picker_rows
 from openterminal.config import Config, TargetConfig
 from openterminal.connections import (
-    JumpGroup, JumpHost, build_target_list, load_jump_hosts, load_saved_targets,
-    save_jump_hosts, save_saved_targets,
+    build_target_list, load_saved_targets, save_saved_targets,
 )
 
 
-def _sequence(values):
-    it = iter(values)
-
-    async def _prompt(text, default=""):
-        return next(it)
-
-    return _prompt
-
-
-def test_picker_rows_groups():
-    tl = build_target_list(
-        saved=[
-            TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root",
-                         jump="bastion01"),
-            TargetConfig(name="prod", mode="ssh", host="p.example.com"),
-        ],
-        jumps=[JumpHost(name="bastion01", host="10.0.0.5", user="admin")],
-    )
+def test_picker_rows_flat():
+    tl = build_target_list(saved=[
+        TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root"),
+        TargetConfig(name="prod", mode="ssh", host="p.example.com"),
+    ])
     rows = picker_rows(tl)
     keys = [k for k, _ in rows]
     assert keys[0] == "local"
-    # 添加/编辑/删除归「管理主机」，连接列表不再带 _ADD_NEW/_ADD_JUMP
-    assert _ADD_NEW not in keys and _ADD_JUMP not in keys
-    assert "prod" in keys
-    assert "bastion01" in keys
-    assert any(label.startswith("[跳板机] bastion01") for k, label in rows)
+    # 添加/编辑/删除归「管理主机」，连接列表不带 _ADD_NEW
+    assert _ADD_NEW not in keys
+    assert "prod" in keys and "web01" in keys
     assert keys[-1] == _BACK  # 最后一项是「返回」
     # 分隔行不参与选择
     assert any(k is None for k in keys)
-
-
-def test_jump_submenu_rows():
-    group = JumpGroup(
-        jump=JumpHost(name="bastion01", host="10.0.0.5", user="admin"),
-        targets=[TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root")],
-    )
-    rows = jump_submenu_rows(group)
-    assert rows[0][0] == "web01"
-    assert "root@10.0.0.20" in rows[0][1]
-    assert rows[-1][0] == _BACK  # 只列目标 + 返回
-
-
-def test_jump_submenu_empty_placeholder():
-    group = JumpGroup(jump=JumpHost(name="b", host="10.0.0.5"), targets=[])
-    rows = jump_submenu_rows(group)
-    assert any(k is None and "还没有主机" in label for k, label in rows)
-
-
-async def test_prompt_add_jump(monkeypatch):
-    import openterminal.cli as cli_mod
-
-    c = Cli(Config.load())
-    monkeypatch.setattr(cli_mod, "_prompt_text",
-                        _sequence(["admin@10.0.0.5"]))
-    name = await c._prompt_add_jump()
-    assert name == "admin@10.0.0.5"
-    jumps = load_jump_hosts()
-    assert [j.name for j in jumps] == ["admin@10.0.0.5"]
-    assert jumps[0].host == "10.0.0.5"
-
-
-async def test_prompt_add_jump_duplicate(monkeypatch):
-    import openterminal.cli as cli_mod
-
-    save_jump_hosts([JumpHost(name="admin@10.0.0.5", host="10.0.0.5", user="admin")])
-    c = Cli(Config.load())
-    monkeypatch.setattr(cli_mod, "_prompt_text",
-                        _sequence(["admin@10.0.0.5"]))
-    name = await c._prompt_add_jump()
-    assert name == "admin@10.0.0.5"
-    assert len(load_jump_hosts()) == 1  # 不重复添加
-
-
-async def test_maybe_remember_keeps_jump(monkeypatch):
-    # 回归：经跳板机手敲的目标「记住该连接」时，jump 字段必须随保存落盘
-    import openterminal.cli as cli_mod
-
-    c = Cli(Config.load())
-    c._adhoc_targets.add("x")
-    c.cfg.targets["x"] = TargetConfig(name="x", mode="ssh", host="10.0.0.20",
-                                      user="root", jump="bastion01")
-    c.session = type("S", (), {"last_password": None})()
-
-    async def yes(text, default=""):
-        return "y"
-
-    monkeypatch.setattr(cli_mod, "_prompt_text", yes)
-    await c._maybe_remember("x")
-    saved = load_saved_targets()
-    assert any(t.host == "10.0.0.20" and t.jump == "bastion01" for t in saved)
 
 
 # --- 退出 ot：exit/quit/logout 不该被当命令发给远端 shell ---
@@ -376,13 +276,13 @@ def test_pick_menu_empty_selectable_returns_none():
 
 
 def test_menu_fragments_highlight_and_separators():
-    rows = [("a", "local"), (None, "── 跳板机 ──"), ("b", "bastion01")]
+    rows = [("a", "local"), (None, "── 直接连接 ──"), ("b", "host1")]
     frags = menu_fragments("管理主机", rows, selected=1)
     text = "".join(s for _, s in frags)
-    assert "管理主机" in text and "── 跳板机 ──" in text
+    assert "管理主机" in text and "── 直接连接 ──" in text
     sel = [f for f in frags if "▸" in f[1]]
     assert len(sel) == 1 and sel[0][0] == "class:menu-selected"
-    assert "bastion01" in sel[0][1]
+    assert "host1" in sel[0][1]
 
 
 # --- loop / _run_pipeline（单管线换心）---
@@ -533,7 +433,7 @@ async def test_manage_add_host_persists_and_dedups(monkeypatch):
     assert len(load_saved_targets()) == 1
 
 
-async def test_manage_add_host_no_jump_prompt_when_no_jumps(monkeypatch):
+async def test_manage_add_host_single_prompt(monkeypatch):
     import openterminal.cli as cli_mod
 
     c = _make_cli()
@@ -545,7 +445,7 @@ async def test_manage_add_host_no_jump_prompt_when_no_jumps(monkeypatch):
 
     monkeypatch.setattr(cli_mod, "_prompt_text", text)
     await c._prompt_add_host()
-    assert len(prompts) == 1  # 只有地址输入，没有「经跳板机?」询问
+    assert len(prompts) == 1  # 只有地址输入一个询问
 
 
 async def test_manage_edit_host_updates_toml_and_cfg(monkeypatch):
@@ -618,51 +518,13 @@ async def test_manage_host_delete_requires_confirm(monkeypatch):
     assert "root@a" not in c.cfg.targets
 
 
-async def test_manage_edit_jump_cascades_rename(monkeypatch):
-    import openterminal.cli as cli_mod
-    from openterminal.config import TargetConfig
-    from openterminal.connections import (JumpHost, load_jump_hosts,
-                                          load_saved_targets, save_jump_hosts,
-                                          save_saved_targets)
-
-    save_jump_hosts([JumpHost(name="b01", host="10.0.0.5", user="admin")])
-    save_saved_targets([TargetConfig(name="web01", mode="ssh", host="10.0.0.20",
-                                     user="root", jump="b01")])
-    c = _make_cli()
-
-    async def text(prompt, default=""):
-        return "admin@10.0.0.6"
-
-    monkeypatch.setattr(cli_mod, "_prompt_text", text)
-    assert await c._edit_jump_host(0) is True
-    assert load_jump_hosts()[0].name == "admin@10.0.0.6"
-    assert load_saved_targets()[0].jump == "admin@10.0.0.6"  # 级联改名
-
-
-async def test_manage_delete_jump_clears_saved_reference(monkeypatch):
-    from openterminal.config import TargetConfig
-    from openterminal.connections import (JumpHost, load_jump_hosts,
-                                          load_saved_targets, save_jump_hosts,
-                                          save_saved_targets)
-
-    save_jump_hosts([JumpHost(name="b01", host="10.0.0.5", user="admin")])
-    save_saved_targets([TargetConfig(name="web01", mode="ssh", host="10.0.0.20",
-                                     user="root", jump="b01")])
-    c = _make_cli()
-    await c._delete_jump_host(0)
-    assert load_jump_hosts() == []
-    assert load_saved_targets()[0].jump is None  # 引用置空
-
-
 async def test_manage_menu_rows_use_index_keys(monkeypatch):
     import openterminal.cli as cli_mod
     from openterminal.config import TargetConfig
-    from openterminal.connections import (JumpHost, save_jump_hosts,
-                                          save_saved_targets)
+    from openterminal.connections import save_saved_targets
 
     save_saved_targets([TargetConfig(name="root@a", mode="ssh", host="a", user="root"),
                         TargetConfig(name="root@b", mode="ssh", host="b", user="root")])
-    save_jump_hosts([JumpHost(name="b01", host="10.0.0.5", user="admin")])
     c = _make_cli()
     seen = {}
 
@@ -674,6 +536,5 @@ async def test_manage_menu_rows_use_index_keys(monkeypatch):
     await c._manage_hosts()
     keys = [k for k, _ in seen["rows"]]
     assert ("h", 0) in keys and ("h", 1) in keys
-    assert ("j", 0) in keys
-    assert _ADD_NEW in keys and _ADD_JUMP in keys and _BACK in keys
+    assert _ADD_NEW in keys and _BACK in keys
     assert any(k is None for k in keys)  # 分隔行不参与选择

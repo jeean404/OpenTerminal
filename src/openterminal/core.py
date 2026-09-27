@@ -1373,7 +1373,7 @@ class PipelineCore:
 
         if text in self.cfg.targets or text in {"local", "default"}:
             return text
-        # 记住的连接按 name 直接注册（含 host/user/port/jump），否则 ad-hoc 重建
+        # 记住的连接按 name 直接注册（含 host/user/port），否则 ad-hoc 重建
         for t in load_saved_targets():
             if t.name == text:
                 self.cfg.targets[text] = t

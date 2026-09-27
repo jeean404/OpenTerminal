@@ -110,16 +110,12 @@ host = "prod-web.example.com"
 `/clear` 新任务、`/model` 查看模型、`/exit` 退出;Ctrl+C 中断当前任务,
 回到提示符。
 
-**浏览器里**(`ot web`)——侧栏选服务器(local / 直连 / 经跳板机),
+**浏览器里**(`ot web`)——侧栏选服务器(local / 直连 SSH),
 tab 想开几个开几个,Agent 视图和纯 Shell 视图随意切换。密码、主机密钥
 用浏览器弹窗输入;记住的密码走系统凭据库,下次连接直接免密。
 
 **局域网访问**:`ot web --host 0.0.0.0 --token <TOKEN>`——绑定非本机地址
 必须带 token。配置:`config.toml` 的 `[web] host/port/token`。
-
-**跳板机**在界面的「管理主机」里统一维护(存
-`~/.openterminal/connections.toml` 的 `[[jumps]]`)。经跳板机连接会先连
-jump 再隧道到目标,密码认证的跳板机也能用,记住密码同样走系统凭据库。
 
 ## 安全模型
 
@@ -160,7 +156,7 @@ execute 会排队。
 | 存储 | 位置 | 内容 |
 |---|---|---|
 | 配置 | `~/.openterminal/config.toml` | 模型网关 / shell 超时 / 策略 / 目标 |
-| 连接 | `~/.openterminal/connections.toml` | 记住的连接 + 跳板机 |
+| 连接 | `~/.openterminal/connections.db` | 记住的连接 |
 | 密码 | 系统凭据库(keyring) | 不落明文文件 |
 | 主机画像缓存 | `~/.openterminal/hosts.toml` | 免重复探测 |
 | 会话记录 | `~/.openterminal/sessions/<日期>/` | 输入/命令/审批/总结的 JSONL |

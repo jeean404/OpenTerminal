@@ -2,41 +2,35 @@ from fastapi.testclient import TestClient
 
 from openterminal.config import Config, TargetConfig
 from openterminal.connections import (
-    JumpHost, find_saved_target, load_jump_hosts, load_saved_targets,
-    save_jump_hosts, save_saved_targets,
+    find_saved_target, load_saved_targets, save_saved_targets,
 )
 from openterminal.web.server import _resolve_target_name, create_app
 
 
 def test_api_targets_payload():
     save_saved_targets([
-        TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root",
-                     jump="bastion01"),
+        TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root"),
         TargetConfig(name="prod", mode="ssh", host="p.example.com"),
     ])
-    save_jump_hosts([JumpHost(name="bastion01", host="10.0.0.5", user="admin")])
     app = create_app(Config.load())
     with TestClient(app) as client:
         r = client.get("/api/targets")
         assert r.status_code == 200
         data = r.json()
         assert data["local"] is True
-        assert [t["name"] for t in data["direct"]] == ["prod"]
-        assert data["jumps"][0]["jump"]["name"] == "bastion01"
-        assert [t["name"] for t in data["jumps"][0]["targets"]] == ["web01"]
+        assert [t["name"] for t in data["direct"]] == ["web01", "prod"]
+        assert "jumps" not in data
 
 
-def test_api_saved_and_jumps_endpoints(tmp_path):
+def test_api_saved_endpoint(tmp_path):
     app = create_app(Config.load())
     with TestClient(app) as client:
         r = client.post("/api/saved", json={"target": "root@9.9.9.9:2222"})
         assert r.status_code == 200
-        r = client.post("/api/jumps", json={"target": "admin@10.0.0.5"})
-        assert r.status_code == 200
+        assert client.post("/api/jumps",
+                           json={"target": "admin@10.0.0.5"}).status_code == 404
     saved = load_saved_targets()
     assert any(t.host == "9.9.9.9" for t in saved)
-    jumps = load_jump_hosts()
-    assert any(j.host == "10.0.0.5" for j in jumps)
 
 
 def test_token_required_on_non_local_binding():
@@ -48,19 +42,18 @@ def test_token_required_on_non_local_binding():
 
 
 def test_resolve_target_name_from_saved():
-    # 回归：侧栏点记住的连接/经跳板机目标时，必须保留 host/user/jump，
+    # 回归：侧栏点记住的连接时，必须保留 host/user，
     # 而不是被当 user@host 重新解析丢掉连接信息
     save_saved_targets([TargetConfig(
-        name="web01", mode="ssh", host="10.0.0.20", user="root",
-        jump="bastion01")])
+        name="web01", mode="ssh", host="10.0.0.20", user="root")])
     cfg = Config.load()
     name = _resolve_target_name(cfg, "web01")
     assert name == "web01"
     t = cfg.targets["web01"]
-    assert (t.host, t.user, t.jump) == ("10.0.0.20", "root", "bastion01")
+    assert (t.host, t.user) == ("10.0.0.20", "root")
 
 
-# --- 表单化 CRUD（Web 添加/编辑/删除 主机与跳板机）---
+# --- 表单化 CRUD（Web 添加/编辑/删除 主机）---
 
 
 def test_api_saved_crud_structured():
@@ -68,7 +61,7 @@ def test_api_saved_crud_structured():
     with TestClient(app) as client:
         r = client.post("/api/saved", json={
             "name": "web01", "host": "10.0.0.20", "port": 22,
-            "user": "root", "jump": ""})
+            "user": "root"})
         assert r.status_code == 200 and r.json()["name"] == "web01"
         assert find_saved_target("web01").host == "10.0.0.20"
 
@@ -88,7 +81,6 @@ def test_api_saved_requires_host():
     app = create_app(Config.load())
     with TestClient(app) as client:
         assert client.post("/api/saved", json={"name": "x"}).status_code == 400
-        assert client.post("/api/jumps", json={"name": "x"}).status_code == 400
 
 
 def test_api_saved_default_name_from_host():
@@ -118,34 +110,6 @@ def test_api_saved_stores_password_not_in_db(monkeypatch):
     finally:
         conn.close()
     assert "password" not in cols
-
-
-def test_api_jumps_crud_and_rename_updates_refs():
-    app = create_app(Config.load())
-    with TestClient(app) as client:
-        assert client.post("/api/jumps", json={
-            "name": "b1", "host": "10.0.0.5", "user": "admin"}).status_code == 200
-        client.post("/api/saved", json={
-            "name": "web01", "host": "10.0.0.20", "user": "root", "jump": "b1"})
-
-        r = client.put("/api/jumps/b1", json={"name": "b2", "host": "10.0.0.6"})
-        assert r.status_code == 200
-        assert find_saved_target("web01").jump == "b2"      # 引用跟随改名
-        assert [j.name for j in load_jump_hosts()] == ["b2"]
-
-        assert client.delete("/api/jumps/b2").status_code == 200
-        assert find_saved_target("web01").jump is None      # 回落直连
-        assert client.delete("/api/jumps/b2").status_code == 404
-
-
-def test_api_targets_payload_includes_jump_ref():
-    save_jump_hosts([JumpHost(name="b1", host="10.0.0.5")])
-    save_saved_targets([TargetConfig(name="web01", mode="ssh",
-                                     host="10.0.0.20", jump="b1")])
-    app = create_app(Config.load())
-    with TestClient(app) as client:
-        data = client.get("/api/targets").json()
-        assert data["jumps"][0]["targets"][0]["jump"] == "b1"
 
 
 # --- 连接后命令集:commands 透传与回显 ---

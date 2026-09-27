@@ -57,7 +57,7 @@
   <!-- open_session 汇合 -->
   <line x1="340" y1="360" x2="540" y2="408" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
   <line x1="785" y1="360" x2="585" y2="408" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="550" y="398" text-anchor="middle" fill="#8b949e" font-size="12">open_session（connections.py：local / ~/.ssh/config / 记住的连接 / 跳板机）</text>
+  <text x="550" y="398" text-anchor="middle" fill="#8b949e" font-size="12">open_session（connections.py：local / ~/.ssh/config / 记住的连接）</text>
 
   <!-- PTY 层 -->
   <rect x="120" y="412" width="260" height="64" rx="8" fill="#1c2128" stroke="#30363d"/>
@@ -70,7 +70,7 @@
 
   <rect x="720" y="412" width="260" height="64" rx="8" fill="#1c2128" stroke="#30363d"/>
   <text x="850" y="438" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">ssh_pty.py</text>
-  <text x="850" y="458" text-anchor="middle" fill="#8b949e" font-size="12">asyncssh · 跳板机 tunnel · TOFU</text>
+  <text x="850" y="458" text-anchor="middle" fill="#8b949e" font-size="12">asyncssh · TOFU</text>
 
   <!-- 会话层 -->
   <line x1="250" y1="476" x2="480" y2="524" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>

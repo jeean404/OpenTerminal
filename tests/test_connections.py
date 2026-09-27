@@ -6,7 +6,7 @@ import pytest
 
 from openterminal.config import TargetConfig
 from openterminal.connections import (
-    delete_jump_host, delete_saved_target, display_name, list_ssh_hosts,
+    delete_saved_target, display_name, list_ssh_hosts,
     load_saved_targets, parse_ssh_config, parse_user_at_host,
     rename_saved_target, save_saved_targets, upsert_saved_target,
 )
@@ -32,7 +32,8 @@ def test_parse_named_host(tmp_path: Path):
     f.write_text(CONFIG, encoding="utf-8")
     hosts = parse_ssh_config(f)
     p = hosts["prod-web"]
-    assert (p.hostname, p.user, p.port, p.jump) == ("10.0.0.1", "deploy", 2222, "bastion")
+    # ProxyJump 在 CONFIG 里保留：跳板机下线后解析器应无视该字段
+    assert (p.hostname, p.user, p.port) == ("10.0.0.1", "deploy", 2222)
     assert "id_ed25519" in p.identity
 
 
@@ -89,61 +90,16 @@ def test_default_path_is_outside_repo(tmp_path, monkeypatch):
     assert saved_targets_path() == tmp_path / "connections.db"
 
 
-from openterminal.connections import (
-    JumpHost, build_target_list, jump_for, load_jump_hosts, save_jump_hosts,
-)
+from openterminal.connections import build_target_list
 
 
-def test_jumps_roundtrip(tmp_path):
-    path = tmp_path / "connections.db"
-    save_jump_hosts([
-        JumpHost(name="bastion01", host="10.0.0.5", user="admin", port=22),
-        JumpHost(name="j2", host="10.0.0.6"),
-    ], path)
-    loaded = load_jump_hosts(path)
-    assert [(j.name, j.host, j.user, j.port) for j in loaded] == [
-        ("bastion01", "10.0.0.5", "admin", 22), ("j2", "10.0.0.6", None, None)]
-
-
-def test_saved_with_jump_roundtrip(tmp_path):
-    path = tmp_path / "connections.db"
-    save_saved_targets([
-        TargetConfig(name="web01", mode="ssh", host="10.0.0.20",
-                     user="root", jump="bastion01"),
-    ], path)
-    loaded = load_saved_targets(path)
-    assert loaded[0].jump == "bastion01"
-
-
-def test_saved_and_jumps_tables_preserved(tmp_path):
-    path = tmp_path / "connections.db"
-    save_saved_targets([
-        TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root",
-                     jump="bastion01"),
-    ], path)
-    save_jump_hosts([JumpHost(name="bastion01", host="10.0.0.5", user="admin")], path)
-    assert len(load_saved_targets(path)) == 1
-    assert len(load_jump_hosts(path)) == 1
-    assert load_saved_targets(path)[0].jump == "bastion01"
-
-
-def test_jump_for():
-    # conftest 已把 OPENTERMINAL_HOME 指到临时目录：默认路径读写即可
-    save_jump_hosts([JumpHost(name="bastion01", host="10.0.0.5", user="admin")])
-    assert jump_for(TargetConfig(name="x", mode="ssh", host="h", jump="bastion01")).name == "bastion01"
-    assert jump_for(TargetConfig(name="x", mode="ssh", host="h")) is None
-
-
-def test_build_target_list_groups():
+def test_build_target_list_flat():
     saved = [
-        TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root", jump="bastion01"),
-        TargetConfig(name="db01", mode="ssh", host="10.0.0.30", user="root", jump="bastion01"),
+        TargetConfig(name="web01", mode="ssh", host="10.0.0.20", user="root"),
         TargetConfig(name="prod", mode="ssh", host="p.example.com"),
     ]
-    jumps = [JumpHost(name="bastion01", host="10.0.0.5", user="admin")]
-    tl = build_target_list(saved, jumps)
-    assert [t.name for t in tl.direct] == ["prod"]
-    assert len(tl.jumps) == 1 and len(tl.jumps[0].targets) == 2
+    tl = build_target_list(saved)
+    assert [t.name for t in tl.direct] == ["web01", "prod"]
     assert tl.local is True
 
 
@@ -159,10 +115,9 @@ def test_migrates_legacy_toml_once(tmp_path):
         '[[jumps]]\nname = "bastion01"\nhost = "10.0.0.5"\nuser = "admin"\nport = 22\n',
         encoding="utf-8")
     saved = load_saved_targets(db)
-    assert [(t.name, t.host, t.user, t.jump) for t in saved] == [
-        ("web01", "10.0.0.20", "root", "bastion01")]
-    jumps = load_jump_hosts(db)
-    assert [(j.name, j.host, j.port) for j in jumps] == [("bastion01", "10.0.0.5", 22)]
+    # 旧 TOML 里的 jump / [[jumps]] 随跳板机下线被忽略
+    assert [(t.name, t.host, t.user) for t in saved] == [
+        ("web01", "10.0.0.20", "root")]
     # 旧文件改名留档，且不会被重复导入
     assert not toml.exists()
     assert (tmp_path / "connections.toml.migrated").exists()
@@ -173,9 +128,9 @@ def test_migrates_legacy_toml_once(tmp_path):
 def test_upsert_rename_delete_saved(tmp_path):
     db = tmp_path / "connections.db"
     upsert_saved_target(name="web01", host="10.0.0.20", user="root",
-                        port=22, jump="b1", path=db)
+                        port=22, path=db)
     upsert_saved_target(name="web01", host="10.0.0.21", user="root",
-                        port=22, jump="b1", path=db)  # 同名 upsert 不重复
+                        port=22, path=db)  # 同名 upsert 不重复
     assert [(t.name, t.host) for t in load_saved_targets(db)] == [("web01", "10.0.0.21")]
     removed = rename_saved_target("web01", name="web02", host="10.0.0.22",
                                   user="root", port=2222, path=db)
@@ -187,14 +142,44 @@ def test_upsert_rename_delete_saved(tmp_path):
     assert load_saved_targets(db) == []
 
 
-def test_delete_jump_nulls_target_refs(tmp_path):
+def test_retire_jumps_drops_table_column_and_secrets(tmp_path, monkeypatch):
+    """旧库收尾迁移：jumps 表删除（凭据库里的密码先清）、saved.jump 列删除。"""
+    import sqlite3
+
+    import openterminal.secrets_store as secrets_mod
+
     db = tmp_path / "connections.db"
-    save_jump_hosts([JumpHost(name="b1", host="10.0.0.5")], db)
-    upsert_saved_target(name="web01", host="10.0.0.20", jump="b1", path=db)
-    removed = delete_jump_host("b1", db)
-    assert removed.host == "10.0.0.5"
-    assert load_saved_targets(db)[0].jump is None  # 回落直连
-    assert delete_jump_host("b1", db) is None
+    conn = sqlite3.connect(str(db))
+    conn.execute("""CREATE TABLE saved(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE, host TEXT NOT NULL,
+      port INTEGER, user TEXT, jump TEXT, commands TEXT)""")
+    conn.execute("INSERT INTO saved(name, host, user, jump) "
+                 "VALUES('web01','10.0.0.20','root','b1')")
+    conn.execute("""CREATE TABLE jumps(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE, host TEXT NOT NULL,
+      port INTEGER, user TEXT)""")
+    conn.execute("INSERT INTO jumps(name, host, port, user) "
+                 "VALUES('b1','10.0.0.5',2222,'admin')")
+    conn.commit()
+    conn.close()
+
+    deleted = []
+    monkeypatch.setattr(secrets_mod, "delete_password",
+                        lambda h, u, p: deleted.append((h, u, p)) or True)
+
+    saved = load_saved_targets(db)
+    assert [t.name for t in saved] == ["web01"]
+    assert deleted == [("10.0.0.5", "admin", 2222)]   # 跳板机凭据已清
+
+    conn = sqlite3.connect(str(db))
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(saved)")}
+    conn.close()
+    assert "jumps" not in tables
+    assert "jump" not in cols
 
 
 # --- open_session 密码补存：连接已记住但凭据缺失（如经 Web 添加）---

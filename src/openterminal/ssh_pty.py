@@ -8,12 +8,8 @@ import binascii
 import hashlib
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from .shell_session import BasePtySession
-
-if TYPE_CHECKING:
-    from .connections import JumpHost
 
 
 def known_hosts_path() -> Path:
@@ -66,8 +62,6 @@ class SshPtySession(BasePtySession):
         host_key_prompt: Callable[[str], bool] | None = None,
         password: str | None = None,
         password_prompt: Callable[[str], str | None] | None = None,
-        jump: JumpHost | None = None,
-        jump_password: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -78,10 +72,6 @@ class SshPtySession(BasePtySession):
         # last_password：本次连接实际使用的密码（连接成功后供 CLI 存回凭据库）
         self.password = password
         self.last_password = password
-        self.jump = jump
-        self.jump_password = jump_password
-        self.last_jump_password = jump_password
-        self._jump_conn = None
         self._ask_password = password_prompt or self._default_password_prompt
         self.config_files = [str(Path(p).expanduser()) for p in config_files]
         self.rows, self.cols = rows, cols
@@ -102,7 +92,7 @@ class SshPtySession(BasePtySession):
         return await loop.run_in_executor(None, fn, *args)
 
     async def _connect_one(self, *, host, username, port, password,
-                           tunnel=None, record_last=None):
+                           record_last=None):
         import getpass
 
         import asyncssh
@@ -118,8 +108,6 @@ class SshPtySession(BasePtySession):
             kwargs["password"] = password
         # 加密私钥口令：保持 getpass（Web 端为已知限制：走服务进程控制台）
         kwargs["passphrase"] = lambda: getpass.getpass(f"密钥口令 ({host}): ")
-        if tunnel is not None:
-            kwargs["tunnel"] = tunnel
 
         async def _open(tofu_allowed: bool, tried_password: bool):
             try:
@@ -143,36 +131,15 @@ class SshPtySession(BasePtySession):
     def _set_target_password(self, pw: str) -> None:
         self.last_password = pw
 
-    def _set_jump_password(self, pw: str) -> None:
-        self.last_jump_password = pw
-
     async def start(self) -> None:
         self._config_paths = [p for p in self.config_files if Path(p).exists()]
-        # 重连用 last_*_password：构造时的 password 是旧值/None，现场重输的
+        # 重连用 last_password：构造时的 password 是旧值/None，现场重输的
         # 密码只落在 last_password；否则断线重连会重新要密码（见 _recover_connection）
-        if self.jump is not None:
-            self._jump_conn = await self._connect_one(
-                host=self.jump.host, username=self.jump.user, port=self.jump.port,
-                password=self.last_jump_password,
-                record_last=self._set_jump_password,
-            )
-            tunnel = self._jump_conn
-        else:
-            self._jump_conn = None
-            tunnel = None
-        self._conn = None
-        try:
-            self._conn = await self._connect_one(
-                host=self.host, username=self.username, port=self.port,
-                password=self.last_password, tunnel=tunnel,
-                record_last=self._set_target_password,
-            )
-        except Exception:
-            # 目标连不上：不能带着一条活着的跳板机连接泄漏（Web 长跑会累积）
-            if self._jump_conn is not None:
-                self._jump_conn.close()
-                self._jump_conn = None
-            raise
+        self._conn = await self._connect_one(
+            host=self.host, username=self.username, port=self.port,
+            password=self.last_password,
+            record_last=self._set_target_password,
+        )
         self._proc = await self._conn.create_process(
             term_type="xterm-256color",
             # asyncssh term_size 语义是 (width, height)：传 (rows, cols) 会
@@ -271,10 +238,9 @@ class SshPtySession(BasePtySession):
                 self._proc.close()
             except Exception:
                 pass
-        for conn in (self._conn, self._jump_conn):
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        self._proc = self._conn = self._jump_conn = None
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+        self._proc = self._conn = None

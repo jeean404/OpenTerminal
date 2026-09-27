@@ -15,9 +15,9 @@ from fastapi.staticfiles import StaticFiles
 from ..cmdset import extract_inline_secrets
 from ..config import Config, TargetConfig
 from ..connections import (
-    build_target_list, delete_jump_host, delete_saved_target, display_name,
-    find_jump_host, find_saved_target, load_saved_targets, parse_user_at_host,
-    rename_saved_target, upsert_jump_host, upsert_saved_target,
+    build_target_list, delete_saved_target, display_name,
+    find_saved_target, load_saved_targets, parse_user_at_host,
+    rename_saved_target, upsert_saved_target,
 )
 from ..secrets_store import delete_password, store_password
 from ..render import console
@@ -56,7 +56,7 @@ def _store_form_password(payload: dict, host: str, user: str | None,
 def _resolve_target_name(cfg: Config, text: str) -> str:
     """目标名或 ad-hoc user@host 都解析成目标名。
 
-    记住的连接（connections.toml）按 name 直接注册（含 host/user/port/jump），
+    记住的连接（connections.db）按 name 直接注册（含 host/user/port），
     否则 ad-hoc user@host 重建临时目标。
     """
     if text in cfg.targets or text in {"local", "default"}:
@@ -153,7 +153,6 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if not host:
             raise HTTPException(400, "host required")
         name = (payload.get("name") or "").strip() or display_name(host, user, port)
-        jump = (payload.get("jump") or "").strip() or None
         commands = None
         resp: dict = {"ok": True, "name": name}
         if "commands" in payload:
@@ -162,7 +161,7 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
             if failed:
                 resp["warning"] = "凭据库不可用，以下密码未保存: " + ", ".join(failed)
         upsert_saved_target(name=name, host=host, port=port, user=user,
-                            jump=jump, commands=commands)
+                            commands=commands)
         # 内存注册表同步失效:cfg.targets 里缓存的是旧配置(含命令集),
         # 不弹出的话下次连接仍用缓存(真机:改了命令集连了却没生效)
         cfg.targets.pop(name, None)
@@ -179,7 +178,6 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if not host:
             raise HTTPException(400, "host required")
         new_name = (payload.get("name") or "").strip() or name
-        jump = (payload.get("jump") or "").strip() or None
         commands = None
         resp: dict = {"ok": True, "name": new_name}
         if "commands" in payload:
@@ -188,7 +186,7 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
             if failed:
                 resp["warning"] = "凭据库不可用，以下密码未保存: " + ", ".join(failed)
         removed = rename_saved_target(name, name=new_name, host=host,
-                                      port=port, user=user, jump=jump,
+                                      port=port, user=user,
                                       commands=commands)
         # 内存注册表同步失效(旧名可能已缓存/新名可能撞旧缓存)
         cfg.targets.pop(name, None)
@@ -207,49 +205,6 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
             raise HTTPException(404, "unknown target")
         delete_password(removed.host, removed.user, removed.port)
         cfg.targets.pop(name, None)  # 内存注册表同步反注册
-        return {"ok": True}
-
-    @app.post("/api/jumps")
-    async def add_jump(request: Request, payload: dict):
-        _check_token(request.headers)
-        host, user, port = _conn_fields(payload)
-        if not host:
-            raise HTTPException(400, "host required")
-        name = (payload.get("name") or "").strip() or display_name(host, user, port)
-        upsert_jump_host(name=name, host=host, port=port, user=user)
-        _store_form_password(payload, host, user, port)
-        return {"ok": True, "name": name}
-
-    @app.put("/api/jumps/{name}")
-    async def edit_jump(request: Request, name: str, payload: dict):
-        _check_token(request.headers)
-        old = find_jump_host(name)
-        if old is None:
-            raise HTTPException(404, "unknown jump")
-        host, user, port = _conn_fields(payload)
-        if not host:
-            raise HTTPException(400, "host required")
-        new_name = (payload.get("name") or "").strip() or name
-        if new_name != name:
-            # 跳板机改名：其下主机的 jump 引用跟随更新
-            for t in load_saved_targets():
-                if t.jump == name:
-                    upsert_saved_target(name=t.name, host=t.host, port=t.port,
-                                        user=t.user, jump=new_name)
-            delete_jump_host(name)
-        upsert_jump_host(name=new_name, host=host, port=port, user=user)
-        if (old.host, old.user, old.port) != (host, user, port):
-            delete_password(old.host, old.user, old.port)
-        _store_form_password(payload, host, user, port)
-        return {"ok": True, "name": new_name}
-
-    @app.delete("/api/jumps/{name}")
-    async def remove_jump(request: Request, name: str):
-        _check_token(request.headers)
-        removed = delete_jump_host(name)  # 其下主机 jump 置空回落直连
-        if removed is None:
-            raise HTTPException(404, "unknown jump")
-        delete_password(removed.host, removed.user, removed.port)
         return {"ok": True}
 
     @app.websocket("/ws/{tab_id}")
@@ -314,17 +269,6 @@ def _target_payload() -> dict:
             {"name": t.name, "host": t.host, "user": t.user, "port": t.port,
              "commands": "\n".join(t.commands)}
             for t in tl.direct
-        ],
-        "jumps": [
-            {"jump": {"name": g.jump.name, "host": g.jump.host, "user": g.jump.user,
-                      "port": g.jump.port},
-             "targets": [
-                 {"name": t.name, "host": t.host, "user": t.user,
-                  "port": t.port, "jump": g.jump.name,
-                  "commands": "\n".join(t.commands)}
-                 for t in g.targets
-             ]}
-            for g in tl.jumps
         ],
     }
 
