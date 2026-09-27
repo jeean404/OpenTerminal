@@ -1,4 +1,4 @@
-"""CLI 终端前端（骨架）：核心 ↔ stdin/stdout 适配。
+"""CLI 终端前端：核心 ↔ stdin/stdout 适配。
 
 单管线核心（openterminal.core.PipelineCore）的零卡片终端前端：
 - CliCore：emit_msg/emit_bytes/_emit_nowait 覆写为进前端串行渲染 outbox
@@ -10,13 +10,13 @@
   都必须走完，否则用户 shell 留在 raw 态）。
 
 设计见 docs/superpowers/specs/2026-09-27-cli-single-pipeline-design.md
-§3.1/§3.2。本文件为 Task 3 骨架，桩位（后续任务接手点）：
-- _on_msg / self._renderer / self.status：Task 4 接 CliRenderer +
-  _StatusLine（("msg", m) 委托渲染器；bytes 前后接 status.erase()/
-  redraw() 擦除协议；("tick", None) 分支重画状态行）；
+§3.1/§3.2/§3.4。Task 4 已接：CliRenderer（事件→呈现映射 + 流式渲染 +
+零占位 boundary 协议）+ _StatusLine（任务期单行状态：转轮/计时/token，
+erase→写→redraw 擦除协议，0.25s tick 经 _outbox 串行重画）。剩余桩位：
 - _CaptureLayer：Task 5 换成本地截获层（审批/rescue/认证/中断），
   当前 on_keys 恒 ("pass", data) 全量直通；enter_approval/enter_rescue/
-  enter_auth 为 no-op（Task 4 渲染器会先按此形状调用）；
+  enter_auth 为 no-op（渲染器已按此形状调用：approval/rescue/
+  ask_password/ask_host_key 进待决态时触发）；
 - _run_edit：Task 5 编辑流（("edit", None) 分支接线点已留注释）。
 
 raw 原语四件（_set_raw_input/_restore_input/_read_one_key/_term_size）
@@ -29,6 +29,12 @@ import asyncio
 import os
 import signal
 import sys
+import time
+
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.text import Text
 
 from .config import Config
 from .core import ClientMsg, PipelineCore, ServerMsg
@@ -99,6 +105,468 @@ class _CaptureLayer:
         pass
 
 
+def _fmt_tokens(n: int) -> str:
+    """token 数渲染：>=1000 缩写为 k（1200 → "1.2k"），.0 去尾。"""
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        s = f"{n / 1000:.1f}"
+    else:
+        s = f"{n / 1_000_000:.1f}M"
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s + ("k" if n < 1_000_000 else "")
+
+
+class _WriterFile:
+    """rich Console → frontend.writer 的 file-like 适配器（纪律 #1）。
+
+    Console 的每笔输出编码成 UTF-8 字节后经 frontend._writer 发出，与
+    PTY 字节在同一串行 outbox 出队（Review Focus #3 不撕裂）。持有
+    frontend 而非 writer 本身：测试替换 frontend._writer 时取的是当次值。
+    """
+
+    def __init__(self, frontend: "TermFrontend") -> None:
+        self._fe = frontend
+
+    def write(self, s: str) -> int:
+        # raw 态终端 OPOST/ONLCR 已关：rich 输出的 \n 须翻译成 \r\n 防阶梯
+        self._fe._writer(
+            s.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
+        return len(s)
+
+    def flush(self) -> None:
+        pass    # writer 侧直写 stdout.buffer 已带 flush
+
+
+def _default_console(frontend: "TermFrontend"):
+    """生产 console：经 _WriterFile 走 frontend.writer（UTF-8 字节串行出队）。
+
+    force_terminal=True：CLI 输出恒为终端（面板边框/风险色 ANSI 直出），
+    测试注入 StringIO console 时不受影响（适配器同样成立，渲染输出与
+    字节流在测试里可分开断言）。宽度取当前终端列数。"""
+    return Console(file=_WriterFile(frontend), force_terminal=True,
+                   width=_term_size()[1])
+
+
+class _StatusLine:
+    """任务期单行状态（转轮 + 计时 + token 计数）。
+
+    绘制协议（Review Focus #3）：写任何内容前先 ``\\r\\x1b[K`` 擦本行，
+    写完重画；erase/redraw 只对 active 态生效。文本形如
+    ``⠋ 任务进行中 12s · in 1.2k / out 340``（estimated 时 ≈1.2k）。
+    0.25s tick 由 TermFrontend._tick_loop 经 _outbox 入队 ("tick", None)
+    （串行不撕裂），_render_loop 的 tick 分支调 redraw()。
+
+    光标状态两比特（防覆盖流式文本的关键）：
+    - _drawn：状态行当前在屏上，光标停在其行尾（可原位 ``\\r`` 刷新）；
+    - _fresh：光标停在新空行（可安全落状态行）。
+    流式 chunk 直写后两者皆否（光标在流式文本行中），redraw 跳过，
+    状态行隐没到下一个收束点（面板/换行结尾的写入）再重现。
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # 转轮帧，每次 redraw 步进一格
+
+    def __init__(self, frontend: "TermFrontend") -> None:
+        self._frontend = frontend
+        self.active = False
+        self._label = "任务进行中"
+        self._start = time.monotonic()
+        self._frame = 0
+        self._t_in = 0
+        self._t_out = 0
+        self._estimated = False
+        self._drawn = False
+        self._fresh = True
+
+    def _writer(self, data: bytes) -> None:
+        self._frontend._writer(data)
+
+    def _text(self) -> str:
+        el = max(0, int(time.monotonic() - self._start))
+        parts = [f"{self._FRAMES[self._frame]} {self._label} {el}s"]
+        if self._t_in or self._t_out:
+            sign = "≈" if self._estimated else ""
+            parts.append(f"in {sign}{_fmt_tokens(self._t_in)}"
+                         f" / out {sign}{_fmt_tokens(self._t_out)}")
+        return " · ".join(parts)
+
+    def activate(self, label: str) -> None:
+        self._label = label
+        self._start = time.monotonic()
+        self._frame = 0
+        self._t_in = self._t_out = 0
+        self._estimated = False
+        self.active = True
+        self.redraw()
+
+    def update(self, tokens_in: int, tokens_out: int, estimated: bool) -> None:
+        self._t_in = tokens_in
+        self._t_out = tokens_out
+        self._estimated = estimated
+        self.redraw()
+
+    def deactivate(self) -> None:
+        # 先擦再置 False：擦除只对在屏状态行生效，顺序反了会把状态行留在屏上
+        self.erase()
+        self.active = False
+
+    def erase(self) -> None:
+        """擦除在屏状态行（\\r\\x1b[K）；光标回到该行行首（视为新空行）。"""
+        if not self._drawn:
+            return
+        self._drawn = False
+        self._fresh = True
+        self._writer(b"\r\x1b[K")
+
+    def redraw(self) -> None:
+        """重画：光标在新空行（落新行）或状态行在屏（原位刷新）时有效；
+        流式行中（两者皆否）跳过，防止覆盖流式文本。"""
+        if not self.active or not (self._fresh or self._drawn):
+            return
+        text = self._text()
+        self._frame = (self._frame + 1) % len(self._FRAMES)
+        self._writer(f"\r{text}".encode("utf-8"))
+        self._drawn = True
+        self._fresh = False
+
+    def note_write(self, data: bytes | str) -> None:
+        """流式直写后同步光标状态：换行/回车结尾 → 新空行；否则行中。"""
+        if isinstance(data, bytes):
+            ended = data.endswith(b"\n") or data.endswith(b"\r")
+        else:
+            ended = data.endswith("\n") or data.endswith("\r")
+        if ended:
+            self._fresh = True
+        else:
+            self._fresh = False
+            self._drawn = False
+
+    @property
+    def at_fresh_line(self) -> bool:
+        """光标是否停在新空行（_print 据此决定是否先补换行收束）。"""
+        return self._fresh
+
+
+class CliRenderer:
+    """内联渲染器：ServerMsg → 终端呈现（spec §3.2 映射表 + §3.4 零占位协议）。
+
+    - 面板/单行文本经注入的 rich console 输出；_print 会先擦状态行再写、
+      写完重画（若状态行还活着），防止 rich 输出与状态行互相覆盖。
+    - 流式（ai_token/ai_think）与状态行不经 console：增量文本直接经
+      frontend 的 writer 追加（think 用暗灰 ANSI \\x1b[2m…\\x1b[22m 包裹）。
+    - ai_boundary → 立即 ``feed_msg(boundary_settled)``（零占位协议），
+      padded/new_session 忽略；decide/task_fail/rescue_decide 是
+      web 前端本地合成的事件词汇（core 不发），渲染器按 spec 词汇表
+      防御性承接。
+    - approval/rescue/ask_password/ask_host_key 渲染后进入本地截获态
+      （frontend.capture.enter_*，Task 5 前为 no-op 桩，调用形状已钉死）。
+    """
+
+    def __init__(self, core, console, frontend=None):
+        # frontend 允许缺省：取 core._frontend（CliCore 两段构造回填）；
+        # TermFrontend 构造时显式传 self，形状更稳（Task 5 会再碰这里）
+        self._core = core
+        self._console = console
+        self._frontend = frontend if frontend is not None \
+            else getattr(core, "_frontend", None)
+        self.status = _StatusLine(self._frontend) if self._frontend is not None \
+            else None
+        self._think_open = False   # 暗灰思考流开着（未收束）
+        self._think_text = ""      # 当前思考段累计文本（定格行数的事实源）
+        self._token_open = False   # 常规流式行开着（写过未换行）
+        self._last_summary = ""    # final 与 ai_card 同文去重（对齐 web store）
+
+    def _writer(self) -> object:
+        if self._frontend is not None:
+            return self._frontend._writer
+        return _default_writer
+
+    async def render(self, msg: ServerMsg) -> None:
+        t = msg.type
+        if t == "ready":
+            self._on_ready(msg)
+        elif t == "stage":
+            self._on_stage(msg)
+        elif t == "status":
+            self._print(Text(msg.text))
+        elif t == "usage":
+            if self.status is not None:
+                self.status.update(msg.tokens_in, msg.tokens_out,
+                                   msg.estimated)
+        elif t == "cmdset":
+            self._on_cmdset(msg)
+        elif t == "approval":
+            self._on_approval(msg)
+        elif t == "ask_password":
+            self._on_ask_password(msg)
+        elif t == "ask_host_key":
+            self._on_ask_host_key(msg)
+        elif t == "closed":
+            self._on_closed()
+        elif t == "event" and isinstance(msg.event, dict):
+            await self._on_event(msg.event)
+        # 未知 type 静默忽略（对齐 web handleEvent 的 default 分支）
+
+    # --- ServerMsg type 分支 ---
+
+    def _on_ready(self, msg: ServerMsg) -> None:
+        """一行连接信息（spec §3.2 映射表原文）：interactive 字段存在且为
+        1 → 「AI 就绪」；否则 → 「AI 不可用：shell 不支持集成」。"""
+        body = Text.assemble(
+            ("已连接 ", None),
+            (msg.host or "?", "bold"),
+            (f" {msg.user}" if msg.user else "", None),
+            (f"（{msg.distro}）" if msg.distro else "", None),
+            ("  [", None),
+            ("AI 就绪", "green") if msg.interactive == 1
+            else ("AI 不可用：shell 不支持集成", "red"),
+            ("]", None),
+        )
+        self._print(body)
+
+    def _on_stage(self, msg: ServerMsg) -> None:
+        if msg.text == "agent_init":
+            self._print(Text("正在初始化 Agent…", style="dim cyan"))
+        elif msg.text:
+            self._print(Text(f"连接阶段：{msg.text}", style="dim cyan"))
+
+    def _on_cmdset(self, msg: ServerMsg) -> None:
+        if msg.state == "running":
+            self._print(Text(f"命令集 {msg.index}/{msg.total}",
+                             style="cyan"))
+        elif msg.state == "done":
+            self._print(Text(f"命令集完成（{msg.total}/{msg.total}）",
+                             style="cyan"))
+        # paused：CLI 无「继续」入口，计划映射表未定义 → 静默
+
+    def _on_approval(self, msg: ServerMsg) -> None:
+        """审批框：risk=="high" 红色边框、"normal" 蓝色；同时进入本地
+        截获态（Task 5 前为 no-op 桩，只记录调用形状）。"""
+        border = "red" if msg.risk == "high" else "blue"
+        title = "高危命令待审批" if msg.risk == "high" else "命令待审批"
+        body = Text.assemble(
+            ("理由：", "dim"), (msg.reasons or "—", None),
+            (" · 主机：", "dim"), (msg.host or "—", None),
+            ("\n", None),
+            ("Enter 执行 · Backspace 拒绝 · e 编辑", "dim"),
+        )
+        self._print(Panel(
+            Group(Syntax(msg.command, "bash", word_wrap=True,
+                         theme="ansi_dark"), body),
+            title=f"[bold {border}]{title}[/] · {msg.host}",
+            title_align="left", border_style=border))
+        if self._frontend is not None:
+            self._frontend.capture.enter_approval(msg.risk or "high")
+
+    def _on_ask_password(self, msg: ServerMsg) -> None:
+        label = msg.label or "密码"
+        self._print(Text.assemble((label, "bold"), ("（输入不回显，Enter 提交）",
+                                                    "dim")))
+        if self._frontend is not None:
+            self._frontend.capture.enter_auth("password")
+
+    def _on_ask_host_key(self, msg: ServerMsg) -> None:
+        self._print(Text(msg.message or "未知主机指纹，是否信任？"))
+        self._print(Text("按 y 信任并继续 / n 拒绝连接", style="dim"))
+        if self._frontend is not None:
+            self._frontend.capture.enter_auth("host_key")
+
+    def _on_closed(self) -> None:
+        self._flush_streams()
+        self._print(Text("会话已结束", style="dim"))
+        self._status_off()   # Task 3 已有 stop 逻辑，这里只收状态行
+
+    # --- 事件分支 ---
+
+    async def _on_event(self, ev: dict) -> None:
+        kind = ev.get("kind")
+        if kind == "task_start":
+            self._flush_streams()
+            self._think_text = ""
+            self._last_summary = ""
+            if self.status is not None:
+                self.status.activate("任务进行中")   # 状态行点亮（计时开始）
+        elif kind == "ai_token":
+            self._on_ai_token(ev.get("text", ""))
+        elif kind == "ai_think":
+            self._on_ai_think(ev.get("text", ""))
+        elif kind == "ai_collapse":
+            self._on_ai_collapse(ev.get("command", ""))
+        elif kind in ("final", "ai_card"):
+            text = ev.get("text") or ev.get("markdown") or ""
+            self._on_final_card(text)
+        elif kind == "denied":
+            self._fail_line(ev.get("text", ""), "✗", "bold red")
+        elif kind == "limit":
+            self._fail_line(ev.get("text", ""), "⚠", "bold yellow")
+        elif kind in ("error", "task_fail"):
+            self._fail_line(ev.get("text") or ev.get("reason", ""),
+                            "✗", "bold red")
+        elif kind == "rescue":
+            self._on_rescue(ev)
+        elif kind == "rescue_decide":
+            self._on_rescue_decide(ev)
+        elif kind == "decide":
+            self._on_decide(ev)
+        elif kind == "session_cleared":
+            self._flush_streams()
+            self._think_text = ""
+            self._last_summary = ""
+            self._print(Text("已开启新任务"))
+        elif kind == "ai_boundary":
+            # 零占位协议（§3.4）：无卡可结账，立即 ack 让命令注入零等待
+            if self._core is not None:
+                await self._core.feed_msg(ClientMsg(type="boundary_settled"))
+        # padded / new_session / 未知事件 → 忽略（零占位协议）
+
+    def _on_ai_token(self, text: str) -> None:
+        """常规流式：增量文本直接经 writer 追加（不经 console）。"""
+        if not text or self._frontend is None:
+            return
+        if self._think_open:
+            # 暗灰思考流开着被 token 打断：先换行收束（摘要由 ai_collapse 定格）
+            self._stream_write("\r\n")
+            self._think_open = False
+            self._think_text = ""
+        elif self.status is not None and self.status.active:
+            self.status.erase()   # 状态行让位：token 从其行首起写
+        self._token_open = True
+        self._stream_write(text)
+
+    def _on_ai_think(self, text: str) -> None:
+        """暗灰流式：\\x1b[2m…\\x1b[22m 包裹增量文本直接经 writer 追加。"""
+        if not text or self._frontend is None:
+            return
+        if self._token_open:
+            self._stream_write("\r\n")
+            self._token_open = False
+        elif self.status is not None and self.status.active:
+            self.status.erase()   # 状态行让位：思考流从其行首起写
+        if not self._think_open:
+            self._think_open = True
+            self._think_text = ""
+        self._think_text += text
+        self._stream_write(f"\x1b[2m{text}\x1b[22m")
+
+    def _end_think(self) -> None:
+        """思考段收束：定格一行摘要 `… 思考 N 行`（spec ai_collapse 映射）。"""
+        if self._frontend is None:
+            self._think_open = False
+            self._think_text = ""
+            return
+        if self._think_open:
+            self._stream_write("\r\n")
+            self._think_open = False
+        n = len([l for l in self._think_text.split("\n") if l.strip()])
+        if n:
+            self._stream_write(f"… 思考 {n} 行\r\n")
+        self._think_text = ""
+
+    def _on_ai_collapse(self, command: str) -> None:
+        """段落定格：先收思考段，再呈现 AI 发起的命令面板（原 web 卡片头）。"""
+        self._end_think()
+        if not command:
+            return
+        body = Text.assemble(
+            ("$ ", "dim"), (command, None), ("\n", None),
+            ("（AI 发起执行，输出见上方终端）", "dim"),
+        )
+        self._print(Panel(body, title="▶ 执行", title_align="left",
+                          border_style="cyan"))
+
+    def _flush_streams(self) -> None:
+        """final/error/denied/limit/task_fail/closed 前收束进行中的流式行。"""
+        self._end_think()
+        if self._token_open:
+            if self._frontend is not None:
+                self._stream_write("\r\n")
+            self._token_open = False
+
+    def _on_final_card(self, text: str) -> None:
+        self._flush_streams()
+        if not text or text == self._last_summary:
+            return
+        self._last_summary = text
+        self._summary_panel(text)
+        self._status_off()
+
+    def _summary_panel(self, text: str) -> None:
+        """总结框（render.print_summary 等价，但经本前端 console——不改
+        render.py）。rich Markdown 渲染（markdown 包缺失时 Text 兜底）；
+        final 与 ai_card 连发同一份 markdown，同文去重（_on_final_card）。"""
+        try:
+            from rich.markdown import Markdown
+            content = Markdown(text)
+        except ImportError:     # rich.markdown 缺依赖（markdown 包）→ 纯文本
+            content = Text(text)
+        self._print(Panel(content, title="[bold green]📝 总结[/]",
+                          title_align="left", border_style="green"))
+
+    def _fail_line(self, text: str, symbol: str, style: str) -> None:
+        """denied/limit/error/task_fail：红/黄单行 + 状态行定格。"""
+        self._flush_streams()
+        body = Text.assemble((f"{symbol} ", style), (text, None))
+        self._print(body)
+        self._status_off()
+
+    def _status_off(self) -> None:
+        if self.status is not None:
+            self.status.deactivate()
+
+    def _on_decide(self, ev: dict) -> None:
+        """决策回执：审批框原位收回执行（web store decide 事件的 CLI 呈现，
+        词汇表内；core 不发该事件，由 Task 5 截获层本地合成或防御性承接）。"""
+        self._flush_streams()
+        d = ev.get("decision") or {}
+        typ = d.get("type") if isinstance(d, dict) else d
+        if typ == "reject":
+            self._print(Text("✗ 已拒绝", style="bold red"))
+        else:
+            self._print(Text("✓ 已执行", style="bold green"))
+
+    def _on_rescue(self, ev: dict) -> None:
+        """救援面板：失败行 + 退出码 + 输出尾部；同时进入本地截获态。"""
+        self._flush_streams()
+        out = (ev.get("output") or "").strip()
+        out_tail = "\n".join(out.splitlines()[-12:])   # 只展示输出尾部
+        body = Text.assemble(
+            ("失败命令：", "dim"), (ev.get("line", ""), None), ("\n", None),
+            ("退出码：", "dim"), (str(ev.get("ec", "?")), "bold"), ("\n", None),
+            (out_tail, "dim") if out_tail else ("（无输出）", "dim"),
+        )
+        self._print(Panel(body, title="[bold red]命令失败救援[/]",
+                          title_align="left", border_style="red"))
+        if self._frontend is not None:
+            self._frontend.capture.enter_rescue()
+
+    def _on_rescue_decide(self, ev: dict) -> None:
+        """救援面板收回单行定格（web store rescue_decide 语义）。"""
+        self._flush_streams()
+        if ev.get("accept"):
+            self._print(Text("✓ 已交给 AI", style="bold green"))
+        else:
+            self._print(Text("已忽略"))
+
+    def _stream_write(self, data: str) -> None:
+        """流式直写（经 writer，不经 console）；同步状态行光标状态。"""
+        b = data.encode("utf-8")
+        self._writer()(b)
+        if self.status is not None:
+            self.status.note_write(b)
+
+    def _print(self, renderable) -> None:
+        """console 输出统一入口：擦状态行 → 写 → 重画（状态行 active 时），
+        保证 rich 面板与状态行/PTY 字节不互相覆盖（Review Focus #3）。"""
+        if self.status is not None:
+            self.status.erase()
+            if not self.status.at_fresh_line:
+                self._stream_write("\r\n")   # 行中收起新行，防面板接半行
+        self._console.print(renderable)
+        if self.status is not None:
+            self.status.redraw()
+
+
 def _default_writer(data: bytes) -> None:
     try:
         sys.stdout.buffer.write(data)
@@ -122,15 +590,21 @@ class TermFrontend:
         self._outbox: asyncio.Queue = asyncio.Queue()
         self._stop = asyncio.Event()
         self._capture = _CaptureLayer(self)
-        self._renderer = None      # Task 4：CliRenderer（_on_msg 委托对象）
-        self.status = None         # Task 4：_StatusLine
-        self._console = console    # Task 4：rich Console（测试注入 StringIO）
+        self._writer = writer if writer is not None else _default_writer
+        self._console = console if console is not None \
+            else _default_console(self)   # 生产 rich Console（经 writer 适配器）
+        self._renderer = CliRenderer(core, self._console, frontend=self)
+        self.status = self._renderer.status   # _StatusLine（bytes 分支擦除协议）
         self._reader = reader if reader is not None \
             else self._make_default_reader()
-        self._writer = writer if writer is not None else _default_writer
         self._winch_installed = False
         self._raw_state = None     # termios 状态（Task 5 编辑流交接复用）
         self._stdin_fd: int | None = None   # 默认 reader 注册的 fd（退出清理）
+
+    @property
+    def capture(self) -> _CaptureLayer:
+        """截获层（Task 5 换真实现）：渲染器经它进入审批/rescue/认证待决态。"""
+        return self._capture
 
     # --- 默认 IO 原语 ---
 
@@ -197,7 +671,8 @@ class TermFrontend:
             self.core.attach(None)
             render = asyncio.create_task(self._render_loop())
             pump = asyncio.create_task(self._input_pump())
-            tasks = [render, pump]
+            ticker = asyncio.create_task(self._tick_loop())
+            tasks = [render, pump, ticker]
             waiter = asyncio.ensure_future(self._stop.wait())
             try:
                 while not self._stop.is_set():
@@ -251,19 +726,37 @@ class TermFrontend:
         while True:
             kind, payload = await self._outbox.get()
             if kind == "bytes":
-                # Task 4 擦除协议接线点：status.erase() → write →
-                # status.redraw()（骨架期 status 未建，直写）
+                # 擦除协议（Review Focus #3）：写 PTY 字节前擦状态行、
+                # 写完重画（未点亮时二者皆 no-op）
+                self.status.erase()
                 self._writer(payload)
+                self.status.redraw()
             elif kind == "msg":
                 await self._on_msg(payload)
                 if payload.type == "closed":
                     self._stop.set()   # 先渲染后停
                     return
-            # kind == "tick"：Task 4 状态行 0.25s 重画（骨架期忽略）
+            elif kind == "tick":
+                # 状态行 0.25s 重画（仅 active 态写屏；与 PTY 字节串行）
+                self.status.redraw()
 
     async def _on_msg(self, msg: ServerMsg) -> None:
-        """结构化消息钩子（Task 4 委托 self._renderer.render(msg)）。"""
-        return None
+        """结构化消息钩子：委托 CliRenderer.render（事件→呈现映射）。"""
+        await self._renderer.render(msg)
+
+    # --- 状态行 tick（0.25s）---
+
+    async def _tick_loop(self) -> None:
+        """状态行重画节拍：仅 active 时经 _outbox 入队 ("tick", None)，
+        由 _render_loop 串行消费重画——tick 与 PTY 字节/渲染共用同一队列，
+        不撕裂（Review Focus #3）。deactivate 后自动静默。"""
+        try:
+            while True:
+                await asyncio.sleep(0.25)
+                if self.status is not None and self.status.active:
+                    self._outbox.put_nowait(("tick", None))
+        except asyncio.CancelledError:
+            raise
 
     # --- 输入泵 ---
 
