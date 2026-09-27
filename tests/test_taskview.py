@@ -207,32 +207,3 @@ def test_box_shows_full_text_even_when_live_tails():
     assert "已省略前文" not in out
     # 折行不影响完整性：600 个字符一个不少
     assert out.count("x") == 600
-
-
-# --- ThinkingIndicator（主循环"判断中…"）---
-
-
-def test_thinking_indicator_noop_without_tty():
-    from rich.console import Console
-
-    from openterminal.taskview import ThinkingIndicator
-
-    con = Console(force_terminal=False)
-    ind = ThinkingIndicator(con)
-    ind.start()  # 非 TTY：不创建 Live、不报错
-    ind.stop()
-    assert ind.busy is False
-
-
-def test_thinking_indicator_busy_flag_in_memory_console():
-    from rich.console import Console
-
-    from openterminal.taskview import ThinkingIndicator
-
-    # file 输出的 Console 不是 terminal，仍走空操作分支
-    import io
-
-    con = Console(file=io.StringIO())
-    ind = ThinkingIndicator(con)
-    ind.start("判断中…")
-    assert ind.busy is False

@@ -2,17 +2,12 @@
 
 选定连接目标后进入 TermFrontend 单管线终端：输入即终端（PTY 直通），
 自然语言直接交给 AI，/help 查看命令（/target /system /clear /model /exit
-等斜杠命令由核心 core.py 统一承接）。旧双管线 REPL（意图分类、哨兵捕获、
-raw 模式切换）已移除；rawmode.py / intent.py 文件本体待 Task 7 删除。
+等斜杠命令由核心 core.py 统一承接）。
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import uuid
-from typing import Callable
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
 from prompt_toolkit.key_binding import KeyBindings
@@ -24,64 +19,16 @@ from prompt_toolkit.styles import Style
 from . import render
 from .config import Config, TargetConfig
 from .connections import (
-    JumpGroup, JumpHost, TargetList, build_target_list, display_name, jump_for,
+    JumpGroup, JumpHost, TargetList, build_target_list, display_name,
     load_jump_hosts, load_saved_targets, parse_user_at_host, save_jump_hosts,
     save_saved_targets,
 )
 from .policy import Policy
-from .secrets_store import load_password, store_password
-from .sysprobe import LOCAL_PROFILE, SystemProfile
+from .secrets_store import store_password
 from .term_frontend import CliCore, TermFrontend
-from .transcript import open_transcript
 
-# 全屏/会话接管类命令白名单：命中即走透传（tui ctx），免去前端"第一帧落在
-# 文本块再升级"的闪烁。这只是快路径——正确性由前端输出序列检测兜底
-#（ansi.js AnsiStream.tui），新全屏命令不登记也能正确渲染，见 app.js _escalateTui。
-_INTERACTIVE = {
-    "vim", "nvim", "nano", "vi", "view", "vimdiff", "emacs", "top", "htop",
-    "btop", "tmux", "screen", "less", "more", "man", "ssh", "sftp", "mysql",
-    "psql", "redis-cli", "python", "python3", "node", "irb", "su",
-    "watch", "iotop", "iftop", "nethogs", "atop", "glances",
-    "powershell", "pwsh",
-}
-
-# 裸 shell（不带 -c）是交互程序；sudo -i/-s/--login/--shell 直接起登录 shell
-_SHELL_VERBS = {"bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh"}
-_SUDO_INTERACTIVE_FLAGS = {"-i", "-s", "--login", "--shell"}
-# PowerShell 的一次性执行参数（跑完进程即退出）；-NoExit 显式保持会话除外
-_PS_ONESHOT_FLAGS = {"-c", "-command", "-commandwithargs", "-file",
-                     "-encodedcommand"}
-# 这些 PS 选项的值是独立 token（如 -ExecutionPolicy Bypass），不算位置参数
-_PS_VALUE_OPTIONS = {
-    "-executionpolicy", "-outputformat", "-inputformat",
-    "-configurationname", "-configurationfile", "-workingdirectory",
-    "-custompipename",
-}
-
-
-def _ps_is_oneshot(args: list[str]) -> bool:
-    """powershell/pwsh 参数是否为一次性执行形式（-Command/-File/位置参数）。
-
-    ``powershell -Command Write-Output x`` 跑完即退出，按普通命令处理；
-    裸 ``powershell`` / ``powershell -NoLogo`` / ``-NoExit -Command …``（显式
-    保持会话）才是会话接管。位置参数判定要跳过带独立值的选项
-    （-ExecutionPolicy Bypass 的 Bypass 不是脚本参数）。
-    """
-    has_positional = False
-    i = 0
-    while i < len(args):
-        low = args[i].lower()
-        if low == "-noexit":
-            return False
-        if low in _PS_ONESHOT_FLAGS:
-            return True
-        if low in _PS_VALUE_OPTIONS:
-            i += 2                       # 跳过选项及其值
-            continue
-        if not args[i].startswith("-"):
-            has_positional = True
-        i += 1
-    return has_positional
+# 全屏/会话接管不再需要 CLI 白名单：单管线前端按输出序列自动升级透传，
+# 新全屏命令零登记（term_frontend 与 web ansi.js 同款检测）。
 
 
 _ADD_NEW = "__add_new__"    # 管理主机里「添加主机」的哨兵键
@@ -117,94 +64,6 @@ def jump_submenu_rows(group: JumpGroup) -> list[tuple[str | None, str]]:
     return rows
 
 
-def is_interactive_command(command: str) -> bool:
-    parts = command.split()
-    if not parts:
-        return False
-    if parts[0] == "sudo":
-        rest = parts[1:]
-        # 跳过前导选项及其值参数（-u/-g/-U 后跟用户名），取首个非选项作 verb；
-        # -i/-s/--login/--shell 本身即会话接管，直接判交互
-        while rest:
-            tok = rest[0]
-            if tok in _SUDO_INTERACTIVE_FLAGS:
-                return True
-            if tok in {"-u", "-g", "-U"} and len(rest) > 1:
-                rest = rest[2:]
-            elif tok.startswith("-"):
-                rest = rest[1:]
-            else:
-                break
-        if not rest:
-            return False
-        verb = rest[0]
-        args_after = rest[1:]
-    else:
-        verb = parts[0]
-        args_after = parts[1:]
-    if verb == "tail":
-        return "-f" in parts or "-F" in parts
-    if verb in _SHELL_VERBS and "-c" in args_after:
-        return False  # bash -c '...' 一次性执行，非交互
-    if verb in ("powershell", "pwsh") and _ps_is_oneshot(args_after):
-        return False  # powershell -Command/位置参数 一次性执行，非交互
-    return verb in _INTERACTIVE or verb in _SHELL_VERBS
-
-
-# 长驻流式命令（日志 follow 等）：无超时实时流式，用户 Ctrl+C（⏹）收束。
-# 只看 -f 会误伤 rm -f 等「force」语义，故按 verb + 子命令组合判定。
-_STREAMING_PATTERNS: dict[str, Callable[[list[str]], bool]] = {
-    "tail": lambda p: "-f" in p or "-F" in p,
-    "journalctl": lambda p: "-f" in p or "--follow" in p,
-    "docker": lambda p: "logs" in p and ("-f" in p or "--follow" in p),
-    "podman": lambda p: "logs" in p and ("-f" in p or "--follow" in p),
-    "kubectl": lambda p: "logs" in p and ("-f" in p or "--follow" in p),
-}
-
-
-def is_streaming_command(command: str) -> bool:
-    """命令是否为长驻流式（docker logs -f / tail -f / journalctl -f …）。
-
-    这类命令不能包哨兵 run：进程不退出 → END 哨兵永不出现 → 挂满超时。
-    必须走无超时流式，用户 Ctrl+C 收束。
-    """
-    parts = command.split()
-    if not parts:
-        return False
-    fn = _STREAMING_PATTERNS.get(parts[0])
-    return fn(parts) if fn else False
-
-
-def is_quit_line(line: str) -> bool:
-    """`exit`/`quit`/`logout`（含 / 前缀与 ! 前缀）判定为退出 ot。
-
-    不能把它们当普通命令发给远端 shell：登录 shell 一退出就触发自动重连，
-    重连又回到密码提示（CLI/Web 同病）。
-    """
-    head = line.strip().lstrip("!").split(maxsplit=1)[0] if line.strip() else ""
-    return head in {"/exit", "/quit", "exit", "quit", "logout"}
-
-
-def _git_branch(cwd: str) -> str | None:
-    """返回当前 git 分支名；非仓库或失败时返回 None。"""
-    import subprocess
-
-    try:
-        r = subprocess.run(
-            ["git", "-C", cwd, "branch", "--show-current"],
-            capture_output=True, text=True, timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    branch = r.stdout.strip()
-    return branch or None
-
-
-def prompt_text(profile: SystemProfile, session, user: str) -> str:
-    cwd = session.cwd.replace(os.path.expanduser("~"), "~") if session.cwd else "~"
-    branch = _git_branch(session.cwd) if session.cwd else None
-    git_seg = f" git:({branch})" if branch else ""
-    return (f"ot {user}@{profile.host} ({profile.os_family}) {cwd}{git_seg} $ ")
 
 
 # --- 光标选择菜单（prompt_toolkit Application，替换编号输入）---
@@ -313,17 +172,9 @@ class Cli:
             mode=cfg.policy.mode, auto_extra=cfg.policy.auto_extra,
             approve_extra=cfg.policy.approve_extra, deny_extra=cfg.policy.deny_extra,
         )
-        self.session_id = uuid.uuid4().hex[:8]
-        self.transcript = open_transcript(self.session_id)
         self.session = None
-        self.profile = LOCAL_PROFILE
-        self.agent = None
-        self.backend = None
-        self.allowed: set[str] = set()
         # 本次会话里由用户手敲 user@host 临时注册的目标（连接成功后询问是否记住）
         self._adhoc_targets: set[str] = set()
-        # 本次会话里新添加的跳板机（连接成功后询问是否记住其密码）
-        self._adhoc_jumps: set[str] = set()
         # config.toml 手写目标的名字（含 default）：只读，管理主机时不许被覆盖
         self._config_target_names = set(self.cfg.targets)
         # 记住的连接注册进可选目标（config.toml 里手写的优先）
@@ -646,26 +497,6 @@ class Cli:
             if isinstance(pick, tuple) and pick[0] == "j":
                 await self._manage_jump_host(pick[1])
                 continue
-
-    async def _maybe_remember_jump(self, target) -> None:
-        """新添加的跳板机首次用密码连上后，询问是否把密码存系统凭据库。"""
-        jump = jump_for(target)
-        if not jump or jump.name not in self._adhoc_jumps:
-            return
-        if load_password(jump.host, jump.user, jump.port) is not None:
-            return
-        used = getattr(self.session, "last_jump_password", None)
-        if used is None:
-            return
-        self._adhoc_jumps.discard(jump.name)
-        try:
-            ans = (await _prompt_text(
-                "记住该跳板机密码（存系统凭据库）？下次免密 [y/N]: ")).strip().lower()
-        except EOFError:
-            return
-        if ans in {"y", "yes"}:
-            if store_password(jump.host, jump.user, jump.port, used):
-                render.console.print("[dim]跳板机密码已存入系统凭据库。[/]")
 
     async def _connect_via_picker(self) -> str | None:
         """经选择框选连接目标，返回目标名（连接由 _run_pipeline 进行，此处

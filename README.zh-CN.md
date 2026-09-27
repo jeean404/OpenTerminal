@@ -37,9 +37,9 @@ Xshell 可以省了。
   (`rm -rf /`、fork 炸弹……)直接拒绝。失败了有界自纠(10 轮预算),
   不会无限重试刷屏。
 - **你的 shell 还是你说了算。** 会话持久(`cd`、环境变量、venv 都在),
-  Ctrl+R 随时把终端整个让给 vim/top/tmux,Ctrl+O 回来,互不打扰。
-- **两种打开方式。** 终端 REPL,或者 `ot web`——浏览器里的服务器侧栏 +
-  多 tab 终端,底层是同一套核心。
+  vim/top/tmux 这类全屏程序自动接管终端,原生内联,零登记。
+- **两种打开方式。** 单管线终端(`ot`),或者 `ot web`——浏览器里的服务器
+  侧栏 + 多 tab 终端,底层是同一套核心。
 
 ## 快速开始
 
@@ -56,7 +56,7 @@ mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
 然后:
 
 ```sh
-ot          # 终端 REPL——本机 shell + 主菜单(连接 / 管理主机)
+ot          # 终端——本机 shell + 主菜单(连接 / 管理主机)
 ot web      # 浏览器终端——服务器侧栏 + 多 tab(默认 http://127.0.0.1:8080)
 ```
 
@@ -105,9 +105,10 @@ host = "prod-web.example.com"
 
 ## 日常使用
 
-**REPL 里**——直接打字。说人话就是任务,敲命令就是命令。`!` 强制命令、
-`?` 强制任务;`/target` 切主机、`/system` 手动方言、`/clear` 新任务、
-`/model` 查看模型、`/exit` 退出;Ctrl+R 终端透传,Ctrl+O 返回。
+**终端里**——直接打字。说人话就是任务,敲命令就在你的真 shell 里跑。
+`!` 强制命令、`?` 强制任务;`/target` 切主机、`/system` 手动方言、
+`/clear` 新任务、`/model` 查看模型、`/exit` 退出;Ctrl+C 中断当前任务,
+回到提示符。
 
 **浏览器里**(`ot web`)——侧栏选服务器(local / 直连 / 经跳板机),
 tab 想开几个开几个,Agent 视图和纯 Shell 视图随意切换。密码、主机密钥
@@ -144,9 +145,10 @@ jump 再隧道到目标,密码认证的跳板机也能用,记住密码同样走�
   <img src="docs/images/architecture.svg" width="860" alt="OpenTerminal 架构图">
 </div>
 
-三层结构:自然语言前端(REPL 或 Web)、deepagents(LangGraph)Agent、
-持久 shell 会话。输入先经意图甄别——直接命令走会话执行,任务交给 Agent
-多轮调用工具;三级策略在 Agent 中间件层强制,提示词内容绕不过审批闸门。
+三层结构:自然语言前端(终端或 Web)、deepagents(LangGraph)Agent、
+持久 shell 会话。自然语言直接交给 Agent 多轮调用工具,命令执行是 Agent
+的子能力(经同一会话);三级策略在 Agent 中间件层强制,提示词内容绕不过
+审批闸门。
 
 命令输出用 BEGIN/END 哨兵标记切分(`shell_session.py`),实时流给界面;
 单会话内命令严格串行——一个 PTY 就是一条交互 shell,Agent 并发发起的

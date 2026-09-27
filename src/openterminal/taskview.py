@@ -182,34 +182,3 @@ class _LiveView:
         yield self._stream._render_live()
 
 
-class ThinkingIndicator:
-    """rich console.status 的可复用 start/stop 封装；非 TTY 下完全空操作。
-
-    用于主循环里"判断中…"这类短等待；任务内的模型思考由 ThinkingStream
-    呈现。rich Live 与 prompt_toolkit 不能同时占用终端：所有输入 prompt
-    （审批、主输入行）出现前调用方必须先 stop()。
-    """
-
-    def __init__(self, console, text: str = "思考中…") -> None:
-        self._console = console
-        self.text = text
-        self._status = None
-        self.busy = False
-
-    def start(self, text: str | None = None) -> None:
-        if not self._console.is_terminal:
-            return
-        if text is not None:
-            self.text = text
-        if self._status is None:
-            self._status = self._console.status(self.text, spinner="dots")
-        else:
-            self._status.update(self.text)
-        if not self.busy:
-            self._status.start()
-            self.busy = True
-
-    def stop(self) -> None:
-        if self._status is not None and self.busy:
-            self._status.stop()
-        self.busy = False

@@ -39,10 +39,11 @@ Here's what happens in the demo above:
   fork bombs, …) are refused outright. Failed attempts get a bounded
   self-correction budget (10 turns), not infinite retry loops.
 - **Your shell stays yours.** Persistent session (`cd`, exports, venv all
-  survive), and Ctrl+R hands the terminal to vim/top/tmux whenever you want
-  the raw thing — Ctrl+O brings you back.
-- **Two ways in.** A terminal REPL, or `ot web` — a browser UI with a server
-  sidebar and multi-tab terminals, sharing the same core.
+  survive), and full-screen programs like vim/top/tmux take over the
+  terminal natively — detected automatically, right inline.
+- **Two ways in.** A single-pipeline terminal (`ot`), or `ot web` — a
+  browser UI with a server sidebar and multi-tab terminals, sharing the
+  same core.
 
 ## Quick start
 
@@ -60,7 +61,7 @@ mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
 Then:
 
 ```sh
-ot          # terminal REPL — local shell + main menu (connect / manage hosts)
+ot          # terminal — local shell + main menu (connect / manage hosts)
 ot web      # browser terminal — server sidebar + multi-tab UI (default http://127.0.0.1:8080)
 ```
 
@@ -109,10 +110,11 @@ profiles are cached in `~/.openterminal/hosts.toml`.
 
 ## Day-to-day use
 
-**In the REPL** — just type. A normal sentence becomes a task; a plain
-command just runs. `!` forces a command, `?` forces a task. `/target`
-switch host, `/system` override the detected dialect, `/clear` new task,
-`/model` show model, `/exit` quit. Ctrl+R raw passthrough, Ctrl+O back.
+**In the terminal** — just type. A normal sentence becomes a task; a plain
+command runs in your real shell. `!` forces a command, `?` forces a task.
+`/target` switch host, `/system` override the detected dialect, `/clear`
+new task, `/model` show model, `/exit` quit. Ctrl+C interrupts a running
+task and returns you to the prompt.
 
 **In the browser** (`ot web`) — pick a server from the sidebar (local,
 direct, or via jump host), open as many tabs as you like, and work in the
@@ -157,11 +159,12 @@ tool-call turns are budget-bounded.
   <img src="docs/images/architecture.svg" width="860" alt="OpenTerminal architecture">
 </div>
 
-Three layers: the natural-language front end (REPL or web), a deepagents
-(LangGraph) agent, and persistent shell sessions. Input is classified by
-intent — direct commands go straight to the session, tasks go to the agent
-for multi-turn tool use. The tiered policy is enforced as agent middleware,
-so the approval gate can't be bypassed by prompt content.
+Three layers: the natural-language front end (terminal or web), a
+deepagents (LangGraph) agent, and persistent shell sessions. Natural
+language goes straight to the agent for multi-turn tool use; command
+execution is a sub-capability of the agent, over the same session. The
+tiered policy is enforced as agent middleware, so the approval gate can't
+be bypassed by prompt content.
 
 Command output is delimited with BEGIN/END sentinels (`shell_session.py`)
 and streamed live to the UI; a per-session lock keeps commands strictly
