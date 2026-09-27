@@ -346,7 +346,13 @@ async def test_approval_panel_content():
     r2, sink2, _ = _make_renderer(force_terminal=True)
     await r2.render(ServerMsg(type="approval", command="cmd", reasons="r",
                               host="h", risk="high"))
-    assert "\x1b[31m" in sink2.getvalue()
+    out2 = sink2.getvalue()
+    assert "\x1b[31m" in out2
+    # 操作提示行要醒目：黄色加粗（曾为 dim 灰，用户反馈看不见）
+    i = out2.index("Enter 执行")
+    hint_prefix = out2[max(0, i - 24):i]
+    assert "33" in hint_prefix and "1" in hint_prefix  # yellow + bold
+    assert "2m" not in hint_prefix                     # 不再是 dim
 
 
 async def test_rescue_panel_and_decide():

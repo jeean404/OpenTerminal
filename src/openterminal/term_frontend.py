@@ -635,7 +635,7 @@ class CliRenderer:
             ("理由：", "dim"), (msg.reasons or "—", None),
             (" · 主机：", "dim"), (msg.host or "—", None),
             ("\n", None),
-            ("Enter 执行 · Backspace 拒绝 · e 编辑", "dim"),
+            ("Enter 执行 · Backspace 拒绝 · e 编辑", "bold yellow"),
         )
         self._print(Panel(
             Group(Syntax(msg.command, "bash", word_wrap=True,
@@ -657,7 +657,7 @@ class CliRenderer:
 
     def _on_ask_host_key(self, msg: ServerMsg) -> None:
         self._print(Text(msg.message or "未知主机指纹，是否信任？"))
-        self._print(Text("按 y 信任并继续 / n 拒绝连接", style="dim"))
+        self._print(Text("按 y 信任并继续 / n 拒绝连接", style="bold yellow"))
         if self._frontend is not None:
             self._frontend.capture.enter_auth("host_key")
 
