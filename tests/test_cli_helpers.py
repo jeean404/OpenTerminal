@@ -1,4 +1,4 @@
-# --- 记住的连接（~/.openterminal/connections.toml，不入 git）---
+# --- 记住的连接（~/.openterminal/connections.db，不入 git）---
 
 
 def _make_cli():
@@ -6,6 +6,17 @@ def _make_cli():
     from openterminal.config import Config
 
     return Cli(Config.load())
+
+
+def _connected_core(last_password=None):
+    """_maybe_remember 的 core 契约：connected 已置位 + session.last_password。"""
+    import asyncio
+
+    core = type("Core", (), {})()
+    core.connected = asyncio.Event()
+    core.connected.set()
+    core.session = type("S", (), {"last_password": last_password})()
+    return core
 
 
 async def test_maybe_remember_yes_saves_connection(monkeypatch):
@@ -21,7 +32,7 @@ async def test_maybe_remember_yes_saves_connection(monkeypatch):
         return "y"
 
     monkeypatch.setattr(cli_mod, "_prompt_text", yes)
-    await c._maybe_remember(name)
+    await c._maybe_remember(name, _connected_core())
     saved = load_saved_targets()
     assert [t.name for t in saved] == ["root@203.0.113.7"]
     assert (saved[0].host, saved[0].user, saved[0].port) == \
@@ -39,7 +50,7 @@ async def test_maybe_remember_default_no_not_saved(monkeypatch):
         return ""
 
     monkeypatch.setattr(cli_mod, "_prompt_text", no)
-    await c._maybe_remember(name)
+    await c._maybe_remember(name, _connected_core())
     assert load_saved_targets() == []
 
 
@@ -60,7 +71,7 @@ async def test_maybe_remember_skips_already_saved(monkeypatch):
         raise AssertionError("不应询问已记住的连接")
 
     monkeypatch.setattr(cli_mod, "_prompt_text", boom)
-    await c._maybe_remember(name)
+    await c._maybe_remember(name, _connected_core())
     assert len(load_saved_targets()) == 1
 
 
@@ -76,8 +87,29 @@ async def test_maybe_remember_ignores_config_targets(monkeypatch):
         raise AssertionError("不应询问非手敲目标")
 
     monkeypatch.setattr(cli_mod, "_prompt_text", boom)
-    await c._maybe_remember("prod")
-    await c._maybe_remember("default")
+    await c._maybe_remember("prod", _connected_core())
+    await c._maybe_remember("default", _connected_core())
+
+
+async def test_maybe_remember_skips_when_not_connected(monkeypatch):
+    # 连接未成功（connected 未置位）：不询问，且 adhoc 名字保留——
+    # 下次成功连接后可再问（修复：曾在 picker 阶段空转询问/失败即弃名）
+    import openterminal.cli as cli_mod
+
+    c = _make_cli()
+    name = c._target_name_for("root@203.0.113.7")
+    core = _connected_core()
+    core.connected.clear()
+
+    async def boom(prompt, default=""):
+        raise AssertionError("连接未成功不应询问")
+
+    monkeypatch.setattr(cli_mod, "_prompt_text", boom)
+    await c._maybe_remember(name, core)
+    assert name in c._adhoc_targets
+    # core 缺失（管线没起成）同样静默跳过
+    await c._maybe_remember(name, None)
+    assert name in c._adhoc_targets
 
 
 async def test_pick_startup_target_defaults_local(monkeypatch):
@@ -160,7 +192,7 @@ async def test_saved_targets_registered_in_cli_targets():
     assert (t.host, t.user, t.port) == ("a", "root", 2222)
 
 
-# --- 记住的密码（系统凭据库，不落 connections.toml 明文）---
+# --- 记住的密码（系统凭据库，明文不落库）---
 
 
 async def test_maybe_remember_stores_password_in_keyring(monkeypatch):
@@ -168,7 +200,6 @@ async def test_maybe_remember_stores_password_in_keyring(monkeypatch):
 
     c = _make_cli()
     name = c._target_name_for("root@203.0.113.7")
-    c.session = type("S", (), {"last_password": "s3cret"})()
 
     async def yes(prompt, default=""):
         return "y"
@@ -181,7 +212,8 @@ async def test_maybe_remember_stores_password_in_keyring(monkeypatch):
 
     monkeypatch.setattr(cli_mod, "_prompt_text", yes)
     monkeypatch.setattr(cli_mod, "store_password", fake_store)
-    await c._maybe_remember(name)
+    # 实际使用的密码在 core.session.last_password（单管线下会话挂核心上）
+    await c._maybe_remember(name, _connected_core(last_password="s3cret"))
     assert captured == {"host": "203.0.113.7", "user": "root",
                         "port": None, "pw": "s3cret"}
 
@@ -192,7 +224,6 @@ async def test_maybe_remember_key_auth_skips_keyring(monkeypatch):
 
     c = _make_cli()
     name = c._target_name_for("root@203.0.113.7")
-    c.session = type("S", (), {"last_password": None})()
 
     async def yes(prompt, default=""):
         return "y"
@@ -201,7 +232,7 @@ async def test_maybe_remember_key_auth_skips_keyring(monkeypatch):
     monkeypatch.setattr(cli_mod, "store_password",
                         lambda *a: (_ for _ in ()).throw(AssertionError(
                             "密钥认证不应写凭据库")))
-    await c._maybe_remember(name)  # 不抛即通过
+    await c._maybe_remember(name, _connected_core(last_password=None))  # 不抛即通过
 
 
 # --- 连接目标列表（picker_rows）---
@@ -292,10 +323,16 @@ class _FakeCliCore:
     instances: list = []
 
     def __init__(self, cfg, name, frontend=None):
+        import asyncio
+
         self.cfg = cfg
         self.name = name
         self.frontend = frontend
         self.closed = False
+        # _run_pipeline 收尾会调 _maybe_remember(name, core)：契约是
+        # connected（未置位=连接没成功过）+ session；假前端从不"连上"
+        self.connected = asyncio.Event()
+        self.session = None
         type(self).instances.append(self)
 
     async def close(self):
@@ -410,7 +447,68 @@ async def test_run_pipeline_returns_to_menu_on_closed(monkeypatch):
     assert all(f.run_calls == 1 for f in _FakeFrontend.instances)
 
 
-# --- 管理主机：添加 / 编辑 / 删除（断言 connections.toml 内容）---
+async def test_run_pipeline_asks_remember_only_after_connect(monkeypatch):
+    """接线回归：_maybe_remember 曾在 picker 选完目标时就被调（session 恒
+    None、连接未发生）——现已挪到 _run_pipeline 管线结束后，且只有连接真的
+    成功过（connected 置位）才询问；失败不打扰、adhoc 名字保留可再问。"""
+    import asyncio
+
+    import openterminal.cli as cli_mod
+    from openterminal.cli import Cli
+    from openterminal.config import Config
+
+    class Core:
+        def __init__(self, cfg, name, frontend=None):
+            self.connected = asyncio.Event()
+            self.session = type("S", (), {"last_password": None})()
+
+        async def close(self):
+            pass
+
+    class FEOK:
+        def __init__(self, core, **kw):
+            self.core = core
+
+        async def run(self):
+            self.core.connected.set()   # 模拟连接成功
+
+    monkeypatch.setattr(cli_mod, "CliCore", Core)
+    monkeypatch.setattr(cli_mod, "TermFrontend", FEOK)
+    c = Cli(Config.load())
+    name = c._target_name_for("root@203.0.113.7")
+    asked = []
+
+    async def no(prompt, default=""):
+        asked.append(prompt)
+        return ""
+
+    monkeypatch.setattr(cli_mod, "_prompt_text", no)
+    await c._run_pipeline(name)
+    assert asked and "记住该连接" in asked[0]   # 成功后确实问了
+
+    class FEFail:
+        def __init__(self, core, **kw):
+            self.core = core
+
+        async def run(self):
+            pass                        # 连接失败：connected 不置位
+
+    monkeypatch.setattr(cli_mod, "TermFrontend", FEFail)
+    c2 = Cli(Config.load())
+    name2 = c2._target_name_for("root@203.0.113.8")
+    asked2 = []
+
+    async def boom(prompt, default=""):
+        asked2.append(prompt)
+        return ""
+
+    monkeypatch.setattr(cli_mod, "_prompt_text", boom)
+    await c2._run_pipeline(name2)
+    assert asked2 == []                     # 失败不问
+    assert name2 in c2._adhoc_targets       # 名字保留，下次成功可再问
+
+
+# --- 管理主机：添加 / 编辑 / 删除（断言 connections.db 内容）---
 
 
 async def test_manage_add_host_persists_and_dedups(monkeypatch):
@@ -461,11 +559,33 @@ async def test_manage_edit_host_updates_toml_and_cfg(monkeypatch):
         return "root@b"
 
     monkeypatch.setattr(cli_mod, "_prompt_text", text)
-    assert await c._edit_saved_host(0) is True
+    assert await c._edit_saved_host("root@a") is True
     saved = load_saved_targets()
     assert [(t.name, t.host, t.user) for t in saved] == [("root@b", "b", "root")]
     assert "root@b" in c.cfg.targets
     assert "root@a" not in c.cfg.targets
+
+
+async def test_edit_saved_host_clears_old_credentials(monkeypatch):
+    # 地址变了：旧 host/user/port 的 keyring 条目被清（与 Web 端 edit_saved 同规则，
+    # 修复：CLI 编辑曾留孤儿密码）
+    import openterminal.cli as cli_mod
+    from openterminal.config import TargetConfig
+    from openterminal.connections import save_saved_targets
+
+    save_saved_targets([TargetConfig(name="root@a", mode="ssh",
+                                     host="a", user="root")])
+    c = _make_cli()
+    deleted = []
+    monkeypatch.setattr(cli_mod, "delete_password",
+                        lambda h, u, p: deleted.append((h, u, p)) or True)
+
+    async def text(prompt, default=""):
+        return "root@b"
+
+    monkeypatch.setattr(cli_mod, "_prompt_text", text)
+    assert await c._edit_saved_host("root@a") is True
+    assert deleted == [("a", "root", None)]
 
 
 async def test_manage_edit_host_does_not_clobber_config_target(monkeypatch):
@@ -484,7 +604,7 @@ async def test_manage_edit_host_does_not_clobber_config_target(monkeypatch):
         return "root@a"  # 新名字撞上 config 目标
 
     monkeypatch.setattr(cli_mod, "_prompt_text", text)
-    await c._edit_saved_host(0)
+    await c._edit_saved_host("saved-x")
     assert c.cfg.targets["root@a"].host == "cfg-host"  # config 目标未被覆盖
 
 
@@ -506,19 +626,37 @@ async def test_manage_host_delete_requires_confirm(monkeypatch):
         return "n"
 
     monkeypatch.setattr(cli_mod, "_prompt_text", no)
-    await c._manage_saved_host(0)
+    await c._manage_saved_host("root@a")
     assert len(load_saved_targets()) == 1  # n → 未删
 
     async def yes(prompt, default=""):
         return "y"
 
     monkeypatch.setattr(cli_mod, "_prompt_text", yes)
-    await c._manage_saved_host(0)
+    await c._manage_saved_host("root@a")
     assert load_saved_targets() == []
     assert "root@a" not in c.cfg.targets
 
 
-async def test_manage_menu_rows_use_index_keys(monkeypatch):
+async def test_delete_saved_host_clears_keyring(monkeypatch):
+    # 删除主机同步清 keyring 凭据（修复：CLI 删除曾留孤儿密码）
+    import openterminal.cli as cli_mod
+    from openterminal.config import TargetConfig
+    from openterminal.connections import load_saved_targets, save_saved_targets
+
+    save_saved_targets([TargetConfig(name="root@a", mode="ssh",
+                                     host="a", user="root")])
+    c = _make_cli()
+    deleted = []
+    monkeypatch.setattr(cli_mod, "delete_password",
+                        lambda h, u, p: deleted.append((h, u, p)) or True)
+    await c._delete_saved_host("root@a")
+    assert load_saved_targets() == []
+    assert deleted == [("a", "root", None)]
+
+
+async def test_manage_menu_rows_use_name_keys(monkeypatch):
+    # 行键用主机名而非下标：菜单停留期间库被别处增删时，下标会错位指到别人
     import openterminal.cli as cli_mod
     from openterminal.config import TargetConfig
     from openterminal.connections import save_saved_targets
@@ -535,6 +673,6 @@ async def test_manage_menu_rows_use_index_keys(monkeypatch):
     monkeypatch.setattr(cli_mod, "pick_menu", pick)
     await c._manage_hosts()
     keys = [k for k, _ in seen["rows"]]
-    assert ("h", 0) in keys and ("h", 1) in keys
+    assert ("h", "root@a") in keys and ("h", "root@b") in keys
     assert _ADD_NEW in keys and _BACK in keys
     assert any(k is None for k in keys)  # 分隔行不参与选择

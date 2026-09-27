@@ -87,13 +87,26 @@ class Config:
         for name, t in data.get("target", {}).items():
             if name == "default":
                 continue
+            # 脏值容错：port 写坏（如 "22abc"）只丢该字段，commands 允许
+            # TOML 数组或字符串——单个目标的手误不打挂整个启动
+            try:
+                port = int(t["port"]) if t.get("port") is not None else None
+            except (TypeError, ValueError):
+                port = None
+            raw_cmds = t.get("commands")
+            if isinstance(raw_cmds, list):
+                commands = [str(c) for c in raw_cmds]
+            elif raw_cmds:
+                commands = str(raw_cmds).splitlines()
+            else:
+                commands = []
             targets[name] = TargetConfig(
                 name=name,
                 mode=t.get("mode", "ssh"),
                 host=t.get("host"),
                 user=t.get("user"),
-                port=int(t["port"]) if t.get("port") else None,
-                commands=str(t["commands"]).splitlines() if t.get("commands") else [],
+                port=port,
+                commands=commands,
             )
         return cls(
             model=ModelConfig(

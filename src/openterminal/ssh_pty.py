@@ -6,10 +6,11 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 from collections.abc import Callable
 from pathlib import Path
 
-from .shell_session import BasePtySession
+from .shell_session import BasePtySession, CommandResult
 
 
 def known_hosts_path() -> Path:
@@ -17,10 +18,34 @@ def known_hosts_path() -> Path:
     return Path.home() / ".ssh" / "known_hosts"
 
 
+def _hashed_entry_matches(token: str, wanted: set[str]) -> bool:
+    """HashKnownHosts 条目（|1|盐b64|摘要b64，HMAC-SHA1）是否命中主机名。
+
+    OpenSSH 对盐做 HMAC-SHA1(主机名) 后与摘要比对；主机名候选含
+    host 与 [host]:port 两种形式（调用方拼好放进 wanted）。
+    畸形条目（版本号不符/base64 非法）返回 False，不抛。
+    """
+    parts = token.split("|")
+    if len(parts) != 4 or parts[0] != "" or parts[1] != "1":
+        return False
+    try:
+        salt = base64.b64decode(parts[2], validate=True)
+        digest = base64.b64decode(parts[3], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return any(
+        hmac.compare_digest(
+            hmac.new(salt, name.encode("utf-8"), hashlib.sha1).digest(),
+            digest)
+        for name in wanted)
+
+
 def known_hosts_has_entry(path: Path, host: str, port: int | None = None) -> bool:
     """known_hosts 中是否已有该主机（[host]:port 形式也认）。
 
-    不支持解析哈希后的主机名（|1|...），那种条目返回 False。
+    支持哈希条目（HashKnownHosts=yes，|1|盐|摘要）：此前一律视为「无条目」，
+    会让 TOFU 的「已收录但不符 → 硬失败」防线被绕过（对哈希条目库的主机
+    密钥变更误走 TOFU 询问），无头面预检同因假阴性直接 exit 69。
     """
     if not path.exists():
         return False
@@ -31,8 +56,12 @@ def known_hosts_has_entry(path: Path, host: str, port: int | None = None) -> boo
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith("@"):
             continue
-        names = line.split()[0].split(",")
-        if wanted & set(names):
+        token = line.split()[0]
+        if token.startswith("|"):
+            if _hashed_entry_matches(token, wanted):
+                return True
+            continue
+        if wanted & set(token.split(",")):
             return True
     return False
 
@@ -222,6 +251,21 @@ class SshPtySession(BasePtySession):
             except Exception:
                 return False
         return False
+
+    async def _handle_timeout(self) -> CommandResult:
+        # 与 LocalPtySession 的约定对齐（124/130）：超时走重连路径成功时，
+        # 基类返回 _reconnected_result（exit 1）——但会话状态确已丢失、原
+        # 命令未完成，按超时语义改回 124；否则无头消费方会把 exit 1 当
+        # 普通远程失败（命令可能其实没跑完）。
+        result = await super()._handle_timeout()
+        if result.reconnected:
+            return CommandResult(
+                output=f"{result.output}\n\n"
+                       f"[命令在 {self._default_timeout}s 后超时被中断]",
+                exit_code=124, truncated=False, cwd=result.cwd,
+                reconnected=True,
+            )
+        return result
 
     async def resize(self, rows: int, cols: int) -> None:
         self.rows, self.cols = rows, cols

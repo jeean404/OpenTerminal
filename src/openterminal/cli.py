@@ -19,11 +19,12 @@ from prompt_toolkit.styles import Style
 from . import render
 from .config import Config, TargetConfig
 from .connections import (
-    TargetList, build_target_list, display_name, load_saved_targets,
-    parse_user_at_host, save_saved_targets,
+    RenameConflictError, TargetList, build_target_list, delete_saved_target,
+    display_name, load_saved_targets, parse_user_at_host,
+    rename_saved_target, upsert_saved_target,
 )
 from .policy import Policy
-from .secrets_store import store_password
+from .secrets_store import delete_password, store_password
 from .term_frontend import CliCore, TermFrontend
 
 # 全屏/会话接管不再需要 CLI 白名单：单管线前端是整条真终端直通
@@ -151,7 +152,6 @@ class Cli:
             mode=cfg.policy.mode, auto_extra=cfg.policy.auto_extra,
             approve_extra=cfg.policy.approve_extra, deny_extra=cfg.policy.deny_extra,
         )
-        self.session = None
         # 本次会话里由用户手敲 user@host 临时注册的目标（连接成功后询问是否记住）
         self._adhoc_targets: set[str] = set()
         # config.toml 手写目标的名字（含 default）：只读，管理主机时不许被覆盖
@@ -171,9 +171,17 @@ class Cli:
             self._adhoc_targets.add(name)
         return name
 
-    async def _maybe_remember(self, name: str) -> None:
-        """手敲的新 SSH 连接成功后询问是否记住（存 ~/.openterminal，不入 git）。"""
+    async def _maybe_remember(self, name: str, core=None) -> None:
+        """手敲的 user@host 连接成功后询问是否记住。
+
+        元数据存 ~/.openterminal/connections.db、密码走系统凭据库，都不入
+        git。core 为本次运行的 CliCore——单管线下会话挂在核心上，实际使用
+        的密码从 core.session.last_password 读；连接未成功（connected 未置位
+        或 core 缺失）不打扰用户，adhoc 名字保留、下次成功连接后可再询问。
+        """
         if name not in self._adhoc_targets:
+            return
+        if core is None or not core.connected.is_set():
             return
         self._adhoc_targets.discard(name)
         target = self.cfg.targets.get(name)
@@ -192,15 +200,12 @@ class Cli:
         if ans not in {"y", "yes"}:
             return
         disp = display_name(target.host, target.user, target.port)
-        saved.append(TargetConfig(
-            name=disp, mode="ssh", host=target.host,
-            user=target.user, port=target.port,
-        ))
-        save_saved_targets(saved)
+        upsert_saved_target(name=disp, host=target.host,
+                            port=target.port, user=target.user)
         # 密码走系统凭据库（Windows 凭据管理器 / macOS Keychain / Linux
-        # Secret Service），不落 connections.toml 明文；本连接未用到密码
-        # （密钥认证）或凭据库不可用时跳过
-        pw = getattr(self.session, "last_password", None)
+        # Secret Service），明文不落库；本连接未用到密码（密钥认证）或
+        # 凭据库不可用时跳过
+        pw = getattr(getattr(core, "session", None), "last_password", None)
         note = ""
         if pw is not None:
             if store_password(target.host, target.user, target.port, pw):
@@ -209,7 +214,7 @@ class Cli:
                 note = "（本机无可用凭据库，密码未存，下次仍需输入）"
         render.console.print(
             f"[green]已记住 {disp}[/] "
-            f"[dim]（~/.openterminal/connections.toml{note}）[/]")
+            f"[dim]（~/.openterminal/connections.db{note}）[/]")
 
     async def _pick_startup_target(self) -> str | None:
         """连接目标选择（光标菜单）：local · 直接连接。
@@ -257,20 +262,19 @@ class Cli:
                 f"[yellow]主机 {display_name(host, user, port)} 已存在。[/]")
             return None
         name = display_name(host, user, port)
-        saved.append(TargetConfig(name=name, mode="ssh", host=host,
-                                  user=user, port=port))
-        save_saved_targets(saved)
+        upsert_saved_target(name=name, host=host, port=port, user=user)
         self._sync_saved_targets()
         render.console.print(f"[green]已添加主机 {name}[/]")
         return name
 
-    async def _edit_saved_host(self, idx: int) -> bool:
-        """编辑第 idx 个已存主机：重敲 user@host[:port]，替换存储条目并
-        同步 cfg.targets。留空/取消返回 False。"""
+    async def _edit_saved_host(self, name: str) -> bool:
+        """编辑已存主机：重敲 user@host[:port]，单事务替换存储条目并同步
+        cfg.targets；地址变了顺手清旧 keyring 凭据（不留孤儿密码）。
+        留空/取消/撞名返回 False。"""
         saved = load_saved_targets()
-        if not 0 <= idx < len(saved):
+        target = next((t for t in saved if t.name == name), None)
+        if target is None:
             return False
-        target = saved[idx]
         old_label = _host_label(target)
         try:
             text = (await _prompt_text(
@@ -286,32 +290,39 @@ class Cli:
                and t.name != target.name for t in saved):
             render.console.print(f"[yellow]主机 {new_label} 已存在。[/]")
             return False
-        saved[idx] = TargetConfig(name=new_label, mode="ssh", host=host,
-                                  user=user, port=port)
-        save_saved_targets(saved)
+        try:
+            removed = rename_saved_target(name, name=new_label, host=host,
+                                          port=port, user=user)
+        except RenameConflictError:
+            render.console.print(f"[yellow]名称 {new_label} 已被另一条连接占用。[/]")
+            return False
+        if removed is not None and (removed.host, removed.user, removed.port) != (host, user, port):
+            # 地址变了：旧凭据已无意义，清掉（与 Web 端 edit_saved 同规则）
+            delete_password(removed.host, removed.user, removed.port)
         self._sync_saved_targets()
         render.console.print(f"[green]已更新主机 {old_label} → {new_label}[/]")
         return True
 
-    async def _delete_saved_host(self, idx: int) -> None:
-        saved = load_saved_targets()
-        if 0 <= idx < len(saved):
-            save_saved_targets([t for i, t in enumerate(saved) if i != idx])
+    async def _delete_saved_host(self, name: str) -> None:
+        """删除已存主机，并同步清掉它的 keyring 凭据（不留孤儿密码）。"""
+        removed = delete_saved_target(name)
+        if removed is not None:
+            delete_password(removed.host, removed.user, removed.port)
         self._sync_saved_targets()
 
-    async def _manage_saved_host(self, idx: int) -> None:
-        """第 idx 个已存主机：编辑 / 删除 / 返回。"""
-        saved = load_saved_targets()
-        if not 0 <= idx < len(saved):
+    async def _manage_saved_host(self, name: str) -> None:
+        """单个已存主机：编辑 / 删除 / 返回（按名字定位，不受列表变动影响）。"""
+        target = next((t for t in load_saved_targets() if t.name == name), None)
+        if target is None:
             return
-        label = _host_label(saved[idx])
+        label = _host_label(target)
         act = await pick_menu(f"主机 {label}", [
             ("edit", "编辑"),
             ("delete", "删除"),
             (_BACK, "返回"),
         ])
         if act == "edit":
-            await self._edit_saved_host(idx)
+            await self._edit_saved_host(name)
         elif act == "delete":
             try:
                 ans = (await _prompt_text(
@@ -319,7 +330,7 @@ class Cli:
             except EOFError:
                 ans = ""
             if ans in {"y", "yes"}:
-                await self._delete_saved_host(idx)
+                await self._delete_saved_host(name)
                 render.console.print(f"[green]已删除主机 {label}[/]")
 
     async def _manage_hosts(self) -> None:
@@ -328,7 +339,9 @@ class Cli:
             saved = load_saved_targets()
             rows: list[tuple[str | None, str]] = [(None, "主机")]
             if saved:
-                rows.extend((("h", i), _host_label(t)) for i, t in enumerate(saved))
+                # 行键用主机名而非下标：菜单停留期间库被别处（Web/另一进程）
+                # 增删时，下标会错位指到别人的条目
+                rows.extend((("h", t.name), _host_label(t)) for t in saved)
             else:
                 rows.append((None, "（还没有主机）"))
             rows.append((_ADD_NEW, "添加主机"))
@@ -347,11 +360,14 @@ class Cli:
     async def _connect_via_picker(self) -> str | None:
         """经选择框选连接目标，返回目标名（连接由 _run_pipeline 进行，此处
         不再开 session）；取消或「返回」返回 None。连接失败时核心发 closed、
-        _run_pipeline 返回后回主菜单，可重选目标。"""
+        _run_pipeline 返回后回主菜单，可重选目标。
+
+        「是否记住手敲连接」的询问在 _run_pipeline 里、连接真正成功之后
+        （_maybe_remember 需要 core.connected / core.session，选完目标时
+        连接还没发生）。"""
         name = await self._pick_startup_target()
         if name is None:
             return None
-        await self._maybe_remember(name)
         self._sync_saved_targets()
         return name
 
@@ -382,7 +398,10 @@ class Cli:
         run() 返回（核心 closed / EOF / 异常）即回主菜单；之后必须补
         core.close()——EOF/异常/连接失败路径下 run() 返回时核心未关
         （Task 3 前向契约），CliCore.close() 幂等。try/finally 保证 run()
-        抛异常（未来 loop() 若在菜单里兜住异常）时核心也被关闭。"""
+        抛异常（未来 loop() 若在菜单里兜住异常）时核心也被关闭。
+
+        管线结束后询问「是否记住手敲连接」——此时终端已复原，且能按
+        core.connected 判断连接是否真的成功过（失败不打扰用户）。"""
         core = CliCore(self.cfg, name, frontend=None)   # 两段构造：反向注入
         frontend = TermFrontend(core)
         core._frontend = frontend
@@ -390,6 +409,7 @@ class Cli:
             await frontend.run()
         finally:
             await core.close()
+        await self._maybe_remember(name, core)
 
 
 async def _prompt_text(text: str, default: str = "") -> str:

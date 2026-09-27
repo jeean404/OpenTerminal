@@ -83,6 +83,20 @@ def test_api_saved_requires_host():
         assert client.post("/api/saved", json={"name": "x"}).status_code == 400
 
 
+def test_api_saved_rename_conflict_409():
+    """编辑时改名撞上另一条既有条目：409，两行都原样不动
+    （修复：曾静默删旧插新，UNIQUE 冲突把被编辑条目整个弄丢）。"""
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        client.post("/api/saved", json={"name": "a", "host": "1.1.1.1"})
+        client.post("/api/saved", json={"name": "b", "host": "2.2.2.2"})
+        r = client.put("/api/saved/a", json={"name": "b", "host": "3.3.3.3"})
+        assert r.status_code == 409
+        assert "已被" in r.json()["detail"]
+        assert find_saved_target("a").host == "1.1.1.1"   # 旧行未动
+        assert find_saved_target("b").host == "2.2.2.2"   # 未被覆盖
+
+
 def test_api_saved_default_name_from_host():
     app = create_app(Config.load())
     with TestClient(app) as client:

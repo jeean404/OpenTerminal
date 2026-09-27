@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import sys
 import time
 
+from rich.cells import cell_len, chop_cells
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -219,8 +221,9 @@ class _CaptureLayer:
                 return self.on_keys(rest) if rest else ("pass", b"")
             elif bytes([byte]) in (b"e", b"E"):
                 self._editing = True            # 进编辑流（泵 await _run_edit）
-                # 余量随 edit 返回：_run_edit 完成后泵继续路由（不丢字节）
-                return ("edit", data[i + 1:])
+                # 余量随 edit 返回：_run_edit 完成后泵继续路由（不丢字节）；
+                # 前缀里已透传的字节（如 \x04）也要一并带回，不能静默吞掉
+                return ("edit", bytes(out) + data[i + 1:])
             # 其余键消费不透传（与 web approvalKeys 同规则）
         return ("pass", bytes(out))
 
@@ -264,14 +267,28 @@ class _CaptureLayer:
                 self._exit_state()
                 rest = bytes(out) + data[i + 1:]
                 return self.on_keys(rest) if rest else ("pass", b"")
-            if byte in (127, 8):                # 退格
-                if self._buf:
-                    self._buf = self._buf[:-1]
+            if byte in (127, 8):                # 退格（整字符删）
+                self._pop_password_char()
                 continue
             if byte >= 32 or byte < 0:          # 可打印/非 ASCII 累积
                 self._buf += bytes([byte])
             # 其余控制键吞掉
         return ("pass", bytes(out))
+
+    def _pop_password_char(self) -> None:
+        """密码缓冲退格：整字符删除——多字节 UTF-8 密码（IME/粘贴）按字节
+        删会留悬空半字符，提交时 decode 成 U+FFFD 静默损坏。"""
+        if not self._buf:
+            return
+        if self._buf[-1] & 0xC0 == 0x80:
+            # 尾字节是续字节：剥掉整段续字节，再删该字符的首字节
+            self._buf = self._buf[:-1]
+            while self._buf and self._buf[-1] & 0xC0 == 0x80:
+                self._buf = self._buf[:-1]
+            if self._buf and self._buf[-1] & 0xC0 == 0xC0:
+                self._buf = self._buf[:-1]
+        else:
+            self._buf = self._buf[:-1]   # ASCII/单字节：只删这一个字节
 
     def _host_key_keys(self, data: bytes) -> tuple[str, object]:
         out = bytearray()
@@ -383,41 +400,44 @@ def _default_console(frontend: "TermFrontend"):
 
 
 def _clip_display(s: str, max_cols: int) -> str:
-    """按显示列宽截断（CJK 全角计 2 列），保证状态行单行不折行。"""
-    import unicodedata
-    w = 0
-    for i, ch in enumerate(s):
-        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-        if w > max_cols:
-            return s[:i]
-    return s
+    """按显示列宽截断（rich cells 口径），保证状态行单行不折行。"""
+    if cell_len(s) <= max_cols:
+        return s
+    out = ""
+    for ch in s:
+        if cell_len(out + ch) > max_cols:
+            break
+        out += ch
+    return out
+
+
+# 模型文本可能夹带的字面 ANSI 转义（工具输出复读等）：进思考框前剥除，
+# 否则会击穿盒内 dim/蓝样式（\x1b[0m 把 pad 与右边框重置成默认色），
+# 且逐字符计宽会把 ESC 序列算进显示宽 → 边框漂移
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;:?]*[ -/]*[@-~]"          # CSI（SGR 颜色等）
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC（BEL / ST 收尾）
+    r"|\x1b[@-Z\\-_]"                      # 其余双字符转义
+)
 
 
 def _display_width(s: str) -> int:
-    """显示列宽（CJK 全角计 2 列；ambiguous 计 1 列，与 rich 面板一致）。"""
-    import unicodedata
-    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-               for ch in s)
+    """显示列宽（rich cells 口径：CJK 全角计 2 列，组合符/ZWJ 计 0，
+    ambiguous 计 1 列——与 rich 面板及主流终端一致；旧逐字符
+    east_asian_width 口径会把组合符算 1 列、emoji 序列算错）。"""
+    return cell_len(s)
 
 
 def _wrap_display(s: str, max_cols: int) -> list[str]:
-    """按显示列宽软折行（CJK 全角计 2 列），思考框行内容用。
+    """按显示列宽软折行（rich cells 口径），思考框行内容用。
 
-    max_cols ≤ 0 时原样单行返回（窄终端护栏由调用方兜底）。"""
-    import unicodedata
+    max_cols ≤ 0 时原样单行返回（窄终端护栏由调用方兜底）；空串返回
+    单元素 [""]，与 chop_cells（空串给 []）对齐，保证调用方总有行可画。"""
     if max_cols <= 0:
         return [s]
-    lines: list[str] = []
-    cur, w = "", 0
-    for ch in s:
-        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
-        if w + cw > max_cols:
-            lines.append(cur)
-            cur, w = "", 0
-        cur += ch
-        w += cw
-    lines.append(cur)
-    return lines
+    if not s:
+        return [""]
+    return chop_cells(s, max_cols)
 
 
 class _StatusLine:
@@ -628,9 +648,12 @@ class CliRenderer:
 
     def _on_approval(self, msg: ServerMsg) -> None:
         """审批框：risk=="high" 红色边框、"normal" 蓝色；同时进入本地
-        截获态（_CaptureLayer 消费决策键）。"""
-        border = "red" if msg.risk == "high" else "blue"
-        title = "高危命令待审批" if msg.risk == "high" else "命令待审批"
+        截获态（_CaptureLayer 消费决策键）。空 risk 按 high 兜底——
+        面板颜色与截获层二段确认同一口径（此前面板画蓝、按键却走红行
+        二段确认，视觉与交互矛盾）。"""
+        risk = msg.risk or "high"
+        border = "red" if risk == "high" else "blue"
+        title = "高危命令待审批" if risk == "high" else "命令待审批"
         body = Text.assemble(
             ("理由：", "dim"), (msg.reasons or "—", None),
             (" · 主机：", "dim"), (msg.host or "—", None),
@@ -646,7 +669,7 @@ class CliRenderer:
             # 编辑流预填源：enter_approval(risk) 调用形状被测试钉死不能
             # 加参，原命令经 frontend 属性传递（截获层 e 键时读取）
             self._frontend._pending_approval_command = msg.command
-            self._frontend.capture.enter_approval(msg.risk or "high")
+            self._frontend.capture.enter_approval(risk)
 
     def _on_ask_password(self, msg: ServerMsg) -> None:
         label = msg.label or "密码"
@@ -732,6 +755,11 @@ class CliRenderer:
         行缓冲后整行落笔（对齐 rich Panel 视觉）：凑齐 \\n 才出框内行，
         因此每行都能 pad 到内宽再封右边框；残余半行由 _close_think_box 冲。"""
         if not text or self._frontend is None:
+            return
+        # 模型文本可能夹带字面 ANSI/制表符：先剥除/展开再进盒，否则
+        # 击穿盒内样式且计宽错算（_ANSI_RE 处有完整说明）
+        text = _ANSI_RE.sub("", text).replace("\t", "    ")
+        if not text:
             return
         if self._token_open:
             self._stream_write("\r\n")
@@ -905,8 +933,15 @@ class CliRenderer:
             self.status.note_write(b)
 
     def _print(self, renderable) -> None:
-        """console 输出统一入口：擦状态行 → 写 → 重画（状态行 active 时），
-        保证 rich 面板与状态行/PTY 字节不互相覆盖（Review Focus #3）。"""
+        """console 输出统一入口：先收束进行中的流式段（思考盒/token 流），
+        再擦状态行 → 写 → 重画（状态行 active 时）。
+
+        收束前置是硬纪律：审批面板、密码提示、主机指纹询问都可能在思考流
+        半开（残余半行未落）时到达——不先关盒，面板会嵌进框线中间、盒底和
+        `… 思考 N 行` 摘要落到面板之后。_flush_streams 幂等（已收束时零动作），
+        各事件分支里既有的显式调用保留不受影响。状态行协议保证 rich 面板与
+        状态行/PTY 字节不互相覆盖（Review Focus #3）。"""
+        self._flush_streams()
         if self.status is not None:
             self.status.erase()
             if not self.status.at_fresh_line:

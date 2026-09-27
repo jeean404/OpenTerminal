@@ -661,3 +661,55 @@ async def test_rescue_receipt_rendered_locally():
     cap.on_keys(b"n")
     await _drain()
     assert "已忽略".encode() in b"".join(written)
+
+
+# --- 全量排雷修复回归 ---
+
+async def test_password_backspace_multibyte_utf8():
+    """多字节 UTF-8 密码退格整字符删（按字节删会留悬空半字符，提交时
+    decode 成 U+FFFD 静默损坏；曾还多删：ASCII 退格连带吞掉前一个汉字）。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    cap.enter_auth("password")
+    # "密é" + 退一格删 é + "y\r"
+    cap.on_keys("密é".encode() + b"\x7f" + b"y\r")
+    await _drain()
+    au = [m for m in core.fed if m.type == "auth"]
+    assert len(au) == 1 and au[0].text == "密y"
+    assert "�" not in au[0].text
+
+
+async def test_password_backspace_ascii_after_multibyte():
+    """汉字后跟 ASCII：退格只删 ASCII 一个字符，汉字保留。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    cap.enter_auth("password")
+    cap.on_keys("密a".encode() + b"\x7f" + b"b\r")
+    await _drain()
+    au = [m for m in core.fed if m.type == "auth"]
+    assert len(au) == 1 and au[0].text == "密b"
+
+
+async def test_password_backspace_empty_buffer_noop():
+    """空缓冲退格：不炸、不产生负长度（连按多次也安全）。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    cap.enter_auth("password")
+    cap.on_keys(b"\x7f\x7f\x7f")
+    cap.on_keys(b"pw\r")
+    await _drain()
+    au = [m for m in core.fed if m.type == "auth"]
+    assert len(au) == 1 and au[0].text == "pw"
+
+
+async def test_approval_edit_keeps_prefix_passthrough_bytes():
+    """e 键同 chunk 前缀里已透传的 \\x04 不丢：随 ("edit", 余量) 一并
+    带回（曾静默吞掉——\\x04 是「永远透传」的钉死契约）。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    fe._pending_approval_command = "echo old"
+    cap.enter_approval("normal")
+    kind, rest = cap.on_keys(b"\x04e")
+    assert kind == "edit"
+    assert rest == b"\x04"                    # 前缀透传字节随余量返回
+    assert cap._editing

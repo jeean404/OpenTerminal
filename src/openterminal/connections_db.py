@@ -29,6 +29,21 @@ CREATE TABLE IF NOT EXISTS saved(
 """
 
 
+class RenameConflictError(Exception):
+    """编辑连接时新名字撞上另一条既有条目（拒绝写入，数据不动）。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(name)
+
+
+def _as_port(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None  # 脏值不打挂迁移/加载
+
+
 def db_path() -> Path:
     """数据库位置（跟随 OPENTERMINAL_HOME，用户主目录，不在 git 仓库内）。"""
     from .config import app_dir
@@ -53,6 +68,30 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _sweep_orphan_credentials(conn: sqlite3.Connection,
+                              rows: list[tuple[str, str | None, int | None]]) -> None:
+    """清理已下线跳板机的遗留凭据（尽力而为）。
+
+    saved 表里还有同址（host/user/port）直连条目的不动——keyring 键是
+    display_name 三元组，堡垒机常被同时登记为直连主机，无条件删会把
+    直连记住的密码一起误删（headless 场景直接 exit 68）。
+    """
+    for host, user, port in rows:
+        if not host:
+            continue
+        shared = conn.execute(
+            "SELECT 1 FROM saved WHERE host=? AND user IS ? AND port IS ?",
+            (host, user, port)).fetchone()
+        if shared:
+            continue
+        try:
+            from .secrets_store import delete_password
+
+            delete_password(host, user, port)
+        except Exception:  # noqa: BLE001 - 凭据库不可用不阻断下线迁移
+            pass
+
+
 def _retire_jumps(conn: sqlite3.Connection) -> None:
     """跳板机下线收尾（幂等）：清遗留凭据 → DROP jumps 表 → 删 saved.jump 列。
 
@@ -62,15 +101,12 @@ def _retire_jumps(conn: sqlite3.Connection) -> None:
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     if "jumps" in tables:
-        for r in conn.execute(
-                "SELECT name, host, port, user FROM jumps ORDER BY id"):
-            try:
-                from .secrets_store import delete_password
-
-                delete_password(r["host"], r["user"], r["port"])
-            except Exception:  # noqa: BLE001 - 凭据库不可用不阻断下线迁移
-                pass
-        conn.execute("DROP TABLE jumps")
+        rows = [(r["host"], r["user"], r["port"]) for r in conn.execute(
+            "SELECT name, host, port, user FROM jumps ORDER BY id")]
+        # IF EXISTS：两个进程（ot web + ot CLI）同时首跑迁移时，
+        # 后到的 DROP 不再抛 no such table 炸掉调用方
+        conn.execute("DROP TABLE IF EXISTS jumps")
+        _sweep_orphan_credentials(conn, rows)
     try:
         conn.execute("ALTER TABLE saved DROP COLUMN jump")
     except sqlite3.OperationalError:
@@ -80,17 +116,22 @@ def _retire_jumps(conn: sqlite3.Connection) -> None:
 def _migrate_toml(conn: sqlite3.Connection, db_file: Path) -> None:
     """旧 connections.toml 一次性迁移：仅当库为空且旧文件存在时导入。
 
-    旧文件里的 [[jumps]] 与 saved.jump 一并忽略（跳板机已下线）。"""
+    旧文件里的 [[jumps]] 与 saved.jump 一并忽略（跳板机已下线），但
+    jumps 对应的遗留 keyring 凭据顺手清掉（同址直连条目仍在的不动）。"""
     toml_file = db_file.with_name("connections.toml")
     if not toml_file.exists():
         return
-    if conn.execute("SELECT COUNT(*) FROM saved").fetchone()[0]:
-        return  # 库里已有数据：不重复导入，也不动旧文件
     import tomllib
 
     try:
         data = tomllib.loads(toml_file.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - 旧文件损坏只跳过迁移，不打挂启动
+        return
+    jump_rows = [(j.get("host") or "", j.get("user"), _as_port(j.get("port")))
+                 for j in data.get("jumps", [])]
+    if conn.execute("SELECT COUNT(*) FROM saved").fetchone()[0]:
+        # 库里已有数据：不重复导入，也不动旧文件；仅做凭据卫生
+        _sweep_orphan_credentials(conn, jump_rows)
         return
     for t in data.get("saved", []):
         host = t.get("host") or t.get("name", "")
@@ -98,10 +139,11 @@ def _migrate_toml(conn: sqlite3.Connection, db_file: Path) -> None:
             continue
         upsert_saved(conn, {
             "name": t.get("name") or host, "host": host,
-            "port": int(t["port"]) if t.get("port") else None,
+            "port": _as_port(t.get("port")),
             "user": t.get("user"),
         })
     conn.commit()
+    _sweep_orphan_credentials(conn, jump_rows)
     try:
         toml_file.replace(db_file.with_name("connections.toml.migrated"))
     except OSError:
@@ -163,13 +205,36 @@ def delete_saved(conn: sqlite3.Connection, name: str) -> dict | None:
 
 
 def rename_saved(conn: sqlite3.Connection, old: str, row: dict) -> dict | None:
-    """编辑连接：删旧行、写新行（name 可能改）；返回被删的旧行。
+    """编辑连接：删旧行、插新行（name 可能改），单事务；返回被删的旧行。
 
-    commands 传 None 时继承旧行值——这里是先删后插，upsert 的
-    COALESCE 兜不住（没有冲突路径可走），必须显式接管。
+    - 旧行不存在 → 返回 None，**不写入任何行**（不再凭空建条目）；
+    - 新名字撞上另一条既有条目 → 抛 RenameConflictError，库不动
+      （不再静默合并覆盖别人的条目）；
+    - commands 传 None 时继承旧行值——这里是先删后插，upsert 的
+      COALESCE 兜不住（没有冲突路径可走），必须显式接管；
+    - DELETE+INSERT 包在同一事务里，中途失败回滚，不留半截状态。
     """
-    deleted = delete_saved(conn, old)
-    if deleted is not None and row.get("commands") is None:
+    r = conn.execute(
+        "SELECT name, host, port, user, commands FROM saved WHERE name=?",
+        (old,)).fetchone()
+    if r is None:
+        return None
+    deleted = _row_to_dict(r)
+    new_name = row.get("name") or row.get("host", "")
+    if new_name != old and conn.execute(
+            "SELECT 1 FROM saved WHERE name=?", (new_name,)).fetchone():
+        raise RenameConflictError(new_name)
+    if row.get("commands") is None:
         row = {**row, "commands": deleted.get("commands")}
-    upsert_saved(conn, row)
+    try:
+        conn.execute("DELETE FROM saved WHERE name=?", (old,))
+        conn.execute(
+            "INSERT INTO saved(name, host, port, user, commands) "
+            "VALUES(?,?,?,?,?)",
+            (new_name, row.get("host", ""), row.get("port"),
+             row.get("user"), row.get("commands")))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return deleted

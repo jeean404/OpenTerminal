@@ -6,7 +6,7 @@ import pytest
 
 from openterminal.config import TargetConfig
 from openterminal.connections import (
-    delete_saved_target, display_name, list_ssh_hosts,
+    RenameConflictError, delete_saved_target, display_name, list_ssh_hosts,
     load_saved_targets, parse_ssh_config, parse_user_at_host,
     rename_saved_target, save_saved_targets, upsert_saved_target,
 )
@@ -50,6 +50,17 @@ def test_parse_user_at_host():
     assert parse_user_at_host("root@1.2.3.4") == ("1.2.3.4", "root", None)
     assert parse_user_at_host("1.2.3.4") == ("1.2.3.4", None, None)
     assert parse_user_at_host("deploy@h:2222") == ("h", "deploy", 2222)
+
+
+def test_parse_ssh_config_first_definition_wins(tmp_path: Path):
+    # OpenSSH 语义：同一 Host 出现多段定义时，每字段第一个取值生效
+    # （修复：曾后写覆盖，`Host *` 兜底段会翻转具体主机段的值）
+    f = tmp_path / "config"
+    f.write_text("Host dup\n    HostName first\n    Port 2200\n\n"
+                 "Host dup\n    HostName second\n    Port 2222\n",
+                 encoding="utf-8")
+    p = parse_ssh_config(f)["dup"]
+    assert (p.hostname, p.port) == ("first", 2200)
 
 
 # --- 记住的连接（~/.openterminal/connections.toml，不入 git）---
@@ -142,6 +153,27 @@ def test_upsert_rename_delete_saved(tmp_path):
     assert load_saved_targets(db) == []
 
 
+def test_rename_conflict_raises_and_keeps_both_rows(tmp_path):
+    """新名字撞既有条目：抛 RenameConflictError，两行都原样不动
+    （修复：曾先删旧行再插入，撞名 UNIQUE 冲突后旧条目凭空消失）。"""
+    db = tmp_path / "c.db"
+    upsert_saved_target(name="a", host="1.1.1.1", path=db)
+    upsert_saved_target(name="b", host="2.2.2.2", path=db)
+    with pytest.raises(RenameConflictError) as ei:
+        rename_saved_target("a", name="b", host="3.3.3.3", path=db)
+    assert ei.value.name == "b"
+    assert [(t.name, t.host) for t in load_saved_targets(db)] == [
+        ("a", "1.1.1.1"), ("b", "2.2.2.2")]
+
+
+def test_rename_missing_old_writes_nothing(tmp_path):
+    """旧条目不存在：返回 None 且不写入（修复：曾把新条目凭空造出来，
+    并发删除的竞态下"编辑"会复活已删主机）。"""
+    db = tmp_path / "c.db"
+    assert rename_saved_target("ghost", name="x", host="h", path=db) is None
+    assert load_saved_targets(db) == []
+
+
 def test_retire_jumps_drops_table_column_and_secrets(tmp_path, monkeypatch):
     """旧库收尾迁移：jumps 表删除（凭据库里的密码先清）、saved.jump 列删除。"""
     import sqlite3
@@ -180,6 +212,38 @@ def test_retire_jumps_drops_table_column_and_secrets(tmp_path, monkeypatch):
     conn.close()
     assert "jumps" not in tables
     assert "jump" not in cols
+
+
+def test_retire_jumps_keeps_credentials_shared_with_saved(tmp_path, monkeypatch):
+    """跳板机同时也登记为直连主机（同 host/user/port，共用一条 keyring
+    凭据）：下线迁移只清「已无直连条目引用」的孤儿凭据，共享的不动。"""
+    import sqlite3
+
+    import openterminal.secrets_store as secrets_mod
+
+    db = tmp_path / "connections.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""CREATE TABLE saved(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE, host TEXT NOT NULL,
+      port INTEGER, user TEXT, commands TEXT)""")
+    conn.execute("INSERT INTO saved(name, host, port, user) "
+                 "VALUES('bastion','10.0.0.5',2222,'admin')")
+    conn.execute("""CREATE TABLE jumps(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE, host TEXT NOT NULL,
+      port INTEGER, user TEXT)""")
+    conn.execute("INSERT INTO jumps(name, host, port, user) "
+                 "VALUES('b1','10.0.0.5',2222,'admin')")
+    conn.commit()
+    conn.close()
+
+    deleted = []
+    monkeypatch.setattr(secrets_mod, "delete_password",
+                        lambda h, u, p: deleted.append((h, u, p)) or True)
+    saved = load_saved_targets(db)
+    assert [t.name for t in saved] == ["bastion"]
+    assert deleted == []          # 同址直连条目仍在：凭据不许误删
 
 
 # --- open_session 密码补存：连接已记住但凭据缺失（如经 Web 添加）---

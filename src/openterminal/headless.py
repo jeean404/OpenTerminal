@@ -10,7 +10,9 @@
   请用户先在交互界面连接一次。
 
 退出码表：
-  0/1~63  远程命令退出码透传（与 SSH 行为一致）
+  0/1~63  远程命令退出码透传（与 SSH 行为一致）；远程码若恰好落在
+          64~69 工具保留段则收敛为 63——保证「≥64 必是工具问题」的
+          判别契约，真实值仍在 JSON payload 的 exit_code 字段里
   64      用法错误
   65      目标不存在
   66      策略拒绝（deny）
@@ -45,7 +47,12 @@ DEFAULT_EXEC_TIMEOUT = 30
 # ---------------------------------------------------------------------------
 
 def all_targets(cfg: Config) -> list[TargetConfig]:
-    """配置文件目标 + 记住的连接（后者按 host 去重靠前）。"""
+    """配置文件目标 + 记住的连接（记住的靠前展示，按 host 去重）。
+
+    config.toml 手写目标**不被 host 去重吞掉**——记住的连接里有同址条目
+    时（如手敲 root@1.2.3.4 记住后），同名之外的手写目标（prod 等别名）
+    仍须可被 `ot exec -t prod` 解析到；仅同名时跳过（记住的展示优先）。
+    """
     saved = []
     try:
         from .connections import load_saved_targets
@@ -53,13 +60,21 @@ def all_targets(cfg: Config) -> list[TargetConfig]:
         saved = load_saved_targets()
     except Exception:
         pass  # 凭据库不可用时仍可使用 config.toml 里的目标
-    seen: set[tuple] = set()
+    seen_keys: set[tuple] = set()
+    seen_names: set[str] = set()
     merged: list[TargetConfig] = []
-    for t in saved + list(cfg.targets.values()):
+    for t in saved:
         key = (t.mode, t.host or t.name, t.user, t.port)
-        if key not in seen:
-            seen.add(key)
-            merged.append(t)
+        if key in seen_keys or t.name in seen_names:
+            continue
+        seen_keys.add(key)
+        seen_names.add(t.name)
+        merged.append(t)
+    for t in cfg.targets.values():
+        if t.name in seen_names:
+            continue
+        seen_names.add(t.name)
+        merged.append(t)
     return merged
 
 
@@ -123,7 +138,10 @@ async def _exec_async(target: TargetConfig, command: str, *, timeout: int) -> in
     from .connections import open_session
     from .secrets_store import load_password
 
-    password = load_password(target.host, target.user, target.port)
+    # 只有 SSH 目标才查凭据库：local 目标 host=None，按 None 拼 keyring
+    # 键纯属噪音（还可能撞上 keyring 后端的空键校验）
+    password = (load_password(target.host, target.user, target.port)
+                if target.mode == "ssh" and target.host else None)
     session = await open_session(
         target,
         password=password,
@@ -186,7 +204,12 @@ def cmd_exec(args: argparse.Namespace, cfg: Config, out, err) -> int:
                "cwd": result.cwd,
                "target": target.name}
     _emit(payload, as_json=args.json, file=out)
-    return result.exit_code & 0xFF  # 与 shell 退出码语义一致（0~255）
+    rc = result.exit_code & 0xFF  # 与 shell 退出码语义一致（0~255）
+    if 64 <= rc <= 69:
+        # 远程命令退出码撞上工具保留段：进程码收敛为 63（远程失败），
+        # 保住「≥64 必是工具问题」的契约；真实值在 JSON exit_code 里
+        rc = 63
+    return rc
 
 
 # ---------------------------------------------------------------------------

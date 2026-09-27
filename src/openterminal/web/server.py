@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from ..cmdset import extract_inline_secrets
 from ..config import Config, TargetConfig
 from ..connections import (
-    build_target_list, delete_saved_target, display_name,
+    RenameConflictError, build_target_list, delete_saved_target, display_name,
     find_saved_target, load_saved_targets, parse_user_at_host,
     rename_saved_target, upsert_saved_target,
 )
@@ -185,9 +185,16 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
             resp["commands"] = commands
             if failed:
                 resp["warning"] = "凭据库不可用，以下密码未保存: " + ", ".join(failed)
-        removed = rename_saved_target(name, name=new_name, host=host,
-                                      port=port, user=user,
-                                      commands=commands)
+        try:
+            removed = rename_saved_target(name, name=new_name, host=host,
+                                          port=port, user=user,
+                                          commands=commands)
+        except RenameConflictError:
+            # 新名字撞上另一条既有条目：拒绝写入（不再静默合并覆盖）
+            raise HTTPException(409, f"名称 {new_name} 已被另一条连接占用")
+        if removed is None:
+            # find 与 rename 之间条目被并发删除
+            raise HTTPException(404, "unknown target")
         # 内存注册表同步失效(旧名可能已缓存/新名可能撞旧缓存)
         cfg.targets.pop(name, None)
         cfg.targets.pop(new_name, None)

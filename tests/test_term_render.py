@@ -245,6 +245,52 @@ async def test_think_box_closed_by_token_without_summary():
     assert "正文来了" in out
 
 
+async def test_approval_panel_closes_think_box_first():
+    """硬纪律回归：思考流半开（残余半行未落）时审批面板到达——_print 先
+    收束流式段再画面板；否则面板嵌进框线中间、盒底/摘要落在面板之后。
+    密码提示、主机指纹询问同走 _print 此不变量。"""
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_think", text="想到一半"))     # 无换行：盒开、半行挂起
+    await r.render(ServerMsg(type="approval", command="rm -rf /tmp/x",
+                             reasons="删除", host="h1", risk="high"))
+    out = sink.getvalue()
+    i_bottom = out.find("╰")
+    i_panel = out.find("rm -rf /tmp/x")
+    assert i_bottom != -1 and i_panel != -1
+    assert i_bottom < i_panel                  # 盒底在前，面板在后
+    assert not r._think_open                   # 盒状态已复位
+
+
+async def test_think_strips_model_ansi_and_tabs():
+    """模型文本自带字面 ANSI/Tab：入盒前净化——曾击穿盒内 dim 样式，
+    且转义序列被计宽导致 pad 几何崩坏、右边框错位。"""
+    from openterminal.term_frontend import _display_width
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_think", text="\x1b[31m红字\x1b[0m\t尾巴"))
+    await r.render(_ev("ai_collapse", command=""))
+    out = sink.getvalue()
+    body = [l for l in out.split("\r\n") if _plain(l).startswith("│")]
+    assert body
+    assert "\x1b[31m" not in body[0]           # 模型的 SGR 已剥离
+    assert "\t" not in body[0]                 # Tab 展开为空格
+    assert "红字" in _plain(body[0])
+    assert _display_width(_plain(body[0])) == 100   # 净化后几何仍对齐
+
+
+def test_display_width_rich_cells_geometry():
+    """宽度口径换 rich.cells：组合符计 0 列（旧 east_asian_width 逐字符
+    口径算 1 列 → pad 行超宽折行错位）、全角计 2、折行点与终端一致。"""
+    from openterminal.term_frontend import _display_width, _wrap_display
+
+    assert _display_width("e\u0301") == 1        # e + 组合重音符：显示 1 列
+    assert _display_width("漢") == 2
+    assert _display_width("") == 0
+    assert _wrap_display("abcd", 3) == ["abc", "d"]
+    assert _wrap_display("abc", 3) == ["abc"]    # 恰好整宽不多出空行
+    assert _wrap_display("", 3) == [""]
+    assert _wrap_display("a", 0) == ["a"]        # 退化宽度：原样返回不折
+
+
 async def test_erase_before_bytes():
     """有尾换行的 payload：写前擦状态行、写后 fresh 恢复，tick 重画落新行。"""
     fe, written = _frontend_env()

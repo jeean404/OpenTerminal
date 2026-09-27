@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import connections_db
 from .config import TargetConfig
+from .connections_db import RenameConflictError  # noqa: F401 - 供调用方统一 import
 
 
 def display_name(host: str, user: str | None, port: int | None) -> str:
@@ -96,7 +97,11 @@ def rename_saved_target(old: str, *, name: str, host: str,
                         port: int | None = None, user: str | None = None,
                         commands: str | None = None,
                         path: Path | None = None) -> TargetConfig | None:
-    """编辑连接（name 可能改）：删旧行、写新行；返回被删的旧行。"""
+    """编辑连接（name 可能改）：单事务删旧行、写新行；返回被删的旧行。
+
+    旧条目不存在返回 None（不写入）；新名字撞既有条目抛
+    RenameConflictError（库不动，Web 层映射 409 / CLI 层提示）。
+    """
     conn = connections_db.connect(path)
     try:
         row = connections_db.rename_saved(conn, old, {
@@ -126,7 +131,8 @@ class SshTarget:
 
 
 def parse_ssh_config(path: Path) -> dict[str, SshTarget]:
-    """极简 ssh_config 解析器：仅取连接所需字段，Host 块后定义优先。"""
+    """极简 ssh_config 解析器：仅取连接所需字段；首定义优先（与 OpenSSH
+    一致——同名 Host 的后续块不覆盖已取到的字段）。"""
     hosts: dict[str, SshTarget] = {}
     current: list[str] = []
     if not path.exists():
@@ -148,13 +154,13 @@ def parse_ssh_config(path: Path) -> dict[str, SshTarget]:
         for name in current:
             t = hosts[name]
             if key == "hostname":
-                t.hostname = value
+                t.hostname = t.hostname or value
             elif key == "user":
-                t.user = value
-            elif key == "port" and value.isdigit():
+                t.user = t.user or value
+            elif key == "port" and value.isdigit() and t.port is None:
                 t.port = int(value)
             elif key == "identityfile":
-                t.identity = value
+                t.identity = t.identity or value
     return hosts
 
 

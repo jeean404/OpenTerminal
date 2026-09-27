@@ -128,11 +128,15 @@ _approval_risk / _maybe_rescue / _on_rescue_decision`；
   落库文本改写为 `> @名称` 引用；
 - 连接成功后 `_backfill_password` 补存：已记住但凭据缺失（上次存库失败）
   时把本次实际用的密码补进钥匙串；未记住的连接不替用户做主；
-- 删除主机 / 删除命令集引用时同步清理 keyring 条目；
+- 删除主机 / 编辑改了地址 / 删除命令集引用时同步清理 keyring 条目——CLI
+  与 Web 两条编辑/删除路径都清（`delete_password(removed.host/user/port)`），
+  不留孤儿密码；跳板机下线迁移也顺手清遗留凭据，但同址仍有直连条目的
+  共享凭据不动（`_sweep_orphan_credentials`）；
 - keyring 不可用（无桌面 Linux）静默降级为现场询问。
 
 **落点**：`secrets_store.py`、`cmdset.py`、`connections.py _backfill_password`、
-`web/server.py`、`cli.py _maybe_remember`。
+`connections_db.py _sweep_orphan_credentials`、`web/server.py`、`cli.py
+_maybe_remember / _edit_saved_host / _delete_saved_host`。
 
 ### 2.8 存储演进与迁移
 
@@ -141,35 +145,53 @@ _approval_risk / _maybe_rescue / _on_rescue_decision`；
 
 1. 旧 `connections.toml` 首次访问一次性导入空库，原文件改名 `.migrated`
    留档（改名失败不影响正确性——库非空即不重复导入）；
-2. 跳板机功能下线：`_retire_jumps` 收尾迁移——先逐行清 keyring 里的跳板机
-   遗留密码，再 `DROP TABLE jumps`、`ALTER TABLE saved DROP COLUMN jump`
-   （SQLite <3.35 无 DROP COLUMN 时留墓碑列，SQL 层不再引用）；
-3. 旧库缺列（如 commands）用 `ALTER TABLE ADD COLUMN` 惰性补齐。
+2. 跳板机功能下线：`_retire_jumps` 收尾迁移——先收集 jumps 行、
+   `DROP TABLE IF EXISTS jumps`（并发首跑不炸），再 `_sweep_orphan_credentials`
+   清 keyring 遗留密码（同址仍有直连条目的共享凭据跳过），最后
+   `ALTER TABLE saved DROP COLUMN jump`（SQLite <3.35 无 DROP COLUMN 时留
+   墓碑列，SQL 层不再引用）；
+3. 旧库缺列（如 commands）用 `ALTER TABLE ADD COLUMN` 惰性补齐；
+4. 单条改名 `rename_saved` 单事务 DELETE+INSERT：旧行不存在返回 None（不
+   凭空造条目），新名撞既有条目抛 `RenameConflictError`（库不动，Web→409 /
+   CLI→提示），中途失败回滚不留半截状态。
 
 **理由**：用户数据无价，迁移失败不能打挂启动；孤儿凭据是安全问题，删表
-前必须先清。
+前必须先清，但共享凭据误删会让 headless 直连 exit 68，故按三元键核对。
 
 **落点**：`connections_db.py`；回归测试 `tests/test_connections.py
-::test_retire_jumps_drops_table_column_and_secrets`。
+::test_retire_jumps_drops_table_column_and_secrets`、
+`::test_retire_jumps_keeps_credentials_shared_with_saved`、
+`::test_rename_conflict_raises_and_keeps_both_rows`。
 
 ### 2.9 SSH 连接安全与韧性
 
 **决策**：
 - **TOFU**：known_hosts 未收录 → 展示指纹询问，信任则写入；已收录但不符 →
-  硬失败（可能重装系统或中间人），绝不静默覆盖。哈希条目不解析（视为未知）。
+  硬失败（可能重装系统或中间人），绝不静默覆盖。哈希条目
+  （`HashKnownHosts=yes`，`|1|盐|HMAC-SHA1 摘要`）也解析：对
+  `{host, [host]:port}` 候选做 HMAC 比对命中即视为「已收录」——否则对哈希库
+  主机密钥变更会误走 TOFU 询问、无头预检假阴性直接 exit 69；畸形哈希条目
+  判 False 不抛。
 - **密码认证顺序**：keyring 记住的密码先于交互提示尝试；现场输入的密码记在
   `last_password`，断线重连复用（不再二次询问）。
 - **重连一次**：断线自动重连仅一次，失败即上报 closed——避免无限重试掩盖
   真故障。
+- **超时码统一 124**：SSH 会话超时走重连路径成功时，基类返回
+  `_reconnected_result`（exit 1），`SshPtySession._handle_timeout` 覆写按超时
+  语义改回 124——否则无头消费方把「命令超时没跑完」误读成普通远程失败。
 
 **落点**：`ssh_pty.py`（_trust_unknown_host / _connect_one /
-_recover_connection）；无头面 TOFU 不询问，未收录直接结构化报错（退出码 69）。
+_recover_connection / _hashed_entry_matches / _handle_timeout）；无头面 TOFU
+不询问，未收录直接结构化报错（退出码 69）。
 
 ### 2.10 无头面：给外部 AI 工具的协议
 
 **决策**：`ot exec` / `ot list` 输出结构化 JSON；退出码分层——远程命令退出
 码原样透传（<64，与 ssh 行为一致），工具自身错误用保留码（64 用法 / 65 目标
-不存在 / 66 deny / 67 需审批 / 68 连接失败 / 69 指纹未收录）。
+不存在 / 66 deny / 67 需审批 / 68 连接失败 / 69 指纹未收录）。远程退出码若
+恰好落在 64~69 保留段，进程码收敛为 63——保住「≥64 必是工具问题」的判别契约，
+真实值仍在 JSON payload 的 `exit_code` 字段里。`all_targets` 合并时
+config.toml 手写别名不被记住连接的 host 去重吞掉（仅同名跳过）。
 
 **理由**：调用方是 Claude Code 等 Agent，需要机器可判的「远程成败」vs
 「调用问题」。审批不交互：出路只有人的动作（交互界面记住允许 / 改 config）。
@@ -186,6 +208,7 @@ _recover_connection）；无头面 TOFU 不询问，未收录直接结构化报�
 | resize 与思考框 | 盒打开期间 SIGWINCH 改宽，已画框线与新行宽不一致（视觉瑕疵，事件级短暂） |
 | 无桌面 Linux | keyring 不可用 → 密码每次现场询问（功能不受影响） |
 | token 计数 | 网关不回传 usage 时为 tiktoken 估算口径（前端加 ≈ 标识） |
+| 手敲 IPv6 目标 | `parse_user_at_host` 按最后一个 `:` 切端口，`user@[::1]:2222` 的括号形式不解析（ssh config / connections.db 存的条目不受影响） |
 
 ## 4. 测试策略
 
