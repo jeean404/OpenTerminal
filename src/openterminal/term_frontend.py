@@ -7,17 +7,14 @@
   outbox（("bytes", d) → writer 直写；("msg", m) → _on_msg 钩子）、
   初始 resize、SIGWINCH、closed 停止；finally 还原 termios + 移除
   信号处理（KeyboardInterrupt/渲染异常/EOF/正常 closed 四条退出路径
-  都必须走完，否则用户 shell 留在 raw 态）。
-
-设计见 docs/superpowers/specs/2026-09-27-cli-single-pipeline-design.md
-§3.1/§3.2/§3.4。Task 4 已接：CliRenderer（事件→呈现映射 + 流式渲染 +
-零占位 boundary 协议）+ _StatusLine（任务期单行状态：转轮/计时/token，
-erase→写→redraw 擦除协议，0.25s tick 经 _outbox 串行重画）。剩余桩位：
-- _CaptureLayer：Task 5 换成本地截获层（审批/rescue/认证/中断），
-  当前 on_keys 恒 ("pass", data) 全量直通；enter_approval/enter_rescue/
-  enter_auth 为 no-op（渲染器已按此形状调用：approval/rescue/
-  ask_password/ask_host_key 进待决态时触发）；
-- _run_edit：Task 5 编辑流（("edit", None) 分支接线点已留注释）。
+  都必须走完，否则用户 shell 留在 raw 态）；
+- _CaptureLayer：本地截获层（审批/rescue/认证/Ctrl+C，spec §3.1/§3.3）。
+  待决态消费的键与 password 累积字符绝不进 PTY；on_keys 返回
+  ("pass", 剩余直通字节) | ("edit", None)；决策经 frontend.core.feed_msg
+  发出后退出截获态；
+- _run_edit：审批编辑流（e 键）。termios 交接顺序（Review Focus #5）：
+  暂停泵 → _restore_input → prompt_toolkit 多行输入 → _set_raw_input →
+  恢复泵 → feed_msg；结果过 approval.reclassify_edited。
 
 raw 原语四件（_set_raw_input/_restore_input/_read_one_key/_term_size）
 自 rawmode.py 复制为私有函数——rawmode.py 旧 CLI 还在用，一个字节不动，
@@ -36,6 +33,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
+from .approval import edit_decision, reclassify_edited
 from .config import Config
 from .core import ClientMsg, PipelineCore, ServerMsg
 
@@ -79,30 +77,260 @@ class CliCore(PipelineCore):
 
 
 class _CaptureLayer:
-    """本地截获层桩（Task 5 实现审批/rescue/认证/Ctrl+C 语义）。
+    """本地截获层（spec §3.1/§3.3，与 web approvalKeys/rescue/auth 同规则）。
 
-    当前恒 ("pass", data)：键盘字节全量直通 PTY，分类由 hook 终裁。
-    Task 5 接手形状：on_keys(data) -> ("pass", 剩余直通字节) |
-    ("edit", None)；enter_approval(risk)/enter_rescue()/enter_auth(kind)
-    由渲染器在进入对应待决态时调用，exit_* 对应清除，state 为当前
-    截获态（None = 无截获）。
+    待决态（state = "approval"|"rescue"|"password"|"host_key"）下消费的
+    决策键与 password 累积字符**绝不进 PTY**（Review Focus #2）：
+    on_keys(data) -> ("pass", 剩余待直通字节) | ("edit", None)——决策键
+    本地消费掉，pass payload 只含剩余字节；"edit" 表示进审批编辑流（由
+    _input_pump await frontend._run_edit()）。
+
+    决策全部经 frontend.core.feed_msg 发出（approve/reject payload 与 web
+    完全一致，源自 approval.py；edit 用 approval.edit_decision），发送后
+    退出对应截获态。enter_approval/enter_rescue/enter_auth 由渲染器在
+    进入对应待决态时调用（调用形状被 test_term_render.py 钉死）；
+    exit_* 对应清除。
+
+    按键规则：
+    - approval（risk=="high" 二段确认）：\\r 进 confirming（红行提示）→
+      再 \\r 才 approve；\\x7f/\\x08 reject；e/E → ("edit", None)；
+      confirming 态 \\x7f 仅退出 confirming；其余键吞掉不透传。
+    - rescue：y/Y → accept=True，n/N → accept=False，其余键透传。
+    - password：可打印字符累积（不回显，渲染器已打提示行）、\\x7f/\\x08
+      退格、\\r 提交（remember 恒 False）；期间字节不透传。
+    - host_key：y → text="true"、n → text="false"，其余透传。
+    - 待决期 \\x03（钉死规则）：approval → reject、rescue → accept=False，
+      均不透传；password/host_key 态吞掉不透传（隐藏输入不外泄）。
+    - 无截获态 \\x03：核心任务活跃（core._ai_task 非 None）→ interrupt
+      且不透传；空闲 → 原样透传（shell 原生 ^C）。
+    - \\x04（Ctrl+D）永远透传（shell exit → 核心 closed）。
     """
 
     def __init__(self, frontend: "TermFrontend") -> None:
         self._frontend = frontend
         self.state: str | None = None
+        self._risk = "normal"       # approval 风险级（二段确认判定）
+        self._confirming = False    # high 风险二段确认态
+        self._buf = b""             # password 累积（不回显）
+        self._editing = False       # 编辑流进行中（泵已停读）
 
-    def on_keys(self, data: bytes) -> tuple[str, object]:
-        return ("pass", data)
+    # --- 待决态进入/退出（渲染器调用 enter_*；exit_* 对应清除）---
 
     def enter_approval(self, risk: str) -> None:
-        pass
+        self.state = "approval"
+        self._risk = "high" if risk == "high" else "normal"
+        self._confirming = False
+        self._editing = False
 
     def enter_rescue(self) -> None:
-        pass
+        self.state = "rescue"
 
     def enter_auth(self, kind: str) -> None:
-        pass
+        # 渲染器只传 "password"|"host_key"；core 的 ask_password 带
+        # auth_kind="cmdset" 时渲染器也归 "password"（core 侧 password/
+        # cmdset 入同一 _pws 队列，ClientMsg auth_kind="password" 即达）
+        self.state = "host_key" if kind == "host_key" else "password"
+        self._buf = b""
+
+    def exit_approval(self) -> None:
+        if self.state == "approval":
+            self._exit_state()
+
+    def exit_rescue(self) -> None:
+        if self.state == "rescue":
+            self._exit_state()
+
+    def exit_auth(self) -> None:
+        if self.state in ("password", "host_key"):
+            self._exit_state()
+
+    def _exit_state(self) -> None:
+        self.state = None
+        self._confirming = False
+        self._buf = b""
+        self._editing = False
+
+    # --- 待决审批原命令（编辑流预填）---
+
+    @property
+    def pending_command(self) -> str:
+        """待决审批的原命令。enter_approval(risk) 形状被测试钉死不能加参，
+        渲染器在调用前把命令写进 frontend._pending_approval_command。"""
+        return getattr(self._frontend, "_pending_approval_command", "") or ""
+
+    # --- 键盘路由 ---
+
+    def on_keys(self, data: bytes) -> tuple[str, object]:
+        if self.state is None:
+            return self._idle_keys(data)
+        if self.state == "approval":
+            return self._approval_keys(data)
+        if self.state == "rescue":
+            return self._rescue_keys(data)
+        return self._auth_keys(data)
+
+    def _task_active(self) -> bool:
+        """核心任务活跃 = core._ai_task 非 None（core.py 真实属性名）。"""
+        core = self._frontend.core
+        return getattr(core, "_ai_task", None) is not None
+
+    def _idle_keys(self, data: bytes) -> tuple[str, object]:
+        """无截获态：\\x03 任务活跃 → interrupt（消费掉不透传），空闲透传；
+        其余字节（含 \\x04）全量直通。"""
+        if b"\x03" not in data:
+            return ("pass", data)
+        out = bytearray()
+        for i, byte in enumerate(data):
+            if byte == 3 and self._task_active():
+                self._send(ClientMsg(type="interrupt"))
+            else:
+                out.append(byte)
+        return ("pass", bytes(out))
+
+    def _approval_keys(self, data: bytes) -> tuple[str, object]:
+        out = bytearray()       # approval 其余键吞掉；\\x04 透传为唯一例外
+        for i, byte in enumerate(data):
+            if byte == 4:                       # Ctrl+D 永远透传
+                out.append(byte)
+                continue
+            if byte == 3:                       # 待决期 Ctrl+C = reject（钉死）
+                self._send_decision("reject")
+                rest = bytes(out) + data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            if self._confirming:
+                if byte == 13:                  # confirming \\r → approve
+                    self._send_decision("approve")
+                    rest = bytes(out) + data[i + 1:]
+                    return self.on_keys(rest) if rest else ("pass", b"")
+                if byte in (127, 8):            # 仅退出 confirming 回待决
+                    self._confirming = False
+                continue                        # confirming 其余键吞掉
+            if byte == 13:                      # \\r
+                if self._risk == "high":
+                    self._confirming = True     # 二段确认（红行提示）
+                    self._frontend._capture_notice(
+                        "确认执行？Enter 放行 / Backspace 取消")
+                else:
+                    self._send_decision("approve")
+                    rest = bytes(out) + data[i + 1:]
+                    return self.on_keys(rest) if rest else ("pass", b"")
+            elif byte in (127, 8):              # \\x7f/\\x08 → reject
+                self._send_decision("reject")
+                rest = bytes(out) + data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            elif bytes([byte]) in (b"e", b"E"):
+                self._editing = True            # 进编辑流（泵 await _run_edit）
+                return ("edit", None)
+            # 其余键消费不透传（与 web approvalKeys 同规则）
+        return ("pass", bytes(out))
+
+    def _rescue_keys(self, data: bytes) -> tuple[str, object]:
+        out = bytearray()
+        for i, byte in enumerate(data):
+            if byte == 3:                       # 待决期 Ctrl+C = 忽略救援
+                self._send_rescue(False)
+                rest = bytes(out) + data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            if byte in (121, 89):               # y/Y → 交给 AI
+                self._send_rescue(True)
+                rest = data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            if byte in (110, 78):               # n/N → 忽略
+                self._send_rescue(False)
+                rest = data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            out.append(byte)                    # 其余键透传
+        return ("pass", bytes(out))
+
+    def _auth_keys(self, data: bytes) -> tuple[str, object]:
+        if self.state == "host_key":
+            return self._host_key_keys(data)
+        return self._password_keys(data)
+
+    def _password_keys(self, data: bytes) -> tuple[str, object]:
+        """隐藏输入：可打印累积（不回显）、\\x7f 退格、\\r 提交；期间
+        字节一律不透传（\\x04 例外，永远透传）。"""
+        for i, byte in enumerate(data):
+            if byte == 4:                       # Ctrl+D 永远透传
+                rest = data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            if byte == 3:                       # 隐藏输入不外泄：吞掉
+                continue
+            if byte == 13:                      # \\r 提交
+                self._send(ClientMsg(type="auth", auth_kind="password",
+                                     text=self._buf.decode("utf-8",
+                                                            "replace")))
+                self._exit_state()
+                rest = data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            if byte in (127, 8):                # 退格
+                if self._buf:
+                    self._buf = self._buf[:-1]
+                continue
+            if byte >= 32 or byte < 0:          # 可打印/非 ASCII 累积
+                self._buf += bytes([byte])
+            # 其余控制键吞掉
+        return ("pass", b"")
+
+    def _host_key_keys(self, data: bytes) -> tuple[str, object]:
+        out = bytearray()
+        for i, byte in enumerate(data):
+            if byte == 4:                       # Ctrl+D 永远透传
+                out.append(byte)
+                continue
+            if byte == 3:                       # 吞掉不泄漏
+                continue
+            if byte in (121, 89):               # y → 信任
+                self._send(ClientMsg(type="auth", auth_kind="host_key",
+                                     text="true"))
+                self._exit_state()
+                rest = bytes(out) + data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            if byte in (110, 78):               # n → 拒绝
+                self._send(ClientMsg(type="auth", auth_kind="host_key",
+                                     text="false"))
+                self._exit_state()
+                rest = bytes(out) + data[i + 1:]
+                return self.on_keys(rest) if rest else ("pass", b"")
+            out.append(byte)                    # 其余透传
+        return ("pass", bytes(out))
+
+    # --- 决策上行（payload 与 web 完全一致，源自 approval.py）---
+
+    def _send(self, msg: ClientMsg) -> None:
+        """on_keys 同步路由里的 async 上行：调度为任务立即发出。"""
+        asyncio.ensure_future(self._frontend.core.feed_msg(msg))
+
+    def _send_decision(self, kind: str) -> None:
+        if kind == "approve":
+            decision: dict = {"type": "approve"}
+        else:
+            decision = {"type": "reject", "message": "用户拒绝了该命令"}
+        self._send(ClientMsg(type="decision", decision=decision))
+        self._exit_state()
+
+    def _send_rescue(self, accept: bool) -> None:
+        self._send(ClientMsg(type="rescue", accept=accept))
+        self._exit_state()
+
+    # --- 编辑流决策（_run_edit 收尾调用）---
+
+    def send_edit(self, new_command: str) -> None:
+        self._send(ClientMsg(type="decision", decision=edit_decision(new_command)))
+        self._exit_state()
+
+    def send_approve(self) -> None:
+        self._send_decision("approve")
+
+    def send_reject(self, message: str) -> None:
+        self._send(ClientMsg(type="decision",
+                             decision={"type": "reject", "message": message}))
+        self._exit_state()
+
+    def cancel_edit(self) -> None:
+        """编辑取消/EOF：回待决态（不发决策）。"""
+        self._editing = False
+        self._confirming = False
 
 
 def _fmt_tokens(n: int) -> str:
@@ -276,7 +504,7 @@ class CliRenderer:
       web 前端本地合成的事件词汇（core 不发），渲染器按 spec 词汇表
       防御性承接。
     - approval/rescue/ask_password/ask_host_key 渲染后进入本地截获态
-      （frontend.capture.enter_*，Task 5 前为 no-op 桩，调用形状已钉死）。
+      （frontend.capture.enter_*，按键语义由 _CaptureLayer 承接）。
     """
 
     def __init__(self, core, console, frontend=None):
@@ -358,7 +586,7 @@ class CliRenderer:
 
     def _on_approval(self, msg: ServerMsg) -> None:
         """审批框：risk=="high" 红色边框、"normal" 蓝色；同时进入本地
-        截获态（Task 5 前为 no-op 桩，只记录调用形状）。"""
+        截获态（_CaptureLayer 消费决策键）。"""
         border = "red" if msg.risk == "high" else "blue"
         title = "高危命令待审批" if msg.risk == "high" else "命令待审批"
         body = Text.assemble(
@@ -373,6 +601,9 @@ class CliRenderer:
             title=f"[bold {border}]{title}[/] · {msg.host}",
             title_align="left", border_style=border))
         if self._frontend is not None:
+            # 编辑流预填源：enter_approval(risk) 调用形状被测试钉死不能
+            # 加参，原命令经 frontend 属性传递（截获层 e 键时读取）
+            self._frontend._pending_approval_command = msg.command
             self._frontend.capture.enter_approval(msg.risk or "high")
 
     def _on_ask_password(self, msg: ServerMsg) -> None:
@@ -615,11 +846,14 @@ class TermFrontend:
             else self._make_default_reader()
         self._winch_installed = False
         self._raw_state = None     # termios 状态（Task 5 编辑流交接复用）
+        self._pump_paused = False  # 编辑流期间泵停读标志（交接顺序可观测）
+        self._pending_approval_command = ""   # 待决审批原命令（编辑预填）
         self._stdin_fd: int | None = None   # 默认 reader 注册的 fd（退出清理）
 
     @property
     def capture(self) -> _CaptureLayer:
-        """截获层（Task 5 换真实现）：渲染器经它进入审批/rescue/认证待决态。"""
+        """本地截获层：渲染器经它进入审批/rescue/认证待决态；输入泵经它
+        路由键盘字节（决策键消费、剩余字节直通）。"""
         return self._capture
 
     # --- 默认 IO 原语 ---
@@ -787,9 +1021,14 @@ class TermFrontend:
                     self._stop.set()
                     return
                 kind, rest = self._capture.on_keys(data)
-                if kind == "pass" and rest:
-                    await self.core.feed_input(rest)
-                # kind == "edit"：Task 5 接线（await self._run_edit()）
+                if kind == "pass":
+                    if rest:
+                        await self.core.feed_input(rest)
+                elif kind == "edit":
+                    # 截获层请求编辑流：内联 await 本协程内完成——泵在此
+                    # 期间自然停读，不会与 prompt_toolkit 并发抢 stdin
+                    # （纪律 #5）；_run_edit 返回后继续循环即恢复泵
+                    await self._run_edit()
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 - 泵死亡记日志后向外传播：
@@ -799,6 +1038,67 @@ class TermFrontend:
             print(f"\r\n[ot] 输入泵异常：{type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             raise
+
+    # --- 审批编辑流（截获层 e 键）---
+
+    async def _run_edit(self) -> None:
+        """审批编辑流。termios 交接顺序（Review Focus #5，测试钉死）：
+
+        暂停泵 → _restore_input → prompt_toolkit 多行输入 → _set_raw_input
+        → 恢复泵 → feed_msg。
+
+        泵暂停 = _input_pump 内联 await 本协程（单泵串行，无并发抢 stdin）；
+        异常/EOF/取消路径经 finally 同样恢复泵并重新置 raw，编辑结果为空
+        时回待决态不发决策。结果过 approval.reclassify_edited：deny →
+        reject（message="编辑后命令被策略拒绝"）+ 红行；approve 级 →
+        approve；其余 → edit_decision(new)。
+        """
+        cap = self._capture
+        original = cap.pending_command
+        self._pump_paused = True
+        new: str | None = None
+        try:
+            try:
+                _restore_input(self._raw_state)
+                self._raw_state = None
+                if self.status is not None:
+                    self.status.deactivate()   # 提示行前清屏（prompt 接管显示）
+                new = await self._prompt_edit(original)
+            except (EOFError, KeyboardInterrupt, Exception):  # noqa: BLE001
+                new = None    # EOF/取消/异常 → 回待决态不发决策
+        finally:
+            # 重新置 raw（仅 tty；非 tty 生产路径即 pytest/管道，保持 None）
+            self._raw_state = _set_raw_input() if sys.stdin.isatty() else None
+            self._pump_paused = False   # 恢复泵（feed_msg 之前，顺序钉死）
+        if new is None or not new.strip():
+            cap.cancel_edit()
+            return
+        d = reclassify_edited(new, self.core.policy)
+        if d.level == "deny":
+            self._capture_notice("✗ 编辑后的命令被策略拒绝")
+            cap.send_reject("编辑后命令被策略拒绝")
+        elif d.level == "approve":
+            cap.send_approve()
+        else:
+            cap.send_edit(new)
+
+    async def _prompt_edit(self, original: str) -> str:
+        """prompt_toolkit 多行编辑（termios 已交还 cooked）。风格对齐
+        cli._make_prompt_session/_prompt_text（executor 内跑 session.prompt），
+        但不 import cli——Task 6/7 会动 cli。Esc+Enter 提交（multiline
+        惯例），Ctrl+D/Ctrl+C 取消（上层回待决态）。"""
+        from prompt_toolkit import PromptSession
+        session = PromptSession(multiline=True)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: session.prompt("编辑命令（Esc+Enter 提交 · "
+                                         "Ctrl+D 取消）:\n",
+                                         default=original))
+
+    def _capture_notice(self, text: str) -> None:
+        """截获层本地提示行（confirming 二次确认 / 编辑拒绝红字）：走渲染器
+        _print 协议（擦状态行→写→重画），不经 PTY。"""
+        self._renderer._print(Text(text, style="bold red"))
 
     # --- SIGWINCH ---
 
