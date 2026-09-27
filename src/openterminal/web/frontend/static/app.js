@@ -1054,8 +1054,14 @@ class Session {
     // 的空白判成「预留过量」，夹紧/截断误触发
     if (h <= 0) return;
     const n = rowsForPx(h, this._lineHeight());
+    if (n > (slot.rows || 0)) slot._growAt = Date.now();
     slot.rows = n;
-    slot.need = n + 1;
+    // 流式增长裕量（真机反馈 2026-09-27：SSH 往返追不上 100ms 思考流批量，
+    // 卡被钳到空白 run 高度、底部裁切直到换装才恢复）：近 1s 内有过长高就
+    // 按 need+5 请求 pad。空白行不可回吐，代价是收尾后卡下最多留 5 行空白
+    //（用户拍板接受）；停止增长（含换装/冻结）后自动归零，不放大留白。
+    slot.need = n + 1 +
+      (Date.now() - (slot._growAt || 0) < 1000 ? 5 : 0);
     // 编辑框浮层开启期宿主须 overflow visible（浮层伸出盒外），量高/夹紧不得
     // 把它钉回 hidden——否则下拉编辑框被裁（真机「修改后无法编辑」成因之一）
     if (!slot.host.querySelector(".edopen")) slot.host.style.overflow = "hidden";
