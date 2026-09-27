@@ -10,7 +10,7 @@
   都必须走完，否则用户 shell 留在 raw 态）；
 - _CaptureLayer：本地截获层（审批/rescue/认证/Ctrl+C，spec §3.1/§3.3）。
   待决态消费的键与 password 累积字符绝不进 PTY；on_keys 返回
-  ("pass", 剩余直通字节) | ("edit", None)；决策经 frontend.core.feed_msg
+  ("pass", 剩余直通字节) | ("edit", 余量字节)；决策经 frontend.core.feed_msg
   发出后退出截获态；
 - _run_edit：审批编辑流（e 键）。termios 交接顺序（Review Focus #5）：
   暂停泵 → _restore_input → prompt_toolkit 多行输入 → _set_raw_input →
@@ -81,7 +81,7 @@ class _CaptureLayer:
 
     待决态（state = "approval"|"rescue"|"password"|"host_key"）下消费的
     决策键与 password 累积字符**绝不进 PTY**（Review Focus #2）：
-    on_keys(data) -> ("pass", 剩余待直通字节) | ("edit", None)——决策键
+    on_keys(data) -> ("pass", 剩余待直通字节) | ("edit", 余量字节)——决策键
     本地消费掉，pass payload 只含剩余字节；"edit" 表示进审批编辑流（由
     _input_pump await frontend._run_edit()）。
 
@@ -93,7 +93,7 @@ class _CaptureLayer:
 
     按键规则：
     - approval（risk=="high" 二段确认）：\\r 进 confirming（红行提示）→
-      再 \\r 才 approve；\\x7f/\\x08 reject；e/E → ("edit", None)；
+      再 \\r 才 approve；\\x7f/\\x08 reject；e/E → ("edit", 余量)（编辑完成后泵继续路由余量）；
       confirming 态 \\x7f 仅退出 confirming；其余键吞掉不透传。
     - rescue：y/Y → accept=True，n/N → accept=False，其余键透传。
     - password：可打印字符累积（不回显，渲染器已打提示行）、\\x7f/\\x08
@@ -220,7 +220,8 @@ class _CaptureLayer:
                 return self.on_keys(rest) if rest else ("pass", b"")
             elif bytes([byte]) in (b"e", b"E"):
                 self._editing = True            # 进编辑流（泵 await _run_edit）
-                return ("edit", None)
+                # 余量随 edit 返回：_run_edit 完成后泵继续路由（不丢字节）
+                return ("edit", data[i + 1:])
             # 其余键消费不透传（与 web approvalKeys 同规则）
         return ("pass", bytes(out))
 
@@ -233,11 +234,11 @@ class _CaptureLayer:
                 return self.on_keys(rest) if rest else ("pass", b"")
             if byte in (121, 89):               # y/Y → 交给 AI
                 self._send_rescue(True)
-                rest = data[i + 1:]
+                rest = bytes(out) + data[i + 1:]   # 前缀透传字节不丢（minor 1）
                 return self.on_keys(rest) if rest else ("pass", b"")
             if byte in (110, 78):               # n/N → 忽略
                 self._send_rescue(False)
-                rest = data[i + 1:]
+                rest = bytes(out) + data[i + 1:]
                 return self.on_keys(rest) if rest else ("pass", b"")
             out.append(byte)                    # 其余键透传
         return ("pass", bytes(out))
@@ -249,11 +250,12 @@ class _CaptureLayer:
 
     def _password_keys(self, data: bytes) -> tuple[str, object]:
         """隐藏输入：可打印累积（不回显）、\\x7f 退格、\\r 提交；期间
-        字节一律不透传（\\x04 例外，永远透传）。"""
+        字节一律不透传（\\x04 例外：原样透传，计划钉死「永远透传」）。"""
+        out = bytearray()       # 仅累积 \x04（隐藏输入期间唯一透传字节）
         for i, byte in enumerate(data):
             if byte == 4:                       # Ctrl+D 永远透传
-                rest = data[i + 1:]
-                return self.on_keys(rest) if rest else ("pass", b"")
+                out.append(byte)
+                continue
             if byte == 3:                       # 隐藏输入不外泄：吞掉
                 continue
             if byte == 13:                      # \\r 提交
@@ -261,7 +263,7 @@ class _CaptureLayer:
                                      text=self._buf.decode("utf-8",
                                                             "replace")))
                 self._exit_state()
-                rest = data[i + 1:]
+                rest = bytes(out) + data[i + 1:]
                 return self.on_keys(rest) if rest else ("pass", b"")
             if byte in (127, 8):                # 退格
                 if self._buf:
@@ -270,7 +272,7 @@ class _CaptureLayer:
             if byte >= 32 or byte < 0:          # 可打印/非 ASCII 累积
                 self._buf += bytes([byte])
             # 其余控制键吞掉
-        return ("pass", b"")
+        return ("pass", bytes(out))
 
     def _host_key_keys(self, data: bytes) -> tuple[str, object]:
         out = bytearray()
@@ -449,6 +451,11 @@ class _StatusLine:
         # 先擦再置 False：擦除只对在屏状态行生效，顺序反了会把状态行留在屏上
         self.erase()
         self.active = False
+
+    def reactivate(self) -> None:
+        """编辑流等临时接管屏幕后复活：保留计时/计数（activate 会归零）。"""
+        self.active = True
+        self.redraw()
 
     def erase(self) -> None:
         """擦除在屏状态行（\\r\\x1b[K）；光标回到该行行首（视为新空行）。"""
@@ -842,13 +849,18 @@ class TermFrontend:
             else _default_console(self)   # 生产 rich Console（经 writer 适配器）
         self._renderer = CliRenderer(core, self._console, frontend=self)
         self.status = self._renderer.status   # _StatusLine（bytes 分支擦除协议）
+        # stdin reader 账目必须在 _make_default_reader 之前清零：_posix_reader
+        # 构造期就注册 add_reader 并写入 _stdin_fd/_stdin_cb（审查 B2：曾因
+        # 后置初始化把账目抹掉，_remove_stdin_reader 永远 no-op）
+        self._stdin_fd: int | None = None
+        self._stdin_cb = None      # add_reader 回调（编辑流摘挂/重挂用）
         self._reader = reader if reader is not None \
             else self._make_default_reader()
         self._winch_installed = False
         self._raw_state = None     # termios 状态（Task 5 编辑流交接复用）
         self._pump_paused = False  # 编辑流期间泵停读标志（交接顺序可观测）
         self._pending_approval_command = ""   # 待决审批原命令（编辑预填）
-        self._stdin_fd: int | None = None   # 默认 reader 注册的 fd（退出清理）
+        self._status_was_active = False   # 编辑流前状态行是否在屏（复活用）
 
     @property
     def capture(self) -> _CaptureLayer:
@@ -869,7 +881,7 @@ class TermFrontend:
         构造期注册（TermFrontend 须在事件循环内构造——cli._run_pipeline
         即 async 上下文）；fd 就绪回调把字节塞队列，reader 协程按序取。
         EOF（os.read 返回 b""：管道关闭 / 重定向 stdin 结束）原样传 b""
-        给泵停摆。"""
+        给泵停摆。回调/队列挂 self：编辑流 _run_edit 需要摘挂同一注册。"""
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         fileno = sys.stdin.fileno()
@@ -885,6 +897,7 @@ class TermFrontend:
 
         loop.add_reader(fileno, _on_readable)
         self._stdin_fd = fileno
+        self._stdin_cb = _on_readable
 
         async def _reader() -> bytes:
             return await queue.get()
@@ -965,8 +978,34 @@ class TermFrontend:
         if self._stdin_fd is None:
             return
         fd, self._stdin_fd = self._stdin_fd, None
+        self._stdin_cb = None
         try:
             asyncio.get_running_loop().remove_reader(fd)
+        except RuntimeError:
+            pass    # loop 已关闭
+
+    def _suspend_stdin_reader(self) -> None:
+        """编辑流前摘掉 stdin 的 loop 监听（不注销账目，_resume 可重挂）。
+
+        不摘的后果（审查 B1 实证）：① prompt_toolkit 在 executor 里读同一
+        fd，add_reader 的 os.read 与之抢键——抢到的字节进 reader 队列，
+        编辑器拿不到，编辑结束后又被泵喂进 PTY；② 编辑期 termios 是
+        cooked（_restore_input 有意交还），canonical 模式下 os.read 会阻塞
+        到整行——用户敲半行没回车，整个事件循环冻结在 read 系统调用里。"""
+        if self._stdin_fd is None:
+            return
+        try:
+            asyncio.get_running_loop().remove_reader(self._stdin_fd)
+        except RuntimeError:
+            pass    # loop 已关闭
+
+    def _resume_stdin_reader(self) -> None:
+        """编辑流后重挂 stdin 监听（与 _posix_reader 同一回调/账目）。"""
+        if self._stdin_fd is None or self._stdin_cb is None:
+            return
+        try:
+            asyncio.get_running_loop().add_reader(
+                self._stdin_fd, self._stdin_cb)
         except RuntimeError:
             pass    # loop 已关闭
 
@@ -1021,14 +1060,15 @@ class TermFrontend:
                     self._stop.set()
                     return
                 kind, rest = self._capture.on_keys(data)
-                if kind == "pass":
-                    if rest:
-                        await self.core.feed_input(rest)
-                elif kind == "edit":
+                while kind == "edit":
                     # 截获层请求编辑流：内联 await 本协程内完成——泵在此
                     # 期间自然停读，不会与 prompt_toolkit 并发抢 stdin
-                    # （纪律 #5）；_run_edit 返回后继续循环即恢复泵
+                    # （纪律 #5）；余量（e 键同 chunk 剩余）编辑后继续路由
                     await self._run_edit()
+                    kind, rest = self._capture.on_keys(rest) if rest \
+                        else ("pass", b"")
+                if kind == "pass" and rest:
+                    await self.core.feed_input(rest)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 - 泵死亡记日志后向外传播：
@@ -1056,9 +1096,14 @@ class TermFrontend:
         cap = self._capture
         original = cap.pending_command
         self._pump_paused = True
+        self._status_was_active = self.status.active if self.status is not None \
+            else False
         new: str | None = None
         try:
             try:
+                # 摘 stdin 监听必须先于 _restore_input：cooked 模式下
+                # add_reader 的 os.read 会阻塞冻结整 loop（审查 B1）
+                self._suspend_stdin_reader()
                 _restore_input(self._raw_state)
                 self._raw_state = None
                 if self.status is not None:
@@ -1069,18 +1114,28 @@ class TermFrontend:
         finally:
             # 重新置 raw（仅 tty；非 tty 生产路径即 pytest/管道，保持 None）
             self._raw_state = _set_raw_input() if sys.stdin.isatty() else None
+            self._resume_stdin_reader()   # 先重挂监听再放泵（泵随后 await reader）
             self._pump_paused = False   # 恢复泵（feed_msg 之前，顺序钉死）
         if new is None or not new.strip():
             cap.cancel_edit()
+            self._status_reactivate()   # 任务还在跑：状态行复活
             return
         d = reclassify_edited(new, self.core.policy)
         if d.level == "deny":
             self._capture_notice("✗ 编辑后的命令被策略拒绝")
-            cap.send_reject("编辑后命令被策略拒绝")
+            cap.send_reject("编辑后命令被策略拒绝")   # 任务将终止：状态行不复活
         elif d.level == "approve":
             cap.send_approve()
+            self._status_reactivate()
         else:
             cap.send_edit(new)
+            self._status_reactivate()
+
+    def _status_reactivate(self) -> None:
+        """编辑流结束后复活状态行（任务继续跑的路径）：reactivate 不清
+        计时/计数（activate 会归零，审查 minor 4）。任务终止路径不调用。"""
+        if self.status is not None and self._status_was_active:
+            self.status.reactivate()
 
     async def _prompt_edit(self, original: str) -> str:
         """prompt_toolkit 多行编辑（termios 已交还 cooked）。风格对齐

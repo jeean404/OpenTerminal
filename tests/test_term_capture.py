@@ -230,9 +230,9 @@ async def test_ctrl_d_always_passes():
 
 
 async def test_edit_flow_handoff_order(monkeypatch):
-    """e → ("edit", None) → _run_edit 调用序（Review Focus #5）：
-    暂停泵 → _restore_input → prompt_toolkit 输入 → _set_raw_input →
-    恢复泵 → feed_msg edit_decision。"""
+    """e → ("edit", 余量) → _run_edit 调用序（Review Focus #5）：
+    暂停泵 → 摘 stdin 监听 → _restore_input → prompt_toolkit 输入 →
+    _set_raw_input → 重挂监听 → 恢复泵 → feed_msg edit_decision。"""
     fe, core, _ = _frontend_env()
     cap = fe._capture
     fe._pending_approval_command = "echo old"
@@ -261,7 +261,7 @@ async def test_edit_flow_handoff_order(monkeypatch):
     core.feed_msg = probe_feed
 
     kind, rest = cap.on_keys(b"e")
-    assert (kind, rest) == ("edit", None)
+    assert (kind, rest) == ("edit", b"")
     await fe._run_edit()
     await _drain()
 
@@ -371,7 +371,7 @@ async def test_edit_eof_returns_to_pending():
 
 
 async def test_pump_routes_edit_branch(monkeypatch):
-    """_input_pump 的 ("edit", None) 分支接线：reader 喂 b"e" → _run_edit
+    """_input_pump 的 edit 分支接线：reader 喂 b"e" → _run_edit
     被执行（edit 决策发出）。"""
     monkeypatch.setattr(sys, "stdin", _TtyStdin())
     monkeypatch.setattr(tmod, "_restore_input", lambda st: None)
@@ -468,8 +468,165 @@ async def test_password_submit_chunk_remainder_routes_normal():
     fe, core, _ = _frontend_env()
     cap = fe._capture
     cap.enter_auth("password")
-    kind, rest = cap.on_keys(b"pw\r")
-    assert (kind, rest) == ("pass", b"")
+    kind, rest = cap.on_keys(b"pw\r\x03")     # 余量 \x03 一并喂入
+    assert (kind, rest) == ("pass", b"\x03")  # 提交后 idle 路由：无任务 → 透传
     await _drain()
     au = [m for m in core.fed if m.type == "auth"]
     assert len(au) == 1 and au[0].text == "pw"
+
+
+# --- 审查修复（B1/B2 + minor 1-4）回归 ---
+
+async def test_password_ctrl_d_passes_through():
+    """\\x04 永远透传——password 态也不例外（此前被静默丢弃）。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    cap.enter_auth("password")
+    kind, rest = cap.on_keys(b"\x04")
+    assert (kind, rest) == ("pass", b"\x04")
+    await _drain()
+    assert core.fed == [] and cap.state == "password"   # 仍在待决、未提交
+
+
+async def test_rescue_prefix_bytes_before_decision_pass():
+    """minor 1：rescue 态同 chunk 决策键前已透传的字节不丢（b"xy" →
+    x 直通 + y 决策）。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    cap.enter_rescue()
+    kind, rest = cap.on_keys(b"xy")
+    await _drain()
+    rs = [m for m in core.fed if m.type == "rescue"]
+    assert len(rs) == 1 and rs[0].accept is True
+    assert (kind, rest) == ("pass", b"x")     # y 决策后余量回 idle 路由
+
+
+async def test_pump_routes_remainder_after_edit(monkeypatch):
+    """minor 3：e 键同 chunk 余量编辑完成后继续路由（b"els\\r" → edit
+    决策 + b"ls\\r" 直通 PTY，不丢字节）。"""
+    monkeypatch.setattr(sys, "stdin", _TtyStdin())
+    monkeypatch.setattr(tmod, "_restore_input", lambda st: None)
+    monkeypatch.setattr(tmod, "_set_raw_input", lambda: None)
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    fe._pending_approval_command = "echo old"
+    cap.enter_approval("normal")
+
+    async def fake_edit(original):
+        return "echo ok"
+
+    fe._prompt_edit = fake_edit
+    chunks = [b"els\r"]
+
+    async def reader():
+        if not chunks:
+            await asyncio.sleep(3600)
+            return b""
+        return chunks.pop(0)
+
+    fe._reader = reader
+    pump = asyncio.create_task(fe._input_pump())
+    try:
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if core.raws:
+                break
+    finally:
+        pump.cancel()
+        with _suppress_cancel():
+            await pump
+    assert [d.decision["type"] for d in _decisions(core)] == ["edit"]
+    assert core.raws == [b"ls\r"]             # 余量编辑后直通
+
+
+async def test_status_reactivates_after_edit():
+    """minor 4：编辑前状态行在屏 → 编辑取消回待决后复活且保留计数；
+    deny（任务终止）路径不复活。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    fe._pending_approval_command = "echo old"
+    cap.enter_approval("normal")
+    fe.status.activate("任务进行中")
+    fe.status.update(100, 5, False)
+
+    async def fake_eof(original):
+        raise EOFError
+
+    fe._prompt_edit = fake_eof
+    cap.on_keys(b"e")
+    await fe._run_edit()
+    await _drain()
+    assert fe.status.active                   # 取消 → 任务继续 → 复活
+    assert fe.status._t_in == 100             # reactivate 不清计数
+
+    async def fake_ok(original):
+        return "echo ok"
+
+    fe._prompt_edit = fake_ok
+    fe.status.deactivate()
+    core.policy = Policy(deny_extra={"echo ok"})
+    cap.enter_approval("normal")              # 回待决再来一轮
+    cap.on_keys(b"e")
+    await fe._run_edit()
+    await _drain()
+    assert not fe.status.active               # deny → 任务将终止 → 不复活
+
+
+async def test_edit_suspends_and_resumes_stdin_reader(monkeypatch):
+    """审查 B1：编辑流前摘 stdin 的 add_reader（防 prompt_toolkit 抢键/
+    cooked 模式 os.read 冻结 loop），编辑后重挂同一回调，先摘后挂。"""
+    fe, core, _ = _frontend_env()
+    cap = fe._capture
+    fe._pending_approval_command = "echo old"
+    cap.enter_approval("normal")
+    fe._stdin_fd = 7
+    fe._stdin_cb = lambda: None
+    loop = asyncio.get_running_loop()
+    calls = []
+    orig_rm, orig_add = loop.remove_reader, loop.add_reader
+
+    def rm(fd):
+        calls.append(("rm", fd))
+        return orig_rm(fd)
+
+    def add(fd, cb, *a):
+        calls.append(("add", fd))
+        return orig_add(fd, cb, *a)
+
+    monkeypatch.setattr(loop, "remove_reader", rm)
+    monkeypatch.setattr(loop, "add_reader", add)
+    monkeypatch.setattr(sys, "stdin", _TtyStdin())
+    monkeypatch.setattr(tmod, "_restore_input", lambda st: None)
+    monkeypatch.setattr(tmod, "_set_raw_input", lambda: None)
+
+    async def fake_edit(original):
+        assert ("rm", 7) in calls             # prompt 期间已摘
+        assert ("add", 7) not in calls        # 编辑期间未重挂
+        return "echo ok"
+
+    monkeypatch.setattr(fe, "_prompt_edit", fake_edit)
+    cap.on_keys(b"e")
+    await fe._run_edit()
+    await _drain()
+    assert ("rm", 7) in calls and ("add", 7) in calls
+    assert calls.index(("rm", 7)) < calls.index(("add", 7))
+
+
+async def test_default_reader_registers_stdin_fd(monkeypatch):
+    """审查 B2：__init__ 账目顺序修复——默认 reader 构造期注册的
+    _stdin_fd 不再被后置初始化抹掉，_remove_stdin_reader 真能注销。"""
+    import os
+    rfd, wfd = os.pipe()
+    fake_stdin = os.fdopen(rfd, "rb", closefd=False)
+    monkeypatch.setattr(sys, "stdin", fake_stdin)
+    fe = TermFrontend(core=None)              # 默认 reader（POSIX add_reader）
+    try:
+        assert fe._stdin_fd == rfd            # 账目在（曾被重置为 None）
+        assert fe._stdin_cb is not None
+        fe._remove_stdin_reader()
+        assert fe._stdin_fd is None and fe._stdin_cb is None
+    finally:
+        asyncio.get_running_loop().remove_reader(rfd)   # 幂等防御
+        os.close(wfd)
+        fake_stdin.close()
+        os.close(rfd)
