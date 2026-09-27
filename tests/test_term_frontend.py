@@ -337,8 +337,9 @@ async def test_tty_path_sets_and_restores_raw(monkeypatch):
 
 
 # --- 存量密码路径（移植自旧 CLI test_switch_target_*，Task 6 换心后由
-# core._connect 承接：凭据库存量密码随建连传给 open_session；现场重输
-# 的写回由核心认证弹窗 remember 路径承接，见 test_web_worker.py）---
+# core._connect 承接：凭据库存量密码随建连传给 open_session。CLI 认证
+# remember 恒 False，现场重输不写回凭据库（web 侧 remember 勾选路径仍
+# 有写回，见 test_web_worker.py）---
 
 
 async def test_stored_password_passed_to_open_session(monkeypatch):

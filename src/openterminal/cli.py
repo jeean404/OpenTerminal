@@ -704,12 +704,15 @@ class Cli:
 
         run() 返回（核心 closed / EOF / 异常）即回主菜单；之后必须补
         core.close()——EOF/异常/连接失败路径下 run() 返回时核心未关
-        （Task 3 前向契约），CliCore.close() 幂等。"""
+        （Task 3 前向契约），CliCore.close() 幂等。try/finally 保证 run()
+        抛异常（未来 loop() 若在菜单里兜住异常）时核心也被关闭。"""
         core = CliCore(self.cfg, name, frontend=None)   # 两段构造：反向注入
         frontend = TermFrontend(core)
         core._frontend = frontend
-        await frontend.run()
-        await core.close()
+        try:
+            await frontend.run()
+        finally:
+            await core.close()
 
 
 async def _prompt_text(text: str, default: str = "") -> str:

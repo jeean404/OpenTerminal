@@ -282,7 +282,7 @@ def _backfill_password(target: TargetConfig, session) -> None:
     if used is None:
         return  # 本次没用密码（密钥认证）或未记录
     if load_password(target.host, target.user, target.port) is not None:
-        return  # 已有凭据；失效由 switch_target 写回刷新
+        return  # 已有凭据（旧 CLI 的失效写回路径已随换心退场）
     if not any(t.host == target.host and t.user == target.user
                and t.port == target.port for t in load_saved_targets()):
         return  # 连接未记住：不替用户做主存密码
