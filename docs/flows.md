@@ -154,13 +154,14 @@ flowchart TD
     B --> C{认证结果}
     C -->|PermissionDenied| D["交互询问密码<br/>（本地截获，不回显）<br/>记入 last_password"]
     D --> B2["重试一次"]
-    C -->|HostKeyNotVerifiable| E{known_hosts<br/>已有条目?}
+    C -->|HostKeyNotVerifiable| E{known_hosts<br/>已有条目?<br/>（明文/逗号/哈希 |1|… 均解析）}
     E -->|"有但不符"| F["硬失败：可能重装系统或中间人<br/>绝不静默覆盖"]
     E -->|无| G["TOFU：临时免校验取指纹<br/>询问「信任并写入?」"]
     G -->|y| H["写 known_hosts<br/>复用已建连接"]
     G -->|n| I["拒绝连接"]
     C -->|成功| J["create_process(PTY)<br/>term_size=(cols,rows)"]
     J --> K["运行中…"]
+    K -->|命令超时| P["_handle_timeout：Ctrl-C → 等哨兵<br/>存活?否→重连；重连成功按超时语义回 124"]
     K -->|通道 EOF / 断线| L["_recover_connection<br/>close → 用 last_password 重连"]
     L --> M{重连成功?<br/>（仅试一次）}
     M -->|是| N["event: 已重连<br/>灌回历史 + 重启命令集；hook 在下次<br/>AI 任务/提交时惰性重注入（_ensure_integrated）"]
