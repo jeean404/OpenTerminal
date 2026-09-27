@@ -309,10 +309,14 @@ class _CaptureLayer:
             decision = {"type": "reject", "message": "用户拒绝了该命令"}
         self._send(ClientMsg(type="decision", decision=decision))
         self._exit_state()
+        # 回执定格行本地合成（web store decide 事件的 CLI 等价物；core 不发
+        # decide 事件，呈现与防御性承接共用 renderer 同一份代码，spec §3.2）
+        self._frontend._receipt_decide(decision)
 
     def _send_rescue(self, accept: bool) -> None:
         self._send(ClientMsg(type="rescue", accept=accept))
         self._exit_state()
+        self._frontend._receipt_rescue_decide(accept)
 
     # --- 编辑流决策（_run_edit 收尾调用）---
 
@@ -768,8 +772,9 @@ class CliRenderer:
             self.status.deactivate()
 
     def _on_decide(self, ev: dict) -> None:
-        """决策回执：审批框原位收回执行（web store decide 事件的 CLI 呈现，
-        词汇表内；core 不发该事件，由 Task 5 截获层本地合成或防御性承接）。"""
+        """决策回执：审批框原位收回执行（✓ 已执行 / ✗ 已拒绝，spec §3.2）。
+        core 不发 decide 事件——由截获层发决策时经 _receipt_decide 本地
+        合成（web store decide 同语义）；此处也是防御性承接入口。"""
         self._flush_streams()
         d = ev.get("decision") or {}
         typ = d.get("type") if isinstance(d, dict) else d
@@ -1153,6 +1158,19 @@ class TermFrontend:
         """截获层本地提示行（confirming 二次确认 / 编辑拒绝红字）：走渲染器
         _print 协议（擦状态行→写→重画），不经 PTY。"""
         self._renderer._print(Text(text, style="bold red"))
+
+    def _receipt_decide(self, decision: dict) -> None:
+        """决策回执本地合成（live 套件 D1）：web store 在前端合成 decide
+        呈现，CLI 等价物——审批框原位收回执行/拒绝单行；呈现与防御性
+        承接共用 renderer._on_decide（spec §3.2 decide 行）。"""
+        if self._renderer is not None:
+            self._renderer._on_decide({"decision": decision})
+
+    def _receipt_rescue_decide(self, accept: bool) -> None:
+        """救援决策回执本地合成（live 套件 D2）：✓ 已交给 AI / 已忽略
+        单行定格，与 web store rescue_decide 同语义。"""
+        if self._renderer is not None:
+            self._renderer._on_rescue_decide({"accept": accept})
 
     # --- SIGWINCH ---
 

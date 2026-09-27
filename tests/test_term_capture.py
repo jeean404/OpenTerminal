@@ -630,3 +630,34 @@ async def test_default_reader_registers_stdin_fd(monkeypatch):
         os.close(wfd)
         fake_stdin.close()
         os.close(rfd)
+
+
+async def test_decision_receipt_rendered_locally():
+    """live 套件 D1 修复回归：决策发出即本地合成回执定格行（✓/✗），
+    不等 core（core 不发 decide 事件）。"""
+    fe, core, written = _frontend_env()
+    cap = fe._capture
+    cap.enter_approval("normal")
+    cap.on_keys(b"\r")                        # approve
+    await _drain()
+    assert "已执行".encode() in b"".join(written)
+    cap.enter_approval("normal")
+    cap.on_keys(b"\x7f")                      # reject
+    await _drain()
+    out = b"".join(written)
+    assert "已拒绝".encode() in out
+
+
+async def test_rescue_receipt_rendered_locally():
+    """live 套件 D2 修复回归：救援决策发出即本地合成回执（✓ 已交给 AI /
+    已忽略）。"""
+    fe, core, written = _frontend_env()
+    cap = fe._capture
+    cap.enter_rescue()
+    cap.on_keys(b"y")
+    await _drain()
+    assert "已交给 AI".encode() in b"".join(written)
+    cap.enter_rescue()
+    cap.on_keys(b"n")
+    await _drain()
+    assert "已忽略".encode() in b"".join(written)
