@@ -189,6 +189,28 @@ async def test_think_stream_dim():
 
 
 async def test_erase_before_bytes():
+    """有尾换行的 payload：写前擦状态行、写后 fresh 恢复，tick 重画落新行。"""
+    fe, written = _frontend_env()
+    loop = asyncio.create_task(fe._render_loop())
+    try:
+        await asyncio.sleep(0)
+        fe.status.activate("任务进行中")
+        fe._outbox.put_nowait(("bytes", b"out\r\n"))
+        await asyncio.sleep(0.05)
+        fe._outbox.put_nowait(("tick", None))
+        await asyncio.sleep(0.05)
+    finally:
+        loop.cancel()
+    joined = b"".join(written)
+    assert b"\r\x1b[K" in joined            # 写前擦状态行
+    i = joined.index(b"out\r\n")
+    assert joined[:i].endswith(b"\r\x1b[K")  # 擦除紧贴 payload 之前
+    assert "任务进行中".encode() in joined[i + 5:]   # tick 后重画（新行落笔）
+
+
+async def test_bytes_midline_hides_status():
+    """无尾换行的 payload（半行回显）：写后光标在行中，状态行不得重画
+    覆盖 PTY 输出（审查 blocker：bytes 分支曾无条件 redraw 抹掉输出）。"""
     fe, written = _frontend_env()
     loop = asyncio.create_task(fe._render_loop())
     try:
@@ -196,13 +218,64 @@ async def test_erase_before_bytes():
         fe.status.activate("任务进行中")
         fe._outbox.put_nowait(("bytes", b"pty"))
         await asyncio.sleep(0.05)
+        fe._outbox.put_nowait(("tick", None))   # 行中 tick 也不得重画
+        await asyncio.sleep(0.05)
     finally:
         loop.cancel()
     joined = b"".join(written)
-    assert b"\r\x1b[K" in joined            # 写前擦状态行
     i = joined.index(b"pty")
-    assert joined[:i].endswith(b"\r\x1b[K")  # 擦除紧贴 payload 之前
-    assert "任务进行中".encode() in joined[i + 3:]   # 写后重画
+    assert joined[:i].endswith(b"\r\x1b[K")     # 写前擦了
+    assert "任务进行中".encode() not in joined[i + 3:]   # 行中绝不重画
+
+
+async def test_progress_cr_frames_never_overwritten():
+    """进度条 \\r 帧（b\"10%\\r\" + b\"20%\"）：裸 \\r 不算 fresh，状态行
+    全程隐没，不覆盖任何一帧。"""
+    fe, written = _frontend_env()
+    loop = asyncio.create_task(fe._render_loop())
+    try:
+        await asyncio.sleep(0)
+        fe.status.activate("任务进行中")
+        fe._outbox.put_nowait(("bytes", b"10%\r"))
+        await asyncio.sleep(0.05)
+        fe._outbox.put_nowait(("bytes", b"20%"))
+        await asyncio.sleep(0.05)
+    finally:
+        loop.cancel()
+    joined = b"".join(written)
+    assert b"10%\r20%" in joined                # 两帧原样到达
+    i = joined.index(b"10%")
+    assert "任务进行中".encode() not in joined[i:]   # 状态行全程未覆盖
+
+
+async def test_status_truncated_to_terminal_width(monkeypatch):
+    """窄终端：状态行按显示列宽截断（CJK 计 2 列），单行不折行。"""
+    import openterminal.term_frontend as tmod
+    monkeypatch.setattr(tmod, "_term_size", lambda: (40, 10))
+    fe, written = _frontend_env()
+    fe.status.activate("任务进行中")            # 文本约 15 显示列 > 9
+    joined = b"".join(written)
+    assert joined and joined[0:1] == b"\r"
+    assert b"\n" not in joined                  # 单行（未折行）
+    assert "任务进行中".encode() not in joined  # 超宽部分被截掉
+
+
+async def test_winch_refreshes_console_width(monkeypatch):
+    """SIGWINCH：core feed_msg(resize) 之外同步刷新 console.width
+    （_WriterFile 非 tty，rich 无法自探）。"""
+    import openterminal.term_frontend as tmod
+    monkeypatch.setattr(tmod, "_term_size", lambda: (40, 120))
+    fe, _ = _frontend_env()
+
+    class _C:
+        async def feed_msg(self, m):
+            pass
+
+    fe.core = _C()
+    fe._console = Console(file=StringIO(), force_terminal=False, width=80)
+    fe._on_winch()
+    assert fe._console.width == 120
+    await asyncio.sleep(0)                      # 让 resize task 跑完无告警
 
 
 async def test_approval_panel_content():

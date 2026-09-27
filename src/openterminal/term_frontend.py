@@ -149,6 +149,17 @@ def _default_console(frontend: "TermFrontend"):
                    width=_term_size()[1])
 
 
+def _clip_display(s: str, max_cols: int) -> str:
+    """按显示列宽截断（CJK 全角计 2 列），保证状态行单行不折行。"""
+    import unicodedata
+    w = 0
+    for i, ch in enumerate(s):
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w > max_cols:
+            return s[:i]
+    return s
+
+
 class _StatusLine:
     """任务期单行状态（转轮 + 计时 + token 计数）。
 
@@ -225,17 +236,22 @@ class _StatusLine:
         if not self.active or not (self._fresh or self._drawn):
             return
         text = self._text()
+        # \x1b[K 只清一行：状态行必须单行，超终端宽度时截断（窄终端防折行）
+        text = _clip_display(text, max(1, _term_size()[1] - 1))
         self._frame = (self._frame + 1) % len(self._FRAMES)
         self._writer(f"\r{text}".encode("utf-8"))
         self._drawn = True
         self._fresh = False
 
     def note_write(self, data: bytes | str) -> None:
-        """流式直写后同步光标状态：换行/回车结尾 → 新空行；否则行中。"""
+        """流式直写后同步光标状态：换行结尾 → 新空行；否则行中。
+
+        裸 \\r 不算新空行：光标虽回行首，但该行仍有内容（进度条 \\r 帧），
+        重画状态行会覆盖它——只有 \\n（新行）/erase（清行）产生 fresh。"""
         if isinstance(data, bytes):
-            ended = data.endswith(b"\n") or data.endswith(b"\r")
+            ended = data.endswith(b"\n")
         else:
-            ended = data.endswith("\n") or data.endswith("\r")
+            ended = data.endswith("\n")
         if ended:
             self._fresh = True
         else:
@@ -726,11 +742,14 @@ class TermFrontend:
         while True:
             kind, payload = await self._outbox.get()
             if kind == "bytes":
-                # 擦除协议（Review Focus #3）：写 PTY 字节前擦状态行、
-                # 写完重画（未点亮时二者皆 no-op）
+                # 擦除协议（Review Focus #3）：写 PTY 字节前擦状态行；
+                # 写完按尾字符同步光标状态（note_write）——无尾换行的
+                # payload（进度条 \r 帧 / 半行回显）光标在行中，此刻
+                # redraw 会原位覆盖 PTY 输出，绝不能重画（与流式 token
+                # 路径同一笔账）；有尾换行时 fresh 恢复，下个 tick 重画
                 self.status.erase()
                 self._writer(payload)
-                self.status.redraw()
+                self.status.note_write(payload)
             elif kind == "msg":
                 await self._on_msg(payload)
                 if payload.type == "closed":
@@ -806,6 +825,13 @@ class TermFrontend:
     def _on_winch(self) -> None:
         # 信号上下文不做 await：create_task 包装排队进核心
         rows, cols = _term_size()
+        if self._console is not None:
+            # _WriterFile 非 tty，rich 无法自探宽度：winch 时同步刷新，
+            # 否则 resize 后 Panel/总结框仍按构造期宽度渲染
+            try:
+                self._console.width = cols
+            except Exception:  # noqa: BLE001 - 假 console 不可写宽度时忽略
+                pass
         asyncio.create_task(self.core.feed_msg(
             ClientMsg(type="resize", rows=rows, cols=cols)))
 
