@@ -32,8 +32,10 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 DRIVER = pathlib.Path(__file__).resolve().parent / "cli_driver.py"
 OT_BIN = "/opt/miniconda3/envs/openterminal/bin/ot"
 GATEWAY = ("127.0.0.1", 15721)
-TOUCH_TARGET = "/tmp/ot_live_ok"          # 与 cli_driver.approval 场景约定一致
-TAB_FILE = "/tmp/ot_live_tab_u1.txt"      # Tab 补全预置文件（唯一前缀 ot_live_tab_u）
+# pid 后缀隔离（审查 minor 5）：全量与 live 并发跑不互踩；TOUCH 路径
+# 经 OT_LIVE_TOUCH_TARGET 传给 driver（driver 侧同名 env 默认值兜底）
+TOUCH_TARGET = f"/tmp/ot_live_ok_{os.getpid()}"
+TAB_FILE = f"/tmp/ot_live_tab_u{os.getpid()}.txt"   # 唯一前缀 ot_live_tab_u
 
 
 def _default_shell() -> str:
@@ -64,6 +66,7 @@ _requires_hook_classify = pytest.mark.skipif(
 
 def _spawn(scenario: str, timeout: float = 90.0) -> PtyApp:
     env = dict(os.environ)   # 含 conftest autouse 的 OPENTERMINAL_HOME（隔离）
+    env["OT_LIVE_TOUCH_TARGET"] = TOUCH_TARGET   # driver 审批场景同路径
     env.setdefault("TERM", "xterm-256color")
     env.pop("COLUMNS", None)   # 让 rich 宽度取 pty winsize（120 列）
     env.pop("LINES", None)
@@ -170,7 +173,8 @@ def test_approval_enter_executes():
         app.send(b"\r")
         if app.expect_optional("确认执行", timeout=2.0):
             app.send(b"\r")   # 高危二段确认
-        app.expect("已执行", timeout=30)     # 决策回执/任务收尾文本
+        app.expect("✓ 已执行", timeout=30)   # 决策回执（driver final 文本
+        # 已改为不含「已执行」的收尾语，此处命中即本地合成回执本身）
         app.expect("▶ 执行", timeout=30)     # AI 发起执行面板（ai_collapse）
         deadline = time.monotonic() + 15
         while not os.path.exists(TOUCH_TARGET):
@@ -261,6 +265,7 @@ def test_interactive_program_native():
         app.expect("localhost", timeout=20)   # hosts 内容经 less 渲染上屏
         app.send(b"q")
         time.sleep(0.3)   # less 退出 + 提示符重画窗口
+        app.expect_absent("localhost", within=1.0)   # less 退出后无残留重渲染
         app.send(b"echo after_less\r")
         app.expect("after_less", timeout=20)
     finally:
@@ -313,9 +318,10 @@ def test_gateway_real_ai_task(tmp_path):
         app.send(b"reply with exactly one word: banana\r")
         app.expect("任务进行中", timeout=60)   # 状态行出现
         app.expect("总结", timeout=300)        # 真模型总结框出现
-        assert app.screen().count("banana") >= 2, (
-            "流式非空断言失败：模型回复内容未在屏上重复出现（只有输入回显）；"
-            f"屏文本：\n{app.tail(2000)!r}")
+        # ≥3：输入回显(1) + hook 蓝色重绘(1) 之后必须有真流式正文(≥1)
+        assert app.screen().count("banana") >= 3, (
+            "流式非空断言失败：屏上 banana 未超过 回显+hook重绘 的 2 次"
+            f"基线（模型流式正文未到达）；屏文本：\n{app.tail(2000)!r}")
         # 任务后原生命令直执行成功
         app.send(b"echo gw_ok\r")
         app.expect("gw_ok", timeout=30)

@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import pathlib
 import sys
 
@@ -79,7 +80,8 @@ import openterminal.agent as agent_mod  # noqa: E402
 from openterminal.agent import TaskEvent  # noqa: E402
 from openterminal.term_frontend import CliCore, TermFrontend  # noqa: E402
 
-TOUCH_TARGET = "/tmp/ot_live_ok"
+TOUCH_TARGET = os.environ.get("OT_LIVE_TOUCH_TARGET",
+                               "/tmp/ot_live_ok")   # 测试经 env 传 pid 隔离路径
 
 
 def make_scripted_runner(scenario: str, core: "CliCore") -> type:
@@ -141,7 +143,7 @@ def make_scripted_runner(scenario: str, core: "CliCore") -> type:
             # 同一入口——on_boundary 门闩 + on_start 执行面板回调 +
             # InteractiveRunner 真注入），不是旁路 subprocess
             await core.backend.aexecute(f"touch {TOUCH_TARGET}")
-            return [TaskEvent("final", text="✓ 已执行")]
+            return [TaskEvent("final", text="审批流程收尾完成")]   # 不含「已执行」：该词独占决策回执
 
     return ScriptedRunner
 
