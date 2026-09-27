@@ -1,5 +1,3 @@
-import json
-
 from openterminal.cli import is_interactive_command, is_streaming_command, prompt_text
 from openterminal.sysprobe import SystemProfile
 
@@ -113,94 +111,6 @@ def test_prompt_text_no_git_outside_repo(tmp_path):
                       service_mgr="launchd", shell="/bin/zsh", tools={})
     s = type("S", (), {"cwd": str(tmp_path)})()
     assert "git:(" not in prompt_text(p, s, "u")
-
-
-async def test_approval_eof_defaults_to_reject(monkeypatch):
-    import openterminal.cli as cli_mod
-    from openterminal.cli import Cli
-    from openterminal.config import Config
-
-    async def boom():
-        raise EOFError
-
-    c = Cli(Config.load())
-    monkeypatch.setattr(cli_mod, "_prompt_choice", boom)
-    decision = await c._approval_decision("touch x")
-    assert decision["type"] == "reject"
-
-
-async def test_batch_approval_one_decision_per_request(monkeypatch):
-    # 回归：模型一轮并行发起两个 approve 命令时，CLI 必须为每个 action
-    # request 各收集一个决定再 resume；只给 1 个会被 HITL 中间件拒绝并打挂 REPL
-    import openterminal.cli as cli_mod
-    from openterminal.cli import Cli
-    from openterminal.config import Config
-
-    async def yes():
-        return "y"
-
-    c = Cli(Config.load())
-    monkeypatch.setattr(cli_mod, "_prompt_choice", yes)
-
-    seen: dict = {}
-
-    class FakeRunner:
-        interrupt_payload = {
-            "action_requests": [
-                {"args": {"command": "touch a.txt"}},
-                {"args": {"command": "touch b.txt"}},
-            ]
-        }
-
-        async def resume(self, decisions):
-            seen["decisions"] = decisions
-            self.interrupt_payload = None
-            return []
-
-    presenter = c._make_presenter()
-    await c._handle_events(FakeRunner(), [], presenter)
-    decisions = seen["decisions"]
-    assert len(decisions) == 2
-    assert all(d["type"] == "approve" for d in decisions)
-    # 两个命令各留一条审批记录
-    rows = [json.loads(line) for line in c.transcript.path.read_text().splitlines()]
-    assert [r["command"] for r in rows if r["kind"] == "approval"] == [
-        "touch a.txt", "touch b.txt"]
-
-
-async def test_batch_approval_reject_mixes_per_command(monkeypatch):
-    # 两个命令逐个询问：第一个 y、第二个 n，决定按顺序带回模型
-    import openterminal.cli as cli_mod
-    from openterminal.cli import Cli
-    from openterminal.config import Config
-
-    answers = iter(["y", "n"])
-
-    async def choose():
-        return next(answers)
-
-    c = Cli(Config.load())
-    monkeypatch.setattr(cli_mod, "_prompt_choice", choose)
-
-    seen: dict = {}
-
-    class FakeRunner:
-        interrupt_payload = {
-            "action_requests": [
-                {"args": {"command": "touch keep.txt"}},
-                {"args": {"command": "touch drop.txt"}},
-            ]
-        }
-
-        async def resume(self, decisions):
-            seen["decisions"] = decisions
-            self.interrupt_payload = None
-            return []
-
-    presenter = c._make_presenter()
-    await c._handle_events(FakeRunner(), [], presenter)
-    decisions = seen["decisions"]
-    assert [d["type"] for d in decisions] == ["approve", "reject"]
 
 
 # --- 记住的连接（~/.openterminal/connections.toml，不入 git）---
@@ -353,28 +263,25 @@ async def test_pick_startup_target_cancel_returns_none(monkeypatch):
     assert await c._pick_startup_target() is None
 
 
-async def test_connect_via_picker_retries_after_failure(monkeypatch):
-    # 连接失败（密码错/不可达）→ 报错并回到选择框，第二次成功；取消返回 False
-    import openterminal.cli as cli_mod
-
+async def test_connect_via_picker_returns_target_name(monkeypatch):
+    # picker 选目标 → 返回目标名（连接改由 _run_pipeline 进行，不再开 session）；
+    # 取消/「返回」→ None；成功路径同步 saved targets
     monkeypatch.setattr("sys.platform", "linux")
     c = _make_cli()
-    picks = iter(["local", "local"])
+    picks = iter(["default", None])
     attempts = []
 
-    async def pick(title, rows):
+    async def pick():
+        attempts.append(1)
         return next(picks)
 
-    monkeypatch.setattr(cli_mod, "pick_menu", pick)
-
-    async def flaky_switch(name):
-        attempts.append(name)
-        if len(attempts) == 1:
-            raise OSError("auth failed")
-
-    monkeypatch.setattr(c, "switch_target", flaky_switch)
-    assert await c._connect_via_picker() is True
-    assert attempts == ["default", "default"]
+    monkeypatch.setattr(c, "_pick_startup_target", pick)
+    synced = []
+    monkeypatch.setattr(c, "_sync_saved_targets", lambda: synced.append(1))
+    assert await c._connect_via_picker() == "default"
+    assert await c._connect_via_picker() is None
+    assert len(attempts) == 2
+    assert synced == [1]  # 取消路径不同步
 
 
 async def test_saved_targets_registered_in_cli_targets():
@@ -430,104 +337,6 @@ async def test_maybe_remember_key_auth_skips_keyring(monkeypatch):
                         lambda *a: (_ for _ in ()).throw(AssertionError(
                             "密钥认证不应写凭据库")))
     await c._maybe_remember(name)  # 不抛即通过
-
-
-async def test_switch_target_uses_stored_password(monkeypatch):
-    # 连接记住的 SSH 目标：凭据库密码传给会话；密码失效现场重输后写回
-    import openterminal.cli as cli_mod
-    from openterminal.sysprobe import SystemProfile
-
-    c = _make_cli()
-    name = c._target_name_for("root@203.0.113.7")
-
-    monkeypatch.setattr(cli_mod, "load_password",
-                        lambda h, u, p: "old-pw")
-    updated: dict = {}
-
-    def fake_store(host, user, port, pw):
-        updated.update(pw=pw)
-        return True
-
-    monkeypatch.setattr(cli_mod, "store_password", fake_store)
-
-    seen: dict = {}
-
-    class FakeSession:
-        cwd = "/root"
-        last_password = "new-pw"  # 旧密码失效后现场重输的新密码
-
-        async def close(self):
-            pass
-
-    async def fake_open(target, password=None, **kw):
-        seen["password"] = password
-        return FakeSession()
-
-    async def noop_remember(n):
-        pass
-
-    async def fake_probe(session, host):
-        return SystemProfile(
-            host=host, os_family="linux", distro="Debian", version="",
-            kernel="", pkg_manager="apt", service_mgr="systemd",
-            shell="/bin/bash", tools={})
-
-    monkeypatch.setattr(cli_mod, "open_session", fake_open)
-    monkeypatch.setattr(cli_mod, "load_host_cache", lambda p: {})
-    monkeypatch.setattr(cli_mod, "save_host_cache", lambda *a, **k: None)
-    monkeypatch.setattr(cli_mod, "probe_profile", fake_probe)
-    monkeypatch.setattr(cli_mod, "build_agent", lambda *a, **k: (None, set(), None))
-    monkeypatch.setattr(c, "_maybe_remember", noop_remember)
-
-    await c.switch_target(name)
-    assert seen["password"] == "old-pw"  # 凭据库密码优先于现场询问
-    assert updated == {"pw": "new-pw"}   # 失效后重输的密码写回凭据库
-
-
-async def test_switch_target_no_stored_password_prompts(monkeypatch):
-    # 凭据库无记录：password=None 传下去，由 ssh_pty 现场询问
-    import openterminal.cli as cli_mod
-    from openterminal.sysprobe import SystemProfile
-
-    c = _make_cli()
-    name = c._target_name_for("root@203.0.113.7")
-
-    monkeypatch.setattr(cli_mod, "load_password", lambda h, u, p: None)
-    monkeypatch.setattr(cli_mod, "store_password",
-                        lambda *a: (_ for _ in ()).throw(AssertionError(
-                            "无凭据不应写库")))
-
-    seen: dict = {}
-
-    class FakeSession:
-        cwd = "/root"
-        last_password = None
-
-        async def close(self):
-            pass
-
-    async def fake_open(target, password=None, **kw):
-        seen["password"] = password
-        return FakeSession()
-
-    async def noop_remember(n):
-        pass
-
-    async def fake_probe(session, host):
-        return SystemProfile(
-            host=host, os_family="linux", distro="Debian", version="",
-            kernel="", pkg_manager="apt", service_mgr="systemd",
-            shell="/bin/bash", tools={})
-
-    monkeypatch.setattr(cli_mod, "open_session", fake_open)
-    monkeypatch.setattr(cli_mod, "load_host_cache", lambda p: {})
-    monkeypatch.setattr(cli_mod, "save_host_cache", lambda *a, **k: None)
-    monkeypatch.setattr(cli_mod, "probe_profile", fake_probe)
-    monkeypatch.setattr(cli_mod, "build_agent", lambda *a, **k: (None, set(), None))
-    monkeypatch.setattr(c, "_maybe_remember", noop_remember)
-
-    await c.switch_target(name)
-    assert seen["password"] is None
 
 
 # --- 跳板机：层级子菜单与添加流程 ---
@@ -616,55 +425,6 @@ async def test_prompt_add_jump_duplicate(monkeypatch):
     assert len(load_jump_hosts()) == 1  # 不重复添加
 
 
-async def test_switch_target_writes_back_jump_password(monkeypatch):
-    import openterminal.cli as cli_mod
-    from openterminal.sysprobe import SystemProfile
-
-    save_jump_hosts([JumpHost(name="bastion01", host="10.0.0.5", user="admin")])
-    save_saved_targets([TargetConfig(name="web01", mode="ssh", host="10.0.0.20",
-                                     user="root", jump="bastion01")])
-    c = Cli(Config.load())
-
-    stored = {"target": "old", "jump": "old-j"}
-    monkeypatch.setattr(cli_mod, "load_password",
-                        lambda h, u, p: stored.get(
-                            "jump" if h == "10.0.0.5" else "target"))
-    updated = {}
-    monkeypatch.setattr(cli_mod, "store_password",
-                        lambda h, u, p, pw: updated.update(host=h, pw=pw) or True)
-
-    class FakeSession:
-        cwd = "/root"
-        last_password = "new"
-        last_jump_password = "new-j"
-
-        async def close(self):
-            pass
-
-    async def fake_open(target, password=None, **kw):
-        return FakeSession()
-
-    async def noop_remember(n):
-        pass
-
-    async def fake_probe(session, host):
-        return SystemProfile(host=host, os_family="linux", distro="Debian",
-                             version="", kernel="", pkg_manager="apt",
-                             service_mgr="systemd", shell="/bin/bash", tools={})
-
-    monkeypatch.setattr(cli_mod, "open_session", fake_open)
-    monkeypatch.setattr(cli_mod, "load_host_cache", lambda p: {})
-    monkeypatch.setattr(cli_mod, "save_host_cache", lambda *a, **k: None)
-    monkeypatch.setattr(cli_mod, "probe_profile", fake_probe)
-    monkeypatch.setattr(cli_mod, "build_agent", lambda *a, **k: (None, set(), None))
-    monkeypatch.setattr(c, "_maybe_remember", noop_remember)
-    monkeypatch.setattr(c, "_maybe_remember_jump", noop_remember)
-
-    await c.switch_target("web01")
-    # 目标密码先写回、跳板机密码后写回，最后落的是跳板机
-    assert updated == {"host": "10.0.0.5", "pw": "new-j"}
-
-
 async def test_maybe_remember_keeps_jump(monkeypatch):
     # 回归：经跳板机手敲的目标「记住该连接」时，jump 字段必须随保存落盘
     import openterminal.cli as cli_mod
@@ -702,93 +462,6 @@ def test_is_quit_line():
     assert not is_quit_line("ls -la")
     assert not is_quit_line("echo exit")
     assert not is_quit_line("exits")
-
-
-async def test_loop_bare_exit_quits(monkeypatch):
-    # 回归：REPL 里敲 exit 应退出 ot，而不是当普通命令发给远端 shell
-    # （那样会杀掉登录 shell → 触发自动重连 → 重新要密码）
-    import openterminal.cli as cli_mod
-
-    c = Cli(Config.load())
-
-    async def connect():
-        return True
-
-    c._connect_via_picker = connect
-
-    async def main_menu(title, rows):
-        return "connect"
-
-    monkeypatch.setattr(cli_mod, "pick_menu", main_menu)
-    closed = []
-
-    class S:
-        cwd = "/nonexistent"
-
-        async def close(self):
-            closed.append(1)
-
-    c.session = S()
-
-    prompts = iter(["exit"])
-
-    async def prompt(text, **k):
-        try:
-            return next(prompts)
-        except StopIteration:
-            raise EOFError
-
-    async def boom(*a, **k):
-        raise AssertionError("exit 不应被当作命令执行")
-
-    monkeypatch.setattr(cli_mod, "_prompt_text_async", prompt)
-    monkeypatch.setattr(c, "run_direct_command", boom)
-    monkeypatch.setattr(c, "_classify_with_indicator", boom)
-    await c.loop()
-    assert closed == [1]
-
-
-# --- 交互式命令（vim / sudo su - / top…）自动进终端模式执行 ---
-
-
-async def test_run_direct_interactive_enters_raw_with_command(monkeypatch):
-    # 回归：sudo su - 这类交互命令不再只提示手动 Ctrl+R，而是自动进终端
-    # 模式并把命令带进去（密码提示、root shell 都在透传里交互）
-    import openterminal.cli as cli_mod
-
-    c = Cli(Config.load())
-    seen = {}
-
-    async def fake_enter_raw(initial=None):
-        seen["initial"] = initial
-
-    monkeypatch.setattr(c, "_enter_raw", fake_enter_raw)
-    c.session = type("S", (), {"run": lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("交互命令不应走哨兵 run"))})()
-    await c.run_direct_command("sudo su -")
-    assert seen["initial"] == b"sudo su -\r"
-
-
-async def test_run_direct_noninteractive_runs_on_session(monkeypatch):
-    # 非交互命令仍走哨兵 run，不进终端模式
-    import openterminal.cli as cli_mod
-
-    c = Cli(Config.load())
-
-    async def fake_enter_raw(initial=None):
-        raise AssertionError("非交互命令不应进终端模式")
-
-    monkeypatch.setattr(c, "_enter_raw", fake_enter_raw)
-    seen = {}
-
-    async def fake_run(self, command, *, timeout=None, on_output=None):
-        seen["command"] = command
-        from openterminal.shell_session import CommandResult
-        return CommandResult(output="ok", exit_code=0, truncated=False, cwd="/root")
-
-    c.session = type("S", (), {"run": fake_run})()
-    await c.run_direct_command("ls -la")
-    assert seen["command"] == "ls -la"
 
 
 # --- 光标菜单（prompt_toolkit Application）---
@@ -846,56 +519,129 @@ def test_menu_fragments_highlight_and_separators():
     assert "bastion01" in sel[0][1]
 
 
-# --- 主菜单（loop 启动）---
+# --- loop / _run_pipeline（单管线换心）---
 
 
-async def test_loop_main_menu_exit_returns(monkeypatch):
-    # 主菜单选「退出」→ loop 直接返回，不建会话
+class _FakeCliCore:
+    instances: list = []
+
+    def __init__(self, cfg, name, frontend=None):
+        self.cfg = cfg
+        self.name = name
+        self.frontend = frontend
+        self.closed = False
+        type(self).instances.append(self)
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeFrontend:
+    instances: list = []
+
+    def __init__(self, core, **kw):
+        self.core = core
+        self.run_calls = 0
+        type(self).instances.append(self)
+
+    async def run(self):
+        self.run_calls += 1
+
+
+def _patch_pipeline(monkeypatch):
+    """patch cli.CliCore / cli.TermFrontend 为记录桩（模块级 import 供测试替换）。"""
     import openterminal.cli as cli_mod
 
+    _FakeCliCore.instances = []
+    _FakeFrontend.instances = []
+    monkeypatch.setattr(cli_mod, "CliCore", _FakeCliCore)
+    monkeypatch.setattr(cli_mod, "TermFrontend", _FakeFrontend)
+
+
+async def test_loop_menu_exit_returns(monkeypatch):
+    # 主菜单选「退出」→ loop 直接返回，_run_pipeline 未被调
+    import openterminal.cli as cli_mod
+    from openterminal.cli import Cli
+    from openterminal.config import Config
+
     c = Cli(Config.load())
+    _patch_pipeline(monkeypatch)
 
     async def main_menu(title, rows):
         return "exit"
 
     monkeypatch.setattr(cli_mod, "pick_menu", main_menu)
     await c.loop()
-    assert c.session is None
+    assert _FakeCliCore.instances == []
+    assert _FakeFrontend.instances == []
 
 
-async def test_loop_main_menu_cancel_returns(monkeypatch):
-    # 主菜单取消（Esc/q）→ 干净返回
+async def test_loop_connect_runs_pipeline_then_menu(monkeypatch):
+    # 主菜单「连接主机」→ picker 拿到目标名 → _run_pipeline 以该名建
+    # CliCore、run() 被 await、close() 被调；随后回主菜单
     import openterminal.cli as cli_mod
+    from openterminal.cli import Cli
+    from openterminal.config import Config
 
     c = Cli(Config.load())
-
-    async def main_menu(title, rows):
-        return None
-
-    monkeypatch.setattr(cli_mod, "pick_menu", main_menu)
-    await c.loop()
-    assert c.session is None
-
-
-async def test_loop_main_menu_manage_then_exit(monkeypatch):
-    # 主菜单先「管理主机」再「退出」→ 管理被调、随后退出
-    import openterminal.cli as cli_mod
-
-    c = Cli(Config.load())
-    managed = []
-    picks = iter(["manage", "exit"])
+    _patch_pipeline(monkeypatch)
+    picks = iter(["connect", "exit"])
 
     async def main_menu(title, rows):
         return next(picks)
 
-    async def manage():
-        managed.append(1)
+    async def picker():
+        return "web01"
 
     monkeypatch.setattr(cli_mod, "pick_menu", main_menu)
-    monkeypatch.setattr(c, "_manage_hosts", manage)
+    monkeypatch.setattr(c, "_connect_via_picker", picker)
     await c.loop()
-    assert managed == [1]
-    assert c.session is None
+    assert [k.name for k in _FakeCliCore.instances] == ["web01"]
+    assert [f.run_calls for f in _FakeFrontend.instances] == [1]
+    assert _FakeCliCore.instances[0].closed
+
+
+async def test_loop_initial_target_goes_direct(monkeypatch):
+    # ot connect <目标>：不进主菜单直接 _run_pipeline；结束后回主菜单
+    import openterminal.cli as cli_mod
+    from openterminal.cli import Cli
+    from openterminal.config import Config
+
+    _patch_pipeline(monkeypatch)
+    picks = iter(["exit"])
+
+    async def main_menu(title, rows):
+        return next(picks)
+
+    monkeypatch.setattr(cli_mod, "pick_menu", main_menu)
+    c = Cli(Config.load(), initial_target="203.0.113.9")
+    await c.loop()
+    assert [k.name for k in _FakeCliCore.instances] == ["203.0.113.9"]
+
+
+async def test_run_pipeline_returns_to_menu_on_closed(monkeypatch):
+    # TermFrontend.run 立即返回（模拟 closed/EOF）→ _run_pipeline 结束 →
+    # 回主菜单可再次连接；每次连接各建一个 CliCore 且 close 被调
+    import openterminal.cli as cli_mod
+    from openterminal.cli import Cli
+    from openterminal.config import Config
+
+    c = Cli(Config.load())
+    _patch_pipeline(monkeypatch)
+    picks = iter(["connect", "connect", "exit"])
+
+    async def main_menu(title, rows):
+        return next(picks)
+
+    async def picker():
+        return "web01"
+
+    monkeypatch.setattr(cli_mod, "pick_menu", main_menu)
+    monkeypatch.setattr(c, "_connect_via_picker", picker)
+    await c.loop()
+    assert len(_FakeCliCore.instances) == 2
+    assert all(k.closed for k in _FakeCliCore.instances)
+    assert all(f.run_calls == 1 for f in _FakeFrontend.instances)
 
 
 # --- 管理主机：添加 / 编辑 / 删除（断言 connections.toml 内容）---
@@ -1077,62 +823,3 @@ def test_interactive_powershell_oneshot_forms():
     # 会话接管形式仍判交互
     assert is_interactive_command("powershell -NoExit -Command Get-Date")
     assert is_interactive_command("powershell -ExecutionPolicy Bypass")
-
-
-# --- OtCompleter:终端风格 Tab 补全 -----------------------------------------
-
-from prompt_toolkit.document import Document
-
-from openterminal.cli import MANUAL_PRESETS, OtCompleter, _path_commands
-
-
-def _completions(text, target_names=None):
-    c = OtCompleter(lambda: target_names or [])
-    return list(c.get_completions(Document(text, len(text)), None))
-
-
-def _completed_lines(text, target_names=None):
-    """模拟回车前把补全插进输入行，返回补全后的整行列表。
-
-    PathCompleter 的语义是"后缀文本 + start_position 插入位"，直接断言
-    .text 会漏掉光标前已输入的前缀。
-    """
-    lines = []
-    for comp in _completions(text, target_names):
-        i = len(text) + comp.start_position
-        lines.append(text[:i] + comp.text + text[len(text):])
-    return lines
-
-
-def test_completer_slash_commands():
-    texts = [x.text for x in _completions("/tar")]
-    assert "/target" in texts and "/tar" not in texts
-    # 精确命中也带出说明 meta
-    hits = [x for x in _completions("/hel")]
-    assert hits[0].text == "/help" and hits[0].display_meta_text == "帮助"
-
-
-def test_completer_target_and_system_args():
-    texts = [x.text for x in _completions("/target ", ["web-prod", "db-main"])]
-    assert {"local", "web-prod", "db-main"} <= set(texts)
-    texts = [x.text for x in _completions("/target web", ["web-prod", "db-main"])]
-    assert texts == ["web-prod"]
-    # /system 补方言预设
-    assert set(x.text for x in _completions("/system ")) == set(MANUAL_PRESETS)
-
-
-def test_completer_first_word_commands():
-    # 首词从 PATH 补命令名
-    texts = [x.text for x in _completions("ech")]
-    assert "echo" in texts
-    assert _path_commands()  # 缓存已构建且非空
-
-
-def test_completer_path_completion_for_args(tmp_path, monkeypatch):
-    (tmp_path / "source.txt").write_text("x")
-    monkeypatch.chdir(tmp_path)
-    lines = _completed_lines("python sou")
-    assert "python source.txt" in lines
-    # 空参数位（尾随空格）也列出当前目录条目
-    lines = _completed_lines("python ")
-    assert "python source.txt" in lines

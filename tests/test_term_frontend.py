@@ -334,3 +334,59 @@ async def test_tty_path_sets_and_restores_raw(monkeypatch):
         os.close(sfd)
         os.close(mfd)
     await core.close()
+
+
+# --- 存量密码路径（移植自旧 CLI test_switch_target_*，Task 6 换心后由
+# core._connect 承接：凭据库存量密码随建连传给 open_session；现场重输
+# 的写回由核心认证弹窗 remember 路径承接，见 test_web_worker.py）---
+
+
+async def test_stored_password_passed_to_open_session(monkeypatch):
+    """凭据库有记录：load_password 的存量密码作为 password 传给 open_session
+    （旧 CLI test_switch_target_uses_stored_password 的首断言，核心侧口径）。"""
+    captured: dict = {}
+
+    async def fake_open(target, password=None, **kw):
+        captured["password"] = password
+        return FakeSession()
+
+    monkeypatch.setattr(cmod, "load_password", lambda h, u, p: "old-pw")
+    monkeypatch.setattr(cmod, "open_session", fake_open)
+    monkeypatch.setattr(cmod, "probe_profile", lambda s, h: _profile())
+    monkeypatch.setattr(cmod, "build_agent",
+                        lambda *a, **k: (None, set(), None))
+    core = CliCore(_cfg(), "web01", frontend=None)
+    frontend = TermFrontend(core, reader=_never_reader)
+    core._frontend = frontend
+    run_task = asyncio.create_task(frontend.run())
+    await _wait(lambda: "password" in captured, timeout=3)
+    assert captured["password"] == "old-pw"
+    frontend._stop.set()
+    await asyncio.wait_for(run_task, timeout=2)
+    await core.close()
+
+
+async def test_no_stored_password_prompts_via_core(monkeypatch):
+    """凭据库无记录：password=None 传给 open_session，现场询问由核心
+    ask_password 弹窗承接（旧 CLI test_switch_target_no_stored_password_prompts
+    的核心侧口径）。"""
+    captured: dict = {}
+
+    async def fake_open(target, password=None, **kw):
+        captured["password"] = password
+        return FakeSession()
+
+    monkeypatch.setattr(cmod, "load_password", lambda h, u, p: None)
+    monkeypatch.setattr(cmod, "open_session", fake_open)
+    monkeypatch.setattr(cmod, "probe_profile", lambda s, h: _profile())
+    monkeypatch.setattr(cmod, "build_agent",
+                        lambda *a, **k: (None, set(), None))
+    core = CliCore(_cfg(), "web01", frontend=None)
+    frontend = TermFrontend(core, reader=_never_reader)
+    core._frontend = frontend
+    run_task = asyncio.create_task(frontend.run())
+    await _wait(lambda: "password" in captured, timeout=3)
+    assert captured["password"] is None
+    frontend._stop.set()
+    await asyncio.wait_for(run_task, timeout=2)
+    await core.close()

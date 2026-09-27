@@ -1,19 +1,20 @@
-"""REPL：输入甄别、任务执行、审批、目标切换。raw 透传见 rawmode.py。"""
+"""CLI 前端：主菜单 / 主机管理 + 单管线终端（term_frontend）。
+
+选定连接目标后进入 TermFrontend 单管线终端：输入即终端（PTY 直通），
+自然语言直接交给 AI，/help 查看命令（/target /system /clear /model /exit
+等斜杠命令由核心 core.py 统一承接）。旧双管线 REPL（意图分类、哨兵捕获、
+raw 模式切换）已移除；rawmode.py / intent.py 文件本体待 Task 7 删除。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
 import uuid
-from dataclasses import replace
-from functools import lru_cache
 from typing import Callable
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.completion.filesystem import PathCompleter
-from prompt_toolkit.document import Document
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -21,22 +22,16 @@ from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
 
 from . import render
-from .agent import TaskRunner, build_agent, build_chat_model
-from .approval import decision_for_choice, edit_decision, reclassify_edited
-from .config import Config, TargetConfig, app_dir
+from .config import Config, TargetConfig
 from .connections import (
     JumpGroup, JumpHost, TargetList, build_target_list, display_name, jump_for,
-    list_ssh_hosts, load_jump_hosts, load_saved_targets, open_session,
-    parse_user_at_host, save_jump_hosts, save_saved_targets,
+    load_jump_hosts, load_saved_targets, parse_user_at_host, save_jump_hosts,
+    save_saved_targets,
 )
-from .intent import IntentClassifier
 from .policy import Policy
 from .secrets_store import load_password, store_password
-from .sysprobe import (
-    LOCAL_PROFILE, MANUAL_PRESETS, SystemProfile, load_host_cache,
-    probe_profile, save_host_cache,
-)
-from .taskview import TaskPresenter, ThinkingIndicator, ThinkingStream
+from .sysprobe import LOCAL_PROFILE, SystemProfile
+from .term_frontend import CliCore, TermFrontend
 from .transcript import open_transcript
 
 # 全屏/会话接管类命令白名单：命中即走透传（tui ctx），免去前端"第一帧落在
@@ -88,7 +83,6 @@ def _ps_is_oneshot(args: list[str]) -> bool:
         i += 1
     return has_positional
 
-RAW_SIGNAL = "\x12"  # Ctrl+R 经键绑定传入主循环
 
 _ADD_NEW = "__add_new__"    # 管理主机里「添加主机」的哨兵键
 _ADD_JUMP = "__add_jump__"  # 「添加跳板机」
@@ -321,7 +315,6 @@ class Cli:
         )
         self.session_id = uuid.uuid4().hex[:8]
         self.transcript = open_transcript(self.session_id)
-        self.classifier = IntentClassifier(llm_classify=self._llm_classify)
         self.session = None
         self.profile = LOCAL_PROFILE
         self.agent = None
@@ -336,17 +329,6 @@ class Cli:
         # 记住的连接注册进可选目标（config.toml 里手写的优先）
         for t in load_saved_targets():
             self.cfg.targets.setdefault(t.name, t)
-
-    async def _llm_classify(self, text: str) -> str:
-        model = build_chat_model(self.cfg.model)
-        resp = await model.ainvoke([
-            ("system", "判断用户输入是 shell 命令还是自然语言任务，"
-                       "只回答一个词：command 或 task。"),
-            ("user", text),
-        ])
-        from .agent import message_text
-        answer = message_text(resp).strip().lower()
-        return "command" if answer.startswith("command") else "task"
 
     def _target_name_for(self, text: str) -> str:
         """把 'prod-web' 或 'deploy@host:2222' 注册成 TargetConfig，返回名字。"""
@@ -685,421 +667,49 @@ class Cli:
             if store_password(jump.host, jump.user, jump.port, used):
                 render.console.print("[dim]跳板机密码已存入系统凭据库。[/]")
 
-    async def _connect_via_picker(self) -> bool:
-        """经选择框连接；取消返回 False（回主菜单）；失败（密码错/主机
-        不可达）回到选择框重选；连接成功返回 True。"""
-        while True:
-            name = await self._pick_startup_target()
-            if name is None:
-                return False
-            try:
-                await self.switch_target(name)
-                return True
-            except EOFError:
-                raise
-            except Exception as e:  # noqa: BLE001 - 连接失败回到选择框重选
-                render.console.print(
-                    f"[bold red]连接失败：{type(e).__name__}: {e}[/]\n"
-                    "请重选目标或检查地址/密码。")
-
-    async def switch_target(self, name: str = "default") -> None:
-        if self.session is not None:
-            await self.session.close()
-        target = self.cfg.targets.get(name, self.cfg.targets["default"])
-        host = target.host or ("local" if target.mode == "local" else target.name)
-        # 记住的密码从系统凭据库取：ssh 先尝试它，失效再现场询问
-        stored_pw = (load_password(target.host, target.user, target.port)
-                     if target.mode == "ssh" and target.host else None)
-        # 密码提示来自连接过程，先给出上下文让用户知道在连谁
-        render.console.print(f"[dim]正在连接 {host}…[/]")
-        self.session = await open_session(
-            target,
-            password=stored_pw,
-            default_timeout=self.cfg.shell.timeout_default,
-            max_output_bytes=self.cfg.shell.max_output_bytes,
-        )
-        # 记住的密码已失效、途中现场重输成功 → 把新密码写回凭据库
-        used_pw = getattr(self.session, "last_password", None)
-        if (stored_pw is not None and used_pw is not None
-                and used_pw != stored_pw
-                and store_password(target.host, target.user, target.port, used_pw)):
-            render.console.print("[dim]系统凭据库中的密码已更新。[/]")
-        cache = load_host_cache(app_dir() / "hosts.toml")
-        if target.mode == "local":
-            self.profile = replace(LOCAL_PROFILE)
-        elif host in cache:
-            self.profile = replace(cache[host], host=host)
-        else:
-            self.profile = await probe_profile(self.session, host)
-            save_host_cache(app_dir() / "hosts.toml", host, self.profile)
-        self.agent, self.allowed, self.backend = build_agent(
-            self.profile, self.session, self.cfg, self.policy,
-        )
-        render.console.print(
-            f"[bold green]已连接[/] {host} "
-            f"({self.profile.distro or self.profile.os_family})"
-        )
-        # 跳板机记住的密码失效、途中现场重输成功 → 把新密码写回凭据库
-        jump = jump_for(target)
-        if jump is not None:
-            jstored = load_password(jump.host, jump.user, jump.port)
-            jused = getattr(self.session, "last_jump_password", None)
-            if (jstored is not None and jused is not None and jused != jstored
-                    and store_password(jump.host, jump.user, jump.port, jused)):
-                render.console.print("[dim]跳板机密码已更新。[/]")
-        await self._maybe_remember_jump(target)
+    async def _connect_via_picker(self) -> str | None:
+        """经选择框选连接目标，返回目标名（连接由 _run_pipeline 进行，此处
+        不再开 session）；取消或「返回」返回 None。连接失败时核心发 closed、
+        _run_pipeline 返回后回主菜单，可重选目标。"""
+        name = await self._pick_startup_target()
+        if name is None:
+            return None
         await self._maybe_remember(name)
-
-    async def _classify_with_indicator(self, line: str) -> str:
-        indicator = ThinkingIndicator(render.console, "判断中…")
-        indicator.start()
-        try:
-            return await self.classifier.classify(line)
-        finally:
-            indicator.stop()
-
-    async def run_direct_command(self, command: str) -> None:
-        if is_interactive_command(command):
-            # 交互式程序哨兵机制跑不了：直接进终端模式并把命令带进去，
-            # 不再要求用户手动 Ctrl+R 后重敲一遍
-            render.console.print(
-                f"[yellow]{command} 是交互式程序，已自动进入终端模式执行。[/]\n"
-                "[dim]完成后按 Ctrl+O 返回 ot。[/]"
-            )
-            await self._enter_raw(initial=(command + "\r").encode())
-            return
-
-        def _tee(text: str) -> None:
-            render.console.print(text, end="", highlight=False)
-
-        r = await self.session.run(command, on_output=_tee)
-        self.transcript.append("direct", command=command, exit_code=r.exit_code)
-
-    async def run_task(self, text: str) -> None:
-        self.transcript.append("user", text=text)
-        presenter = self._make_presenter()
-        # backend 回调：命令真正开始执行（过了审批）才打印面板，
-        # 输出实时 tee，退出码决定是否切换到详述模式
-        self.backend.on_start = presenter.on_start
-        self.backend.on_output = presenter.on_output
-        self.backend.on_finish = presenter.on_finish
-
-        def _live(ev) -> None:
-            if ev.kind == "token":
-                presenter.on_token(ev.text)
-            elif ev.kind == "denied":
-                presenter.on_denied(ev.text)
-            elif ev.kind == "limit":
-                presenter.on_limit(ev.text)
-            elif ev.kind == "error":
-                presenter.on_error(ev.text)
-
-        presenter.begin()
-        try:
-            runner = TaskRunner(
-                self.agent, self.session_id,
-                max_tool_turns=self.cfg.shell.max_tool_turns,
-                on_event=_live,
-            )
-            events = await runner.run(text)
-            await self._handle_events(runner, events, presenter)
-        finally:
-            presenter.pause()
-            self.backend.on_output = None
-            self.backend.on_start = None
-            self.backend.on_finish = None
-
-    def _make_presenter(self) -> TaskPresenter:
-        return TaskPresenter(
-            emit=lambda t: render.console.print(
-                t, end="", highlight=False, soft_wrap=True),
-            command_panel=lambda c: render.print_command(
-                c, self.profile.host, approved=True),
-            denied_line=render.print_denied,
-            error_line=lambda t: render.console.print(f"[bold red]{t}[/]"),
-            summary_panel=render.print_summary,
-            stream=ThinkingStream(render.console),
-        )
-
-    async def _handle_events(self, runner: TaskRunner, events,
-                             presenter: TaskPresenter) -> None:
-        while True:
-            for ev in events:
-                # 实时展示已全部由 on_event/backend 回调完成；
-                # 这里只负责 transcript 落盘与流程控制，避免重复打印
-                if ev.kind == "tool_call":
-                    self.transcript.append("tool_call", command=ev.command)
-                elif ev.kind == "denied":
-                    self.transcript.append("denied", text=ev.text)
-                elif ev.kind in ("limit", "error"):
-                    return
-                elif ev.kind == "final":
-                    self.transcript.append("final", text=ev.text)
-                    presenter.finish(ev.text)
-            if runner.interrupt_payload is None:
-                return
-            presenter.pause()  # spinner 必须在 prompt_toolkit 接管终端前停掉
-            requests = runner.interrupt_payload["action_requests"]
-            if len(requests) > 1:
-                render.console.print(
-                    f"[bold yellow]模型一轮发起了 {len(requests)} 个命令，"
-                    "请逐个确认：[/]"
-                )
-            decisions: list[dict] = []
-            rejected = False
-            for req in requests:
-                command = req.get("args", {}).get("command", "")
-                decision = await self._approval_decision(command)
-                self.transcript.append("approval", command=command)
-                decisions.append(decision)
-                if decision["type"] == "reject":
-                    rejected = True
-            # 审批面板已在决策后擦除：执行时正常打印“执行”面板+结果，
-            # 与自动执行路径呈现一致；有一条被拒就进详述模式看模型如何改道
-            if rejected:
-                presenter.on_reject()
-            events = await runner.resume(decisions)
-
-    async def _approval_decision(self, command: str) -> dict:
-        while True:
-            panel_rows = render.print_command(command, self.profile.host)
-            try:
-                choice = await _prompt_choice()
-            except EOFError:
-                # 输入流结束（如管道喂入）：按最安全的拒绝处理，不打 traceback
-                _erase_lines(panel_rows + 1)
-                render.console.print("[yellow]输入结束，默认拒绝该命令。[/]")
-                return {"type": "reject", "message": "输入结束，未获审批"}
-            # 决策完成：擦除审批面板（选择行已由 _prompt_choice 擦掉）。
-            # 之后的界面与自动执行路径一致：执行面板 + 真实结果
-            _erase_lines(panel_rows)
-            if choice == "e":
-                try:
-                    new = await _prompt_text(
-                        f"编辑命令（原：{command}）\n> ", default=command)
-                except EOFError:
-                    return {"type": "reject", "message": "输入结束，未获审批"}
-                d = reclassify_edited(new, self.policy)
-                if d.level == "deny":
-                    render.print_denied("编辑后的命令仍属灾难命令，已拒绝。")
-                    return {"type": "reject", "message": "编辑后命令被策略拒绝"}
-                if d.level == "approve":
-                    command = new
-                    continue  # 编辑后仍是高危 → 重新确认
-                return edit_decision(new)
-            got = decision_for_choice(choice, command, self.policy, self.allowed)
-            if got is not None:
-                return got
+        self._sync_saved_targets()
+        return name
 
     async def loop(self) -> None:
         if self.initial_target:
             first = self._target_name_for(self.initial_target)
-            await self.switch_target(first)
-        else:
-            # 主菜单：连接主机 / 管理主机 / 退出（光标选择）
-            while True:
-                pick = await pick_menu("OpenTerminal", [
-                    ("connect", "连接主机"),
-                    ("manage", "管理主机"),
-                    ("exit", "退出"),
-                ])
-                if pick == "connect":
-                    if await self._connect_via_picker():
-                        break  # 已连接 → 进入 REPL
-                elif pick == "manage":
-                    await self._manage_hosts()
-                else:  # exit 或取消
-                    return
+            await self._run_pipeline(first)
+        # 主菜单：连接主机 / 管理主机 / 退出（光标选择）；连接结束后回菜单
         while True:
-            try:
-                line = await _prompt_text_async(
-                    prompt_text(self.profile, self.session,
-                                os.environ.get("USER", "user")),
-                    completer=OtCompleter(_target_names_for_completion),
-                )
-            except (EOFError, KeyboardInterrupt):
-                break
-            line = line.strip()
-            if not line:
-                continue
-            if line == RAW_SIGNAL:
-                await self._enter_raw()
-                continue
-            if is_quit_line(line):
-                break
-            if line == "/help":
-                render.console.print(
-                    "/target 切换主机  /system <别名> 手动方言  /clear 新任务\n"
-                    "/model 查看模型  /exit 退出    Ctrl+R 终端模式  Ctrl+O 返回"
-                )
-                continue
-            if line == "/model":
-                render.console.print(
-                    f"{self.cfg.model.model} @ {self.cfg.model.base_url}")
-                continue
-            if line == "/clear":
-                self.session_id = uuid.uuid4().hex[:8]
-                self.transcript = open_transcript(self.session_id)
-                continue
-            if line.startswith("/target"):
-                try:
-                    await self._choose_target(line)
-                except EOFError:
-                    render.console.print("[yellow]输入结束，取消目标切换。[/]")
-                continue
-            if line.startswith("/system"):
-                self._manual_system(line)
-                continue
+            pick = await pick_menu("OpenTerminal", [
+                ("connect", "连接主机"),
+                ("manage", "管理主机"),
+                ("exit", "退出"),
+            ])
+            if pick == "connect":
+                name = await self._connect_via_picker()
+                if name is not None:
+                    await self._run_pipeline(name)
+            elif pick == "manage":
+                await self._manage_hosts()
+            else:  # exit 或取消
+                return
 
-            intent = await self._classify_with_indicator(line)
-            if intent == "command":
-                await self.run_direct_command(line.lstrip("!"))
-            else:
-                try:
-                    await self.run_task(line.lstrip("?"))
-                except EOFError:
-                    # 审批等交互输入遇到流结束：run_task 内已按拒绝处理；
-                    # 兜底捕获残留 EOF，干净退出而不是 traceback
-                    break
-                except Exception as e:  # noqa: BLE001 - 单任务异常不能打死整个 REPL
-                    render.console.print(
-                        f"[bold red]任务执行出错：{type(e).__name__}: {e}[/]\n"
-                        "本次任务已中断，可以继续输入下一条需求。"
-                    )
-        await self.session.close()
+    async def _run_pipeline(self, name: str) -> None:
+        """以目标名起单管线终端：CliCore（核心）+ TermFrontend（raw 输入 +
+        内联渲染 + 本地截获）。输入即终端，自然语言直接交给 AI。
 
-    async def _enter_raw(self, initial: bytes | None = None) -> None:
-        from .rawmode import run_raw
-        try:
-            await run_raw(self.session, initial=initial)
-        except Exception as e:  # noqa: BLE001 - raw 模式异常不能打挂 REPL
-            render.console.print(f"[red]终端模式异常：{e}[/]")
-        # raw 残留输出作为下次哨兵捕获的前缀噪声被丢弃，并同步 cwd
-        await self.session.run("true")
-
-    async def _choose_target(self, line: str) -> None:
-        names = list(dict.fromkeys(
-            ["local"] + [t.name for t in load_saved_targets()] + list_ssh_hosts()))
-        parts = line.split(maxsplit=1)
-        if len(parts) == 2:
-            arg = parts[1]
-        else:
-            render.console.print("可用目标：" + ", ".join(names))
-            arg = await _prompt_text("选择目标（local 或主机名）: ")
-        name = "default" if arg == "local" else self._target_name_for(arg)
-        await self.switch_target(name)
-
-    def _manual_system(self, line: str) -> None:
-        parts = line.split()
-        if len(parts) < 2 or parts[1] not in MANUAL_PRESETS:
-            render.console.print("可选：" + ", ".join(MANUAL_PRESETS))
-            return
-        self.profile = replace(self.profile, **MANUAL_PRESETS[parts[1]])
-        self.agent, self.allowed, self.backend = build_agent(
-            self.profile, self.session, self.cfg, self.policy,
-        )
-        render.console.print(f"[green]系统方言已手动设为 {parts[1]}[/]")
-
-
-def _make_prompt_session(completer=None) -> PromptSession:
-    bindings = KeyBindings()
-
-    @bindings.add("c-r")
-    def _(event):  # noqa: ANN202
-        event.app.exit(result=RAW_SIGNAL)
-
-    # 终端风格：只有按 Tab 才出补全（complete_while_typing=False），不弹实时菜单
-    return PromptSession(key_bindings=bindings, completer=completer,
-                         complete_while_typing=False)
-
-
-# --- Tab 补全（模拟终端双 Tab 提示）----------------------------------------
-
-_SLASH_META = {
-    "/help": "帮助",
-    "/target": "切换主机",
-    "/system": "手动方言",
-    "/clear": "新任务",
-    "/model": "查看模型",
-    "/exit": "退出",
-}
-
-_SHELL_BUILTINS = frozenset({
-    "cd", "echo", "export", "unset", "alias", "source", "history", "fg", "bg",
-    "jobs", "which", "type", "set", "true", "false", "kill", "wait", "read",
-})
-
-
-@lru_cache(maxsize=1)
-def _path_commands() -> frozenset[str]:
-    """PATH 下全部可执行名 + 常用内建（进程生命周期内缓存）。"""
-    cmds = set(_SHELL_BUILTINS)
-    for d in os.environ.get("PATH", "").split(os.pathsep):
-        try:
-            cmds.update(os.listdir(os.path.expanduser(d)))
-        except OSError:
-            continue
-    return frozenset(cmds)
-
-
-class OtCompleter(Completer):
-    """REPL 输入补全：首词补命令名（PATH+内建），参数位补路径，
-    `/` 开头补斜杠命令（附说明 meta），/target 与 /system 连参数一起补。"""
-
-    def __init__(self, target_names: Callable[[], list[str]] | None = None):
-        self._target_names = target_names or (lambda: [])
-        self._paths = PathCompleter(expanduser=True)
-
-    def get_completions(self, document, complete_event):  # noqa: ANN001, ANN202
-        text = document.text_before_cursor
-        if text.startswith("/"):
-            yield from self._complete_slash(text)
-            return
-        if not text or " " not in text:
-            # 首词：命令名补全（终端双 Tab 的行为）
-            frag = text
-            for name in sorted(_path_commands()):
-                if name.startswith(frag):
-                    yield Completion(name, start_position=-len(frag))
-            return
-        # 参数位：路径补全。PathCompleter 把整段 text_before_cursor 当路径，
-        # 所以只把最后一个空格后的片段作为子文档喂给它（含尾随空格的空片段，
-        # rsplit 保住空串 → 列当前目录，与终端双 Tab 一致）
-        frag = text.rsplit(" ", 1)[-1]
-        sub_doc = Document(frag, len(frag))
-        yield from self._paths.get_completions(sub_doc, complete_event)
-
-    def _complete_slash(self, text: str):
-        if " " not in text:
-            # 斜杠命令名补全（str.split 丢尾随空格，故先用无空格分支判定）
-            for cmd, meta in _SLASH_META.items():
-                if cmd.startswith(text):
-                    yield Completion(cmd, start_position=-len(text),
-                                     display=cmd, display_meta=meta)
-            return
-        head, frag = text.split(" ", 1)
-        if head == "/target":
-            for name in sorted(set(["local"] + self._target_names())):
-                if name.startswith(frag):
-                    yield Completion(name, start_position=-len(frag))
-        elif head == "/system":
-            for name in MANUAL_PRESETS:
-                if name.startswith(frag):
-                    yield Completion(name, start_position=-len(frag))
-
-
-def _target_names_for_completion() -> list[str]:
-    """/target 的补全集：与 _choose_target 的可选列表一致。"""
-    try:
-        return ["local"] + [t.name for t in load_saved_targets()] + list_ssh_hosts()
-    except Exception:
-        return ["local"]
-
-
-async def _prompt_text_async(text: str, completer=None) -> str:
-    session = _make_prompt_session(completer)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: session.prompt(text))
+        run() 返回（核心 closed / EOF / 异常）即回主菜单；之后必须补
+        core.close()——EOF/异常/连接失败路径下 run() 返回时核心未关
+        （Task 3 前向契约），CliCore.close() 幂等。"""
+        core = CliCore(self.cfg, name, frontend=None)   # 两段构造：反向注入
+        frontend = TermFrontend(core)
+        core._frontend = frontend
+        await frontend.run()
+        await core.close()
 
 
 async def _prompt_text(text: str, default: str = "") -> str:
@@ -1107,36 +717,3 @@ async def _prompt_text(text: str, default: str = "") -> str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, lambda: session.prompt(text, default=default))
-
-
-def _erase_lines(rows: int) -> None:
-    """向上擦除 rows 行屏幕内容；非 TTY（测试/管道）空操作。
-
-    审批面板与选择行在决策完成后擦除，界面只保留“执行”面板与真实结果。
-    """
-    if not render.console.is_terminal or rows <= 0:
-        return
-    render.console.file.write("\x1b[1A\x1b[2K" * rows)
-    render.console.file.flush()
-
-
-async def _prompt_choice() -> str:
-    from prompt_toolkit.validation import Validator
-
-    session = PromptSession()
-    loop = asyncio.get_running_loop()
-
-    def _ask() -> str:
-        # 选项写进提示行（单行），配合 validator：非法输入原地重绘不占新行，
-        # 决策后正好只擦一行
-        return session.prompt(
-            "y 执行 · e 编辑 · n 拒绝 · a 本会话始终允许 › ",
-            validator=Validator.from_callable(
-                lambda t: t.strip().lower() in {"y", "e", "n", "a"},
-                error_message="请输入 y / e / n / a",
-            ),
-        )
-
-    choice = (await loop.run_in_executor(None, _ask)).strip().lower()
-    _erase_lines(1)  # 选择行用完即擦，避免残留在后续输出上方
-    return choice

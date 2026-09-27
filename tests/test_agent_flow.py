@@ -210,34 +210,3 @@ async def test_failed_command_exit_code_via_backend_callback():
     cmd, code = finishes[0]
     assert cmd == "ls /no/such/path_xyz" and code != 0
     await session.close()
-
-
-async def test_approved_command_shows_execute_panel_and_result(
-        capsys, monkeypatch):
-    # 审批通过后界面应显示“执行”面板与真实输出（审批面板已擦除，不重复）
-    import openterminal.cli as cli_mod
-    from openterminal.cli import Cli
-    from openterminal.config import Config
-
-    async def yes():
-        return "y"
-
-    monkeypatch.setattr(cli_mod, "_prompt_choice", yes)
-
-    model = scripted(
-        tool_call("execute", {"command": "touch panel_test.txt"}, "t1"),
-        AIMessage(content="已创建文件。"),
-    )
-    graph, session, _, backend = await _agent(model)
-    c = Cli(Config.load())
-    c.agent, c.backend, c.session = graph, backend, session
-    c.profile = profile()
-    await c.run_task("建文件")
-
-    out = capsys.readouterr().out
-    assert "将执行" in out   # 审批面板出现过
-    assert "执行" in out     # 决策后执行面板出现
-    from pathlib import Path
-
-    assert Path("panel_test.txt").exists()
-    await session.close()
