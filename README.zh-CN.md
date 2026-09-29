@@ -41,19 +41,64 @@ Xshell 可以省了。
 - **两种打开方式。** 单管线终端(`ot`),或者 `ot web`——浏览器里的服务器
   侧栏 + 多 tab 终端,底层是同一套核心。
 
-## 快速开始
+## 安装
 
-需要 Python 3.10+。
+三选一——预编译二进制(无需装 Python)、包管理器,或源码安装。
+
+### 预编译二进制(macOS 与 Windows)
+
+从 [Releases](https://github.com/JaquariusJ/OpenTerminal/releases) 下载、解压,
+把 `ot` 可执行文件放进 `PATH`。`vX.Y.Z` 换成最新 tag:
+
+| 平台 | 附件 |
+|---|---|
+| macOS(Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
+| macOS(Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
+| Windows(x64) | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
-conda create -n openterminal python=3.12 -y
-conda activate openterminal
-pip install -e .
-mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
-# 编辑 ~/.openterminal/.env,填上你的模型网关(见下)
+# macOS
+tar -xzf ot-vX.Y.Z-macos-arm64.tar.gz
+sudo mv ot/ot /usr/local/bin/ot        # 或任意在 PATH 里的目录
 ```
 
-然后:
+Windows 解压后把 `ot` 目录加进 `PATH`,运行 `ot.exe`。
+
+> **macOS Gatekeeper**——二进制为 ad-hoc 签名(未做 notarization),首次启动
+> 可能被拦(*“无法打开 ot”*)。执行一次 `xattr -cr "$(command -v ot)"` 清除隔离
+> 属性,或右键 → 打开。首次运行会触发一次性系统安全扫描,之后启动约 3 秒。
+
+> **Windows SmartScreen**——可能出现 *“Windows 已保护你的电脑”*(二进制未签名)。
+> 点 **更多信息 → 仍要运行**。
+
+### pipx / uv(从 PyPI)
+
+PyPI 包名为 `openterminal`(安装后提供 `ot` 命令):
+
+```sh
+pipx install openterminal
+# 或
+uv tool install openterminal
+```
+
+需要 Python 3.11+。
+
+### 源码安装(开发用)
+
+```sh
+conda create -n openterminal python=3.12 -y   # 或任意 virtualenv
+conda activate openterminal
+pip install -e .
+```
+
+再配置模型网关(见下)后即可运行:
+
+```sh
+mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
+# 编辑 ~/.openterminal/.env,填上你的模型网关
+```
+
+## 快速开始
 
 ```sh
 ot          # 终端——本机 shell + 主菜单(连接 / 管理主机)

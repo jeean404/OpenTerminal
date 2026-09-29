@@ -46,20 +46,68 @@ Here's what happens in the demo above:
   browser UI with a server sidebar and multi-tab terminals, sharing the
   same core.
 
-## Quick start
+## Installation
 
-Requires Python 3.10+.
+Pick whichever suits you — a pre-built binary (no Python needed), a package
+manager, or from source.
+
+### Pre-built binaries (macOS & Windows)
+
+Download from [Releases](https://github.com/JaquariusJ/OpenTerminal/releases),
+unpack, and put the `ot` executable on your `PATH`. Replace `vX.Y.Z` with the
+latest tag:
+
+| Platform | Asset |
+|---|---|
+| macOS (Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
+| macOS (Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
+| Windows (x64) | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
-# conda (or any virtualenv)
-conda create -n openterminal python=3.12 -y
-conda activate openterminal
-pip install -e .
-mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
-# edit ~/.openterminal/.env — point it at a model gateway (see below)
+# macOS
+tar -xzf ot-vX.Y.Z-macos-arm64.tar.gz
+sudo mv ot/ot /usr/local/bin/ot        # or any directory on your PATH
 ```
 
-Then:
+On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
+
+> **macOS Gatekeeper** — the binaries are ad-hoc signed (not notarized), so
+> the first launch may be blocked with *“ot cannot be opened.”* Clear the
+> quarantine flag once with `xattr -cr "$(command -v ot)"`, or right-click →
+> Open. The first run also triggers a one-time OS security scan; later runs
+> start in ~3 s.
+
+> **Windows SmartScreen** — you may see *“Windows protected your PC”* (the
+> binary is unsigned). Click **More info → Run anyway**.
+
+### pipx / uv (from PyPI)
+
+The Python package is `openterminal` (it installs the `ot` command):
+
+```sh
+pipx install openterminal
+# or
+uv tool install openterminal
+```
+
+Requires Python 3.11+.
+
+### From source (development)
+
+```sh
+conda create -n openterminal python=3.12 -y   # or any virtualenv
+conda activate openterminal
+pip install -e .
+```
+
+Then set up your model gateway (see below) and run it:
+
+```sh
+mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
+# edit ~/.openterminal/.env — point it at a model gateway
+```
+
+## Quick start
 
 ```sh
 ot          # terminal — local shell + main menu (connect / manage hosts)

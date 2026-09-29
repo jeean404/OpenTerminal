@@ -1,0 +1,23 @@
+# sdist 清单：显式声明非代码资源的去留，防 setuptools 行为漂移。
+# wheel 侧由 pyproject 的 [tool.setuptools.package-data] 覆盖；此处保 sdist
+# 与 wheel 同源，并把 React 源码工程（frontend/ui/，含 node_modules）挡在包外
+# —— 其构建产物已提交在 frontend/static/ui/，运行时只 serve 产物。
+
+include README.md
+include LICENSE
+include pyproject.toml
+include ot.spec
+recursive-include packaging *.py
+
+# Web 前端运行时资源（index.html + static/（含 static/ui/ 产物）+ vendor/）
+include src/openterminal/web/frontend/index.html
+recursive-include src/openterminal/web/frontend/static *.css *.js
+recursive-include src/openterminal/web/frontend/vendor *.css *.js
+
+# 内置 Agent Skills
+recursive-include src/openterminal/skills *.md
+
+# 明确排除前端源码工程与构建缓存
+prune src/openterminal/web/frontend/ui
+global-exclude *.py[cod]
+global-exclude .DS_Store

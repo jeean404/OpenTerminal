@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openterminal"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Natural-language terminal agent over local or SSH shells"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -20,7 +20,6 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: System :: Shells",
@@ -56,12 +55,26 @@ dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24", "httpx>=0.27"]
 ot = "openterminal.app:main"
 openterminal = "openterminal.app:main"
 
+[tool.setuptools.dynamic]
+# 版本单一来源：openterminal/__init__.py（setuptools 经 AST 读取，无需导入重依赖）
+version = {attr = "openterminal.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# 内置 Agent Skills 数据（SKILL.md 非代码，需显式声明进包）
+# 非代码资源需显式声明进包（wheel/sdist 同源）：
+# - skills/*/SKILL.md：内置 Agent Skills
+# - web frontend：`ot web` 的 index.html + static/（含已提交的 React island
+#   构建产物 static/ui/）+ vendor/（xterm）。挂在真包 openterminal.web 上，
+#   glob 只覆盖运行时 serve 的三类，绝不含 React 源码目录 frontend/ui/
+#   （node_modules/package.json/tsx）——否则 pip 装完 `ot web` 静态资源全 404。
 [tool.setuptools.package-data]
 "openterminal.skills" = ["*/SKILL.md"]
+"openterminal.web" = [
+    "frontend/index.html",
+    "frontend/static/**/*",
+    "frontend/vendor/*",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -1,0 +1,167 @@
+name: Release
+
+# 打 tag v* 触发：跑测试闸门 → 三平台构建 onedir 可执行 → 聚合成一个
+# GitHub Release → 发布到 PyPI。
+#
+# 为什么聚合式（binaries 只产 artifact，release 单独建）：三个 matrix job
+# 并行时若各自 softprops 建同一 tag 的 release 会撞 422；这里只在 release
+# job 里建一次、再挂全部资产，无竞态。
+#
+# 为什么 pypi needs binaries：PyPI 版本号不可变（传上去就不能重传同版本）。
+# 只有测试过 + 三平台二进制都构建成功，才认定这版代码可发，才烧版本号。
+# release job（只是上传已构建好的资产）失败可独立重跑，不牵连 PyPI。
+
+on:
+  push:
+    tags: ["v*"]
+
+# 同一 tag 不并发跑（重推 tag 时取消旧跑）
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 闸门：tag 与包内 __version__ 一致 + 单元测试 ─────────────────────
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 校验 tag == openterminal.__version__
+        run: |
+          tag_ver="${GITHUB_REF_NAME#v}"          # v0.1.0 -> 0.1.0
+          pkg_ver=$(python3 - <<'PY'
+          import ast, pathlib
+          src = pathlib.Path("src/openterminal/__init__.py").read_text(encoding="utf-8")
+          for node in ast.walk(ast.parse(src)):
+              if isinstance(node, ast.Assign):
+                  for t in node.targets:
+                      if getattr(t, "id", None) == "__version__":
+                          print(node.value.value)
+                          raise SystemExit(0)
+          raise SystemExit("未在 __init__.py 找到 __version__")
+          PY
+          )
+          echo "tag=$tag_ver  package=$pkg_ver"
+          if [ "$tag_ver" != "$pkg_ver" ]; then
+            echo "::error::tag v$tag_ver 与 openterminal.__version__=$pkg_ver 不一致——单一版本源要求两者相同"
+            exit 1
+          fi
+
+      - name: 安装（含 dev 依赖）
+        run: pip install -e ".[dev]"
+
+      - name: 单元测试
+        run: pytest -q
+
+  # ── 三平台构建 onedir 可执行（onedir：启动 ~3s；onefile 每次解包 ~28s，弃用）──
+  binaries:
+    needs: gate
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 = Apple Silicon (arm64)；macos-13 = 最后的 Intel (x86_64) runner
+          - os: macos-14
+            platform: macos-arm64
+          - os: macos-13
+            platform: macos-x86_64
+          - os: windows-latest
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装项目 + PyInstaller
+        run: pip install . pyinstaller
+
+      - name: 构建 onedir（OT_BUNDLE_MODE=onedir）
+        env:
+          OT_BUNDLE_MODE: onedir
+        run: pyinstaller --noconfirm ot.spec
+
+      - name: 冒烟——冻结二进制跑 list
+        shell: bash          # Windows runner 自带 git-bash，三平台统一
+        run: |
+          # onedir 产物在 dist/ot/（Windows 为 dist/ot/ot.exe）
+          if [ -x dist/ot/ot ]; then BIN=dist/ot/ot; else BIN=dist/ot/ot.exe; fi
+          "$BIN" list targets --output json
+
+      - name: 打包（macOS/Linux → tar.gz）
+        if: runner.os != 'Windows'
+        run: tar -czf "ot-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz" -C dist ot
+
+      - name: 打包（Windows → zip）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/ot -DestinationPath "ot-${{ github.ref_name }}-${{ matrix.platform }}.zip"
+
+      - name: 上传为 workflow artifact（release job 再聚合挂载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ot-${{ github.ref_name }}-${{ matrix.platform }}
+          path: ot-${{ github.ref_name }}-${{ matrix.platform }}.*
+          if-no-files-found: error
+
+  # ── 聚合成一个 GitHub Release，挂全部平台资产 ────────────────────────
+  release:
+    needs: [gate, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # 建 release + 传资产
+    steps:
+      - name: 下载全部平台 artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 建 Release 并挂载资产
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*/*.tar.gz
+            artifacts/*/*.zip
+
+  # ── 发布到 PyPI（Trusted Publishing / OIDC，无长期 token）──────────────
+  # 需在 pypi.org 为本项目配置 Trusted Publisher：
+  #   owner=<你的 GitHub 用户名/org> repo=<仓库名> workflow=release.yml
+  #   environment=pypi
+  # 首次发布前先在 PyPI 建同名 pending 项目并绑定该 Trusted Publisher。
+  pypi:
+    needs: [gate, binaries]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # OIDC 令牌，pypa publish action 用它换 PyPI 凭据
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 构建 sdist + wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: 发布到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
