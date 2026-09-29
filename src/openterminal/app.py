@@ -9,7 +9,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .cli import Cli
 from .config import Config, app_dir
 
 
@@ -38,6 +37,10 @@ def main() -> None:
     if len(sys.argv) >= 3 and sys.argv[1] in {"connect", "ssh"}:
         initial = sys.argv[2]
     # 无目标参数 → 启动选择框（local / 记住的连接 / 添加新连接）
+    # Cli 惰性导入：cli→term_frontend→core 链很重，只有交互 CLI 分支才需要；
+    # `ot list`/`ot exec`/`ot web` 走上面的早返回，不该付这份导入成本。
+    from .cli import Cli
+
     cli = Cli(cfg, initial_target=initial)
     try:
         asyncio.run(cli.loop())

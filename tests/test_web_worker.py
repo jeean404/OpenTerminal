@@ -339,6 +339,11 @@ async def test_worker_suppressed_echo_swallowed_then_newline(monkeypatch, tmp_pa
 def _wire_presenter(w):
     from openterminal.web.worker import _WebPresenter
 
+    # agent 改为惰性构建后，_run_task 仅在 self.agent is None 时才 _ensure_agent
+    # （构建会重置 backend）。这里注入假 backend 前先置一个非 None 的 agent 哨兵，
+    # 让任务路径跳过真构建、不覆盖注入的假 backend（同 test_worker_change_model
+    # L683 的既有惯例）。
+    w.agent = object()
     w.backend = SimpleNamespace(on_start=None, on_output=None, on_finish=None)
     p = _WebPresenter(w)
     w.backend.on_start = p.on_start

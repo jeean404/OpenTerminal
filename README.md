@@ -75,7 +75,8 @@ On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 > the first launch may be blocked with *“ot cannot be opened.”* Clear the
 > quarantine flag once with `xattr -cr "$(command -v ot)"`, or right-click →
 > Open. The first run also triggers a one-time OS security scan; later runs
-> start in ~3 s.
+> start in under a second (the AI stack is loaded lazily on the first AI
+> task, which takes a few extra seconds once).
 
 > **Windows SmartScreen** — you may see *“Windows protected your PC”* (the
 > binary is unsigned). Click **More info → Run anyway**.

@@ -34,7 +34,6 @@ def _dbg(*a) -> None:
     if _OT_DBG:
         print("[otdbg]", *a, flush=True)
 
-from .agent import build_agent, build_chat_model
 from . import cmdset
 from . import history_db
 from .config import Config, TargetConfig, app_dir
@@ -80,6 +79,31 @@ from .sysprobe import (
     save_host_cache,
 )
 from .transcript import open_transcript
+
+
+# AI 栈（deepagents/langchain/anthropic，导入约 4s——启动耗时实测大头）与
+# CLI 启动/建连/纯 shell 路径解耦：下面两个名字延迟到首个 AI 任务
+# （_ensure_agent→_build_agent_now）时由 _load_agent_stack 惰性填充。保留为
+# 模块级占位（初值 None）有两个硬约束：
+#   ① web/worker.py 的 `from ..core import build_agent` 再导出 + _PatchBridge
+#      转发要求 hasattr(core, "build_agent") 为真；
+#   ② test_term_frontend / test_web_worker 靠
+#      monkeypatch.setattr(cmod/wmod, "build_agent", fake) 打桩——一旦被覆盖
+#      就非 None，_load_agent_stack 跳过真导入直接用桩。
+build_agent = None
+build_chat_model = None
+
+
+def _load_agent_stack() -> None:
+    """把 AI 栈入口惰性载入模块级 build_agent/build_chat_model。已被测试
+    monkeypatch 覆盖（非 None）的名字原样保留，不触发 deepagents 真导入。"""
+    global build_agent, build_chat_model
+    if build_agent is None:
+        from .agent import build_agent as _build_agent
+        build_agent = _build_agent
+    if build_chat_model is None:
+        from .agent import build_chat_model as _build_chat_model
+        build_chat_model = _build_chat_model
 
 
 @dataclass
@@ -362,6 +386,7 @@ class PipelineCore:
     async def _llm_classify(self, text: str) -> str:
         from .agent import message_text
 
+        _load_agent_stack()
         model = build_chat_model(self._model)
         resp = await model.ainvoke([
             ("system", "判断用户输入是 shell 命令还是自然语言任务，"
@@ -798,14 +823,29 @@ class PipelineCore:
                                  or getattr(self.session, "username", None)
                                  or "")
         await self._setup_interactive()
-        self.agent, self.allowed, self.backend = build_agent(
-            self.profile, self._agent_session(), self.cfg, self.policy,
-            model=build_chat_model(self._model))
+        # Agent（deepagents/langchain/anthropic 栈）不在建连期构建——延迟到
+        # 首个 AI 任务的 _ensure_agent()。这样 `ot list`/`ot connect`/纯 shell
+        # 使用完全不付 ~4s 的 AI 栈导入与建图成本（启动瓶颈实测在 deepagents）。
 
     def _agent_session(self):
         """agent 工具执行用的会话：交互式 = InteractiveRunner（同 PTY 注入），
         否则原始 session（哨兵批处理，仅记账，无 AI 输入通道）。"""
         return self._runner if self._interactive else self.session
+
+    def _build_agent_now(self) -> None:
+        """立即构建/重建 agent。AI 栈经 _load_agent_stack 惰性载入模块级名字
+        （deepagents/langchain 约 4s 导入由此与启动路径解耦）；测试 monkeypatch
+        的 build_agent 桩在此生效（非 None 即跳过真导入）。"""
+        _load_agent_stack()
+        self.agent, self.allowed, self.backend = build_agent(
+            self.profile, self._agent_session(), self.cfg, self.policy,
+            model=build_chat_model(self._model))
+
+    def _ensure_agent(self) -> None:
+        """首个 AI 任务时构建 agent，已建则复用。self.agent/backend 从 None
+        变就绪的唯一入口（建连不再预建）。"""
+        if self.agent is None:
+            self._build_agent_now()
 
     # --- 命令历史长期记忆（SQLite）---
     def _record_history(self, source: str, command: str) -> None:
@@ -1211,6 +1251,13 @@ class PipelineCore:
     async def _run_task(self, text: str, hooked: bool = False) -> None:
         from .agent import TaskRunner
 
+        try:
+            self._ensure_agent()   # 首个 AI 任务才构建（惰性导入 AI 栈）
+        except Exception as e:  # noqa: BLE001 - 构建失败发 error 事件让前端收尾
+            await self.emit_msg(ServerMsg(
+                type="event", event={"kind": "error",
+                                     "text": f"AI 初始化失败：{type(e).__name__}: {e}"}))
+            return
         # hook 上报触发的任务不重注入：上报即在位凭据，而注入吞窗口会吃掉
         # 在途蓝色重绘字节（真机「提交行消失」）；外部启动（无上报）才需要
         if not hooked:
@@ -1276,16 +1323,17 @@ class PipelineCore:
                 estimated=not (runner.input_tokens or runner.output_tokens)))
 
     async def _change_model(self, model_id: str) -> None:
-        """运行时切换模型：用新 ModelConfig 重建 agent（保留 profile/session）。"""
+        """运行时切换模型：记录新 ModelConfig；agent 已建则重建（保留 profile/session）。"""
         if not model_id or model_id == self._model.model:
             return
-        if self.agent is None:
-            return
         self._model = replace(self._model, model=model_id)
+        if self.agent is None:
+            # 尚未构建 agent（还没发起过 AI 任务）——只记录模型，_ensure_agent 会用它
+            await self.emit_msg(ServerMsg(
+                type="status", text=f"已切换模型：{model_id}"))
+            return
         try:
-            self.agent, self.allowed, self.backend = build_agent(
-                self.profile, self._agent_session(), self.cfg, self.policy,
-                model=build_chat_model(self._model))
+            self._build_agent_now()
             await self.emit_msg(ServerMsg(
                 type="status", text=f"已切换模型：{model_id}"))
         except Exception as e:  # noqa: BLE001 - 切换失败提示，不影响会话
@@ -1394,9 +1442,8 @@ class PipelineCore:
                 type="status", text="可选：" + ", ".join(MANUAL_PRESETS)))
             return
         self.profile = replace(self.profile, **MANUAL_PRESETS[parts[1]])
-        self.agent, self.allowed, self.backend = build_agent(
-            self.profile, self._agent_session(), self.cfg, self.policy,
-            model=build_chat_model(self._model))
+        if self.agent is not None:
+            self._build_agent_now()   # 已建才重建；未建由 _ensure_agent 用新画像
         await self.emit_msg(ServerMsg(
             type="status", text=f"系统方言已手动设为 {parts[1]}"))
 
