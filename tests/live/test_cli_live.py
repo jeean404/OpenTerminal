@@ -26,6 +26,11 @@ import time
 
 import pytest
 
+# 模块级跳过须在 _pty_harness 导入之前：Windows 没有 fcntl/pty/termios，
+# 顶层导入会直接 ImportError，ci.yml 的 windows-latest 矩阵会收集失败
+if sys.platform == "win32":
+    pytest.skip("CLI live 套件依赖 pty/termios，仅 POSIX", allow_module_level=True)
+
 from ._pty_harness import PtyApp
 
 REPO = pathlib.Path(__file__).resolve().parents[2]

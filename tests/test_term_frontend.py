@@ -9,11 +9,17 @@ build_agent/load_password），不是 web.worker。非 tty（pytest）下 TermFr
 """
 import asyncio
 import os
-import pty
 import signal
 import sys
 
 import pytest
+
+# 模块级跳过须在 import pty 之前：Windows 没有 pty/fcntl，
+# 顶层导入会直接 ImportError，pytestmark 的 skipif 来不及生效
+if sys.platform == "win32":
+    pytest.skip("term_frontend 测试依赖 pty，仅 POSIX", allow_module_level=True)
+
+import pty  # noqa: E402
 
 import openterminal.core as cmod
 import openterminal.term_frontend as tmod

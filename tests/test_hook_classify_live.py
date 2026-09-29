@@ -11,15 +11,22 @@ pty 输出缓冲 → shell 的 echo 阻塞 → readline 停摆 → 写侧死锁�
 StreamRouter 常排空，本 harness 自行模拟）。
 """
 import os
-import pty
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 
 import pytest
+
+# 模块级跳过须在 import pty 之前：Windows 没有 pty/fcntl，
+# 顶层导入会直接 ImportError，pytestmark 的 skipif 来不及生效
+if sys.platform == "win32":
+    pytest.skip("hook 分类真 shell 测试依赖 pty，仅 POSIX", allow_module_level=True)
+
+import pty  # noqa: E402
 
 from openterminal.shell_integration import build_script, injection_lines
 

@@ -12,11 +12,19 @@
 import os
 import re
 import select
+import shutil
 import signal
 import struct
-import termios
+import sys
 
 import pytest
+
+# 模块级跳过须在 import termios 之前：Windows 没有 termios，
+# 顶层导入会直接 ImportError，pytestmark 的 skipif 来不及生效
+if sys.platform == "win32":
+    pytest.skip("hook 半行原语依赖 pty/termios，仅 POSIX", allow_module_level=True)
+
+import termios  # noqa: E402
 
 from openterminal.shell_integration import build_script
 
@@ -48,6 +56,15 @@ class ShellPty:
         import fcntl
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.buf = _drain(self.fd, 1.0)
+        # 子进程存活守卫：execvp 失败（shell 未安装）时子进程静默退出，pty 留在
+        # canonical 模式——行规程会照样回显输入、^U(VKILL) 照样擦行，断言会被
+        # 回显文本假满足（ubuntu CI 无 zsh 时的真实事故：^Y=VDSUSP 被 ECHOCTL
+        # 回显成字面 "^Y"，命令从未执行）。这里钉死"shell 没起来就大声失败"。
+        reaped, _ = os.waitpid(self.pid, os.WNOHANG)
+        if reaped:
+            raise RuntimeError(
+                f"shell 启动即退出（{argv[0]} 缺失或不可执行？）——"
+                "pty 只剩行规程回显，测试结果不可信")
 
     def send(self, data: bytes, settle: float = 0.25):
         os.write(self.fd, data)
@@ -76,9 +93,14 @@ class ShellPty:
 
 @pytest.fixture
 def hooked_zsh(tmp_path):
+    # zsh 缺席（如 ubuntu runner 镜像）跳过而非硬编码 /bin/zsh 静默假跑——
+    # 与 test_hook_classify_live.py 的 shutil.which 门控同款惯例
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh not installed")
     script = tmp_path / "ot_hook.zsh"
     script.write_text(build_script("zsh", 1), encoding="utf-8")
-    sh = ShellPty(["/bin/zsh", "-f"])
+    sh = ShellPty([zsh, "-f"])
     sh.send(f"source {script}\r".encode(), settle=0.6)
     yield sh
     sh.close()
