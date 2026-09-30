@@ -1,6 +1,6 @@
 # OpenTerminal
 
-[![CI](https://github.com/JaquariusJ/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/JaquariusJ/OpenTerminal/actions/workflows/ci.yml)
+[![CI](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [中文文档](README.zh-CN.md)
 
@@ -53,14 +53,13 @@ manager, or from source.
 
 ### Pre-built binaries (macOS & Windows)
 
-Download from [Releases](https://github.com/JaquariusJ/OpenTerminal/releases),
+Download from [Releases](https://github.com/jeean404/OpenTerminal/releases),
 unpack, and put the `ot` executable on your `PATH`. Replace `vX.Y.Z` with the
 latest tag:
 
 | Platform | Asset |
 |---|---|
 | macOS (Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
-| macOS (Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
 | Windows (x64) | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
@@ -70,6 +69,10 @@ sudo mv ot/ot /usr/local/bin/ot        # or any directory on your PATH
 ```
 
 On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
+
+> **Intel Macs**: no pre-built binary (GitHub retired its Intel macOS runners) —
+> install from PyPI with `pipx install openterminal` instead (see below), which
+> works on both architectures.
 
 > **macOS Gatekeeper** — the binaries are ad-hoc signed (not notarized), so
 > the first launch may be blocked with *“ot cannot be opened.”* Clear the

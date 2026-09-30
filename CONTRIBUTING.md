@@ -6,7 +6,7 @@ requests are all welcome. (中文贡献指南待补充,欢迎 PR。)
 ## Development setup
 
 ```sh
-git clone https://github.com/JaquariusJ/OpenTerminal.git
+git clone https://github.com/jeean404/OpenTerminal.git
 cd OpenTerminal
 conda create -n openterminal python=3.12 -y && conda activate openterminal
 pip install -e ".[dev]"

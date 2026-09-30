@@ -62,6 +62,15 @@ a = Analysis(
         "langchain_anthropic",
         "langchain_anthropic.chat_models",
         "langchain_core",
+        # provider=openai 分支（agent.py build_chat_model 函数内惰性导入，
+        # 静态分析看不见）；tiktoken_ext.openai_public 是 tiktoken 按编码名
+        # 懒加载的插件模块，漏了会在首次分词时 ModuleNotFoundError
+        "langchain_openai",
+        "langchain_openai.chat_models",
+        "openai",
+        "tiktoken",
+        "tiktoken_ext",
+        "tiktoken_ext.openai_public",
         # --- SOCKS 代理传输层（httpx 按需构造）---
         "socksio",
     ],

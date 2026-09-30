@@ -77,11 +77,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14 = Apple Silicon (arm64)；macos-13 = 最后的 Intel (x86_64) runner
-          - os: macos-14
+          # macos-15 = Apple Silicon (arm64)。Intel mac 二进制不再发：
+          # macos-13（最后的 Intel runner 镜像）已于 2025-12 退役，GitHub
+          # 托管 runner 再无 Intel macOS——Intel Mac 用户走 pipx/PyPI 安装。
+          # macos-14 也将于 2026-11 退役，故直接钉 macos-15。
+          - os: macos-15
             platform: macos-arm64
-          - os: macos-13
-            platform: macos-x86_64
           - os: windows-latest
             platform: windows-x64
     runs-on: ${{ matrix.os }}

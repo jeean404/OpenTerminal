@@ -23,7 +23,7 @@ Please **do not** report security vulnerabilities through public GitHub
 issues.
 
 Instead, open a
-[private security advisory](https://github.com/JaquariusJ/OpenTerminal/security/advisories/new)
+[private security advisory](https://github.com/jeean404/OpenTerminal/security/advisories/new)
 on GitHub, or contact the maintainer directly. Include:
 
 - a description of the issue and its impact;

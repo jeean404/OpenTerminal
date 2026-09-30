@@ -1,6 +1,6 @@
 # OpenTerminal
 
-[![CI](https://github.com/JaquariusJ/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/JaquariusJ/OpenTerminal/actions/workflows/ci.yml)
+[![CI](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 [English](README.md) | 中文
@@ -47,13 +47,12 @@ Xshell 可以省了。
 
 ### 预编译二进制(macOS 与 Windows)
 
-从 [Releases](https://github.com/JaquariusJ/OpenTerminal/releases) 下载、解压,
+从 [Releases](https://github.com/jeean404/OpenTerminal/releases) 下载、解压,
 把 `ot` 可执行文件放进 `PATH`。`vX.Y.Z` 换成最新 tag:
 
 | 平台 | 附件 |
 |---|---|
 | macOS(Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
-| macOS(Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
 | Windows(x64) | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
@@ -63,6 +62,9 @@ sudo mv ot/ot /usr/local/bin/ot        # 或任意在 PATH 里的目录
 ```
 
 Windows 解压后把 `ot` 目录加进 `PATH`,运行 `ot.exe`。
+
+> **Intel Mac**:不发预编译二进制(GitHub 已退役 Intel macOS runner)——
+> 请走下面的 pipx 方式从 PyPI 安装,两种架构都可用。
 
 > **macOS Gatekeeper**——二进制为 ad-hoc 签名(未做 notarization),首次启动
 > 可能被拦(*“无法打开 ot”*)。执行一次 `xattr -cr "$(command -v ot)"` 清除隔离
