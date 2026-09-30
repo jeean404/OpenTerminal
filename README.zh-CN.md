@@ -53,6 +53,7 @@ Xshell 可以省了。
 | 平台 | 附件 |
 |---|---|
 | macOS(Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
+| macOS(Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
 | Windows(x64) | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
@@ -63,8 +64,9 @@ sudo mv ot/ot /usr/local/bin/ot        # 或任意在 PATH 里的目录
 
 Windows 解压后把 `ot` 目录加进 `PATH`,运行 `ot.exe`。
 
-> **Intel Mac**:不发预编译二进制(GitHub 已退役 Intel macOS runner)——
-> 请走下面的 pipx 方式从 PyPI 安装,两种架构都可用。
+> **Intel Mac**:GitHub 已退役 Intel macOS runner,x86_64 二进制为每次发版
+> 手工构建挂载。若某个 release 缺这个附件,请走下面的 pipx 方式从 PyPI
+> 安装,两种架构都可用。
 
 > **macOS Gatekeeper**——二进制为 ad-hoc 签名(未做 notarization),首次启动
 > 可能被拦(*“无法打开 ot”*)。执行一次 `xattr -cr "$(command -v ot)"` 清除隔离

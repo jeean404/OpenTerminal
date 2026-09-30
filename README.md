@@ -60,6 +60,7 @@ latest tag:
 | Platform | Asset |
 |---|---|
 | macOS (Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
+| macOS (Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
 | Windows (x64) | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
@@ -70,9 +71,10 @@ sudo mv ot/ot /usr/local/bin/ot        # or any directory on your PATH
 
 On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 
-> **Intel Macs**: no pre-built binary (GitHub retired its Intel macOS runners) —
-> install from PyPI with `pipx install openterminal` instead (see below), which
-> works on both architectures.
+> **Intel Macs**: GitHub retired its Intel macOS runners, so the x86_64 binary
+> is built and attached manually per release. If a release is missing it,
+> install from PyPI with `pipx install openterminal` (see below), which works
+> on both architectures.
 
 > **macOS Gatekeeper** — the binaries are ad-hoc signed (not notarized), so
 > the first launch may be blocked with *“ot cannot be opened.”* Clear the
