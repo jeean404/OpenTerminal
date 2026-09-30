@@ -128,17 +128,29 @@ OpenTerminal talks to any Anthropic-compatible gateway. On startup it loads
 `.env` from the current directory, then `~/.openterminal/.env`, then
 `~/.openterminal/config.toml`. **None of these are required** — defaults:
 
-- Gateway: `http://127.0.0.1:15721` (Anthropic-compatible protocol)
-- Model: `claude-sonnet-4-6`
+- Protocol: `anthropic` (default) or `openai` (OpenAI-compatible protocol)
+- Gateway: `http://127.0.0.1:15721` (Anthropic-compatible protocol; the `openai`
+  provider defaults to the official endpoint)
+- Model: `claude-sonnet-4-6` (`gpt-5` under the `openai` provider)
 - API key: from the `ANTHROPIC_API_KEY` environment variable
+  (`OPENAI_API_KEY` under the `openai` provider)
 
 Optional `~/.openterminal/config.toml` (every field may be omitted):
 
 ```toml
 [model]
+provider = "anthropic"       # anthropic | openai (OpenAI-compatible protocol)
 base_url = "http://127.0.0.1:15721"
 model = "claude-sonnet-4-6"
 api_key_env = "ANTHROPIC_API_KEY"
+
+# OpenAI-compatible protocol example (any OpenAI-compatible gateway works;
+# the defaults of the four fields above switch to an openai set with the
+# provider — explicit fields always win):
+# provider = "openai"
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-5"
+# api_key_env = "OPENAI_API_KEY"
 
 [shell]
 timeout_default = 120        # per-command wait budget (seconds)

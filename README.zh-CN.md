@@ -119,17 +119,26 @@ OpenTerminal 对接任意 Anthropic 兼容网关。启动时依次加载当前�
 `~/.openterminal/.env`,然后读取 `~/.openterminal/config.toml`。**三个都
 不建也能跑**——缺省用内置默认值:
 
-- 网关:`http://127.0.0.1:15721`(Anthropic 兼容协议)
-- 模型:`claude-sonnet-4-6`
-- API Key:读环境变量 `ANTHROPIC_API_KEY`
+- 协议:`anthropic`(缺省)或 `openai`(OpenAI 兼容协议)
+- 网关:`http://127.0.0.1:15721`(Anthropic 兼容协议;`openai` 协议缺省走官方端点)
+- 模型:`claude-sonnet-4-6`(`openai` 协议缺省 `gpt-5`)
+- API Key:读环境变量 `ANTHROPIC_API_KEY`(`openai` 协议读 `OPENAI_API_KEY`)
 
 `~/.openterminal/config.toml` 可选示例(所有字段均可省略):
 
 ```toml
 [model]
+provider = "anthropic"       # anthropic | openai(OpenAI 兼容协议)
 base_url = "http://127.0.0.1:15721"
 model = "claude-sonnet-4-6"
 api_key_env = "ANTHROPIC_API_KEY"
+
+# OpenAI 兼容协议示例(任一 OpenAI 兼容网关皆可;上面四字段的缺省值
+# 会随 provider 换成 openai 一套,显式写了的字段一律优先):
+# provider = "openai"
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-5"
+# api_key_env = "OPENAI_API_KEY"
 
 [shell]
 timeout_default = 120        # 单条命令最长等待秒数

@@ -50,3 +50,45 @@ def test_web_config_defaults(tmp_path, monkeypatch):
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 8080
     assert cfg.web.token == ""
+
+
+def test_openai_provider_defaults(tmp_path, monkeypatch):
+    """provider=openai 时缺省值换一套：不继承 anthropic 网关/模型/密钥环境变量。"""
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[model]\nprovider = "openai"\n', encoding="utf-8")
+    m = Config.load().model
+    assert m.provider == "openai"
+    assert m.base_url == ""
+    assert m.model == "gpt-5"
+    assert m.api_key_env == "OPENAI_API_KEY"
+    assert m.models == ["gpt-5", "gpt-5-mini", "o4-mini"]
+
+
+def test_openai_provider_explicit_fields_win(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[model]\nprovider = "openai"\n'
+        'base_url = "https://gw.example/v1"\n'
+        'model = "deepseek-chat"\n'
+        'api_key_env = "DEEPSEEK_KEY"\n'
+        'models = ["deepseek-chat"]\n',
+        encoding="utf-8",
+    )
+    m = Config.load().model
+    assert m.provider == "openai"
+    assert m.base_url == "https://gw.example/v1"
+    assert m.model == "deepseek-chat"
+    assert m.api_key_env == "DEEPSEEK_KEY"
+    assert m.models == ["deepseek-chat"]
+
+
+def test_unknown_provider_falls_back_to_anthropic(tmp_path, monkeypatch):
+    """脏值容错：provider 写坏回落 anthropic，不打挂启动。"""
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[model]\nprovider = "gemini"\n', encoding="utf-8")
+    m = Config.load().model
+    assert m.provider == "anthropic"
+    assert m.base_url == "http://127.0.0.1:15721"
+    assert m.api_key_env == "ANTHROPIC_API_KEY"

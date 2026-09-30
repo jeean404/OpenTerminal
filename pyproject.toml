@@ -28,6 +28,9 @@ classifiers = [
 dependencies = [
     "deepagents>=0.7.15",
     "langchain-anthropic>=1.7.2",
+    # OpenAI 兼容协议（config [model] provider = "openai"）；agent.py 分支内
+    # 惰性导入，但声明为主依赖——onedir/PyPI 安装开箱即用
+    "langchain-openai>=1.0",
     "asyncssh>=2.24.0",
     "python-dotenv>=1.0.0",
     "prompt_toolkit>=3.0.0",

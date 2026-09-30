@@ -18,9 +18,17 @@ _DEFAULT_MODELS = [
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5",
 ]
 
+# provider = "openai"（OpenAI 兼容协议）时的缺省值：模型、下拉可选列表与
+# anthropic 各一套；config.toml 显式写了的字段一律优先
+_DEFAULT_MODEL_OPENAI = "gpt-5"
+_DEFAULT_MODELS_OPENAI = [
+    "gpt-5", "gpt-5-mini", "o4-mini",
+]
+
 
 @dataclass
 class ModelConfig:
+    provider: str = "anthropic"  # anthropic | openai（OpenAI 兼容协议）
     base_url: str = "http://127.0.0.1:15721"
     model: str = "claude-sonnet-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"
@@ -79,6 +87,14 @@ class Config:
 
         m, s, p = data.get("model", {}), data.get("shell", {}), data.get("policy", {})
         w = data.get("web", {})
+        # 协议 provider：anthropic（缺省）| openai（OpenAI 兼容协议）。脏值容错：
+        # 未知值回落 anthropic，与 port 写坏只丢字段同一哲学——配置手误不
+        # 打挂启动。provider 决定 base_url / model / api_key_env / models 的
+        # 缺省套（openai 不再继承 anthropic 网关地址），显式字段一律优先。
+        provider = str(m.get("provider", "anthropic")).strip().lower()
+        if provider not in ("anthropic", "openai"):
+            provider = "anthropic"
+        openai = provider == "openai"
         targets: dict[str, TargetConfig] = {
             "default": TargetConfig(
                 mode=data.get("target", {}).get("default", {}).get("mode", "local")
@@ -110,10 +126,16 @@ class Config:
             )
         return cls(
             model=ModelConfig(
-                base_url=m.get("base_url", ModelConfig.base_url),
-                model=m.get("model", ModelConfig.model),
-                api_key_env=m.get("api_key_env", ModelConfig.api_key_env),
-                models=list(m.get("models", _DEFAULT_MODELS)),
+                provider=provider,
+                base_url=m.get("base_url", "" if openai else ModelConfig.base_url),
+                model=m.get("model",
+                            _DEFAULT_MODEL_OPENAI if openai else ModelConfig.model),
+                api_key_env=m.get(
+                    "api_key_env",
+                    "OPENAI_API_KEY" if openai else ModelConfig.api_key_env),
+                models=list(m.get(
+                    "models",
+                    _DEFAULT_MODELS_OPENAI if openai else _DEFAULT_MODELS)),
             ),
             shell=ShellConfig(
                 timeout_default=int(s.get("timeout_default", 120)),

@@ -65,11 +65,27 @@ def build_system_prompt(p: SystemProfile) -> str:
 """
 
 
-def build_chat_model(cfg: ModelConfig) -> ChatAnthropic:
+def build_chat_model(cfg: ModelConfig) -> Any:
+    """按 cfg.provider 构造 langchain 聊天模型。
+
+    anthropic → ChatAnthropic（缺省，走 base_url 网关）；openai → ChatOpenAI，
+    任何 OpenAI 兼容协议网关（base_url 留空则用 SDK 官方端点）。langchain_openai
+    在分支内惰性导入：anthropic 配置既不付导入耗时也不要求安装该包。
+    """
+    api_key = os.environ.get(cfg.api_key_env, "not-set")
+    if cfg.provider == "openai":
+        from langchain_openai import ChatOpenAI
+
+        return ChatOpenAI(
+            model=cfg.model,
+            base_url=cfg.base_url or None,
+            api_key=api_key,
+            max_tokens=4096,
+        )
     return ChatAnthropic(
         model=cfg.model,
         base_url=cfg.base_url,
-        api_key=os.environ.get(cfg.api_key_env, "not-set"),
+        api_key=api_key,
         max_tokens=4096,
     )
 
