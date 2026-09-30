@@ -73,7 +73,7 @@ On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 
 > **Intel Macs**: GitHub retired its Intel macOS runners, so the x86_64 binary
 > is built and attached manually per release. If a release is missing it,
-> install from PyPI with `pipx install openterminal` (see below), which works
+> install from PyPI with `pipx install open-terminal-agent` (see below), which works
 > on both architectures.
 
 > **macOS Gatekeeper** — the binaries are ad-hoc signed (not notarized), so
@@ -88,12 +88,12 @@ On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 
 ### pipx / uv (from PyPI)
 
-The Python package is `openterminal` (it installs the `ot` command):
+The Python package is `open-terminal-agent` (it installs the `ot` command):
 
 ```sh
-pipx install openterminal
+pipx install open-terminal-agent
 # or
-uv tool install openterminal
+uv tool install open-terminal-agent
 ```
 
 Requires Python 3.11+.

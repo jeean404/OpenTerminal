@@ -78,12 +78,12 @@ Windows 解压后把 `ot` 目录加进 `PATH`,运行 `ot.exe`。
 
 ### pipx / uv(从 PyPI)
 
-PyPI 包名为 `openterminal`(安装后提供 `ot` 命令):
+PyPI 包名为 `open-terminal-agent`(安装后提供 `ot` 命令):
 
 ```sh
-pipx install openterminal
+pipx install open-terminal-agent
 # 或
-uv tool install openterminal
+uv tool install open-terminal-agent
 ```
 
 需要 Python 3.11+。

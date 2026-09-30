@@ -4,7 +4,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openterminal"
+name = "open-terminal-agent"
 dynamic = ["version"]
 description = "Natural-language terminal agent over local or SSH shells"
 readme = "README.md"
