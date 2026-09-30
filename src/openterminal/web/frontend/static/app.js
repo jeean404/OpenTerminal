@@ -733,7 +733,32 @@ class Session {
         .sort((a, b) => a.marker.line - b.marker.line).pop();
       if (up && !this._capped(up)) await this._settleCard(up);
       await this._drainHeld();   // 结账垫的空行必须已落地，marker 才钉在真流底
-      const marker = this.term.registerMarker(0);
+      // 空白尾复用：冻结上游卡多垫的空白尾无法回收（空白行不可回吐），留着
+      // 就是卡间永久大缝隙（真机 2026-09-30：三张卡每张之间约 6 行空白）。
+      // 空白 run 连续到光标、pad 只追加流底，故把新卡 marker 钉到空白尾首行：
+      // 预留区天然含复用语段，卡间缝隙归零。只认冻结槽——活卡还可能长高，
+      // 那段空白是它的裕量，不许动。
+      let reuse = 0;
+      if (up && up.frozen && (up.reserved || 0) > (up.rows || 0)) {
+        const buf = this.term.buffer.active;
+        const cursorAbs = buf.baseY + buf.cursorY;
+        const surplus = Math.min(
+          up.reserved - up.rows,
+          cursorAbs - (up.marker ? up.marker.line : cursorAbs));
+        while (reuse < surplus) {
+          const ln = buf.getLine(cursorAbs - 1 - reuse);
+          const txt = ln ? ln.translateToString(true) : "";
+          if (txt && txt.trim()) break;
+          reuse++;
+        }
+        if (reuse > 0) {
+          up.reserved -= reuse;
+          // 让出的空白尾下面是新卡不是输出：冻结卡不再保留 +1 保险行，
+          // 否则下次 settle 会替它在流底再垫一行
+          up.need = Math.min(up.need || 0, up.rows);
+        }
+      }
+      const marker = this.term.registerMarker(reuse ? -reuse : 0);
       if (!marker) return null;
       const slot = {
         id: cardId, marker, decoration: null, host: null,
@@ -1054,14 +1079,21 @@ class Session {
     // 的空白判成「预留过量」，夹紧/截断误触发
     if (h <= 0) return;
     const n = rowsForPx(h, this._lineHeight());
-    if (n > (slot.rows || 0)) slot._growAt = Date.now();
+    if (n > (slot.rows || 0)) {
+      slot._growAt = Date.now();
+      slot._grows = (slot._grows || 0) + 1;
+    }
     slot.rows = n;
     // 流式增长裕量（真机反馈 2026-09-27：SSH 往返追不上 100ms 思考流批量，
-    // 卡被钳到空白 run 高度、底部裁切直到换装才恢复）：近 1s 内有过长高就
-    // 按 need+5 请求 pad。空白行不可回吐，代价是收尾后卡下最多留 5 行空白
-    //（用户拍板接受）；停止增长（含换装/冻结）后自动归零，不放大留白。
+    // 卡被钳到空白 run 高度、底部裁切直到换装才恢复）：近 1s 内有过**连续**
+    // 长高才按 need+5 请求 pad。空白行不可回吐，落地的裕量尾留由下一张卡
+    // 挂载时的空白尾复用收掉（见 _mountCard）。裕量止于增长停（含换装/冻结）。
+    // 只认「流式连续长高」：挂载首测的单次跳变与定格后结账各带一次 +5，
+    // 落地即不可回收＝每张卡下定格 6 行空白——卡间大缝隙根因（真机
+    // 2026-09-30）；这两种场景已有 settle/夹紧解除兜底，不需要裕量。
     slot.need = n + 1 +
-      (Date.now() - (slot._growAt || 0) < 1000 ? 5 : 0);
+      (!slot.frozen && (slot._grows || 0) > 1 &&
+       Date.now() - (slot._growAt || 0) < 1000 ? 5 : 0);
     // 编辑框浮层开启期宿主须 overflow visible（浮层伸出盒外），量高/夹紧不得
     // 把它钉回 hidden——否则下拉编辑框被裁（真机「修改后无法编辑」成因之一）
     if (!slot.host.querySelector(".edopen")) slot.host.style.overflow = "hidden";
