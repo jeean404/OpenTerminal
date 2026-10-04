@@ -1,4 +1,4 @@
-# OpenTerminalAgent
+# OpenTerminal
 
 [![CI](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
