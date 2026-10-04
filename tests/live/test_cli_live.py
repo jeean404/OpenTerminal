@@ -117,11 +117,14 @@ def test_echo_command_native():
         app.send(b"\x1b[A\r")
         _wait_count(app, "hi_ot_LIVE", before + 2, timeout=20)
 
-        # Tab 补全：唯一前缀 ot_live_tab_u → 补全出完整文件名
+        # Tab 补全：唯一前缀 ot_live_tab_u → 补全出完整文件名。
+        # 断言验证执行效果（补全后的命令输出）而非补全回显本身：长提示符
+        # （CI runner 超长主机名）下 zsh 重绘把回显行切成带 ANSI 的碎片，
+        # 完整路径在裸字节流上不连续（macos CI 实录）；echo 输出是 shell
+        # 单次写入、恒连续，路径完整出现 ⟸ 补全成功，不完整 ⟸ 失败。
         app.send(b"echo /tmp/ot_live_tab_u\t")
-        app.expect(re.escape(TAB_FILE), timeout=20)
         app.send(b"\r")
-        _wait_count(app, TAB_FILE, 2, timeout=20)
+        _wait_count(app, TAB_FILE, 1, timeout=20)
     finally:
         app.close()
         _rm(TAB_FILE)
