@@ -26,6 +26,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq zsh
       - name: Run tests
+        if: runner.os != 'macOS'
+        run: pytest -q
+      # macos runner 默认 shell 是 bash 3.2：live 套件 hook 集成起不来
+      # （"AI 不可用：shell 不支持集成"）；镜像自带 /bin/zsh，指过去。
+      - name: Run tests (macOS runner 默认 shell 是 bash 3.2，切镜像自带的 zsh)
+        if: runner.os == 'macOS'
+        env:
+          SHELL: /bin/zsh
         run: pytest -q
 
   frontend-tests:

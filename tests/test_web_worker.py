@@ -660,7 +660,10 @@ async def test_worker_ai_lines_queue_when_busy(monkeypatch):
     w._ai_task = None
     _q = w._ai_queue.pop(0)
     w._start_ai(_q[0], _q[1])             # 触发回放；后续由 finally 链式接续
-    await _wait(lambda: w._ai_task is None and not w._ai_queue)
+    # 等收据不等账本：_ai_task/queue 清零时最后一个 task_start 可能还在
+    # outbox 在途（windows CI 实录过），按 sink 收到两单才算回放完
+    await _wait_json(sink, lambda msgs: sum(
+        1 for m in msgs if m.get("event", {}).get("kind") == "task_start") >= 2)
     starts = [m["event"]["text"] for m in sink.json()
               if m.get("event", {}).get("kind") == "task_start"]
     assert starts == ["第一句", "第二句"]
