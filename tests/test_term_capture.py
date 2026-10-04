@@ -12,6 +12,8 @@ Focus #2）：pass payload 只含剩余直通字节，端到端断言 core.raws 
 import asyncio
 import sys
 
+import pytest
+
 import openterminal.term_frontend as tmod
 from openterminal.core import ClientMsg
 from openterminal.policy import Policy
@@ -612,6 +614,9 @@ async def test_edit_suspends_and_resumes_stdin_reader(monkeypatch):
     assert calls.index(("rm", 7)) < calls.index(("add", 7))
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="默认 reader 走 POSIX add_reader，Windows "
+                           "ProactorEventLoop 不支持（NotImplementedError）")
 async def test_default_reader_registers_stdin_fd(monkeypatch):
     """审查 B2：__init__ 账目顺序修复——默认 reader 构造期注册的
     _stdin_fd 不再被后置初始化抹掉，_remove_stdin_reader 真能注销。"""
