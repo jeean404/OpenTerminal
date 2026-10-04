@@ -18,11 +18,18 @@ you can leave Xshell behind.
 
 Here's what happens in the demo above:
 
-1. You type **"在 /tmp 下新建一个名叫 ot-demo 的文件夹"** (plain language);
-2. The AI first shows its **analysis** — what it's about to do and why;
-3. Creating a folder changes the system, so an **approval panel** pops up — nothing runs without your OK;
-4. You hit **执行 (Execute)** — the command runs with its output shown verbatim;
-5. A **summary** card wraps up what was done.
+1. A plain command first — `ls /tmp/ot-demo` runs in your real shell,
+   colored output and all;
+2. then a plain-language task: *"看看 /tmp/ot-demo 下哪些目录最占空间，
+   给我一张表"*;
+3. the AI streams its **thinking** and **analysis** — what it's about to
+   do and why;
+4. an **approval panel** pops up with the exact command — nothing runs
+   without your OK;
+5. you hit **执行 (Execute)** — the command runs in the same terminal,
+   output shown verbatim;
+6. a **summary** card wraps up, its markdown table built from the real
+   output.
 
 > ⚠️ **Beta**: OpenTerminal runs real commands on real machines — including
 > production servers. Every state-changing command needs your approval (see
