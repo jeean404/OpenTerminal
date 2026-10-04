@@ -307,6 +307,11 @@ class PipelineCore:
         self._pending_agent_cmds: "deque[str]" = deque()  # 已登记未执行的 AI 工具命令
         self._agent_open_cmd: str | None = None  # 已开 ai_collapse、尚未收束的命令
         self._task_cmd_started = False  # 本任务是否已发 ai_collapse（首个工具命令）
+        # 工具卡 id 必须全会话唯一：TaskRunner 的 tool index 每个任务从 1 重新
+        # 计数，直接透传会让多个任务的卡都叫 "tool1"——前端 slot/feed root 按
+        # id 迁移互抢宿主（每帧重挂 = 卡片闪烁），store 还会堆同 id 卡
+        self._tool_card_seq = 0
+        self._tool_idx_map: dict[int, int] = {}   # runner 局部 index → 全局卡 id
         self._ai_task: asyncio.Task | None = None
         self._ai_queue: list = []           # AI 忙时排队 (line, hooked)
         # --- 外部触发链的 hook 存活判定（Workbench 蓝色回显路径）---
@@ -1264,6 +1269,7 @@ class PipelineCore:
             await self._ensure_integrated()   # su - 等 login shell 重置后先重注入
         self.transcript.append("user", text=text)
         self._task_cmd_started = False
+        self._tool_idx_map = {}   # 跨任务残留的局部 index 映射作废（序号不回绕）
         await self.emit_msg(ServerMsg(
             type="event", event={"kind": "task_start", "text": text}))
         presenter = CorePresenter(self)
@@ -1289,17 +1295,22 @@ class PipelineCore:
                 # 叙事节奏与分析卡→命令→分析卡一致）；再挂工具调用小卡。
                 # 工具执行期无 PTY 输出，不需要 boundary 门闩（execute 除外，
                 # 其展示走既有 ai_collapse/输出流路径，不发工具卡）
+                self._tool_card_seq += 1
+                self._tool_idx_map[ev.index] = self._tool_card_seq
                 self._emit_nowait(ServerMsg(
                     type="event", event={"kind": "ai_collapse"}))
                 self._emit_nowait(ServerMsg(
                     type="event",
-                    event={"kind": "ai_tool", "phase": "start", "id": ev.index,
+                    event={"kind": "ai_tool", "phase": "start",
+                           "id": self._tool_card_seq,
                            "name": ev.name, "args": ev.text}))
             elif ev.kind == "tool_end":
-                self._emit_nowait(ServerMsg(
-                    type="event",
-                    event={"kind": "ai_tool", "phase": "end", "id": ev.index,
-                           "failed": ev.failed}))
+                gid = self._tool_idx_map.pop(ev.index, None)
+                if gid is not None:
+                    self._emit_nowait(ServerMsg(
+                        type="event",
+                        event={"kind": "ai_tool", "phase": "end", "id": gid,
+                               "failed": ev.failed}))
             elif ev.kind == "limit":
                 self._emit_nowait(ServerMsg(
                     type="event", event={"kind": "limit", "text": ev.text}))

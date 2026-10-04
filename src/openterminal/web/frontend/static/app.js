@@ -777,6 +777,12 @@ class Session {
         padP: null,            // 本格 pad 发送链尾 promise（gap=0 waiter 等落地）
       };
       marker.onDispose(() => this._discardSlot(slot));
+      // 同 id 防御：旧槽还占着 id 时先整体拆掉（装饰/RO/root）。孤儿槽的
+      // decoration 活着就会每帧 onRender → feed.mount(id, el) 与新槽互抢
+      // 宿主——React root 每帧在两个 el 间迁移拆建 = 卡片闪烁
+      // （真机工具卡跨任务同 id 实锤：TaskRunner 的 index 每任务归 1）
+      const stale = this._slots.get(cardId);
+      if (stale) this._discardSlot(stale);
       this._slots.set(cardId, slot);
       this._applyDecoration(slot, 2);
       // xterm 按需渲染：task_start 落在「提交→首字节」的空闲间隙时没有缓冲
@@ -1547,8 +1553,12 @@ class Session {
     if (slot.reanchorT) clearTimeout(slot.reanchorT);
     if (slot.ro) { try { slot.ro.disconnect(); } catch (e) {} }
     if (slot.decoration) { try { slot.decoration.dispose(); } catch (e) {} }
-    if (this._feed) this._feed.unmount(slot.id);
-    this._slots.delete(slot.id);
+    // 同 id 被新槽顶替后，旧槽 marker 迟到 dispose 不得删掉新槽（unmount
+    // 的是新槽的 React root = 卡片凭空消失）
+    if (this._slots.get(slot.id) === slot) {
+      if (this._feed) this._feed.unmount(slot.id);
+      this._slots.delete(slot.id);
+    }
   }
 
   _destroySlots() {

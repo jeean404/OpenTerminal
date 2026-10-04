@@ -188,6 +188,30 @@ test("首笔输出引发渲染 → onRender 补挂载（_finishMount：mount+pad
   assert.strictEqual(s.pads, 1, "补挂载应补差 pad");
 });
 
+test("同 id 重挂：旧槽先整体拆掉（decoration dispose），新槽接管 id", async () => {
+  const s = makeMountSession({refreshFiresOnRender: true});
+  delete s._discardSlot;   // 摘桩：本例要测真 _discardSlot
+  let disposed = 0;
+  s._slots.set(5, {id: 5, decoration: {dispose() { disposed++; }}, ro: null,
+                   marker: {line: 3, onDispose() {}}});
+  const slot = await s._mountCard(5);
+  assert.strictEqual(disposed, 1, "旧槽装饰应被 dispose（防孤儿槽每帧抢宿主=闪烁）");
+  assert.strictEqual(s._slots.get(5), slot, "新槽应接管 id");
+});
+
+test("_discardSlot：同 id 被新槽顶替后，旧槽迟到 dispose 不得删新槽", async () => {
+  const s = makeMountSession({refreshFiresOnRender: true});
+  delete s._discardSlot;   // 摘桩：本例要测真 _discardSlot
+  s._feed = {mount() {}, unmount() {}, destroy() {}};
+  const stale = {id: 9, decoration: null, ro: null};
+  const fresh = {id: 9, decoration: null, ro: null};
+  s._slots.set(9, fresh);
+  s._discardSlot(stale);
+  assert.strictEqual(s._slots.get(9), fresh, "新槽必须存活");
+  s._discardSlot(fresh);
+  assert.ok(!s._slots.has(9), "本主 dispose 才真正出清");
+});
+
 test("ai_tool start→end：挂 tool 卡，tool_start/tool_end 依序进 feed 且不占 _taskCardId", async () => {
   const s = makeMountSession({refreshFiresOnRender: true});
   const handled = [];

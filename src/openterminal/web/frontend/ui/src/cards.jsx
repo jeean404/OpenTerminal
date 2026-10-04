@@ -157,13 +157,13 @@ function RescueCard({ card, dispatch }) {
 }
 
 // 工具调用小卡：AI 任务的文件/检索类工具（read_file/glob/grep 等，execute 走
-// 主终端）。工具名+关键参数+状态徽标（⏳→✓/✗）；复用审批卡骨架与回执徽标样式。
-// tool_end 只换徽标不增内容 → 卡高不变，零 pad 往返。
+// 主终端）。头部「调用工具：名」+关键参数+状态徽标（⏳→✓/✗）；橙色系区别
+// 审批蓝/高危红。tool_end 只换徽标不增内容 → 卡高不变，零 pad 往返。
 function ToolCard({ card }) {
   return (
-    <div className="acard aprobe">
+    <div className="acard aprobe tcard">
       <div className="aphead">
-        <span className="apq">🔧 {card.name}</span>
+        <span className="apq">调用工具：{card.name}</span>
         {card.done
           ? <span className={"apstate " + (card.failed ? "fail" : "ok")}>
               {card.failed ? "✗ 失败" : "✓ 完成"}</span>

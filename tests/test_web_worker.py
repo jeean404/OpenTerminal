@@ -617,6 +617,25 @@ async def test_worker_tool_card_events(monkeypatch):
     assert not tools[1].get("failed")
 
 
+async def test_worker_tool_card_ids_unique_across_tasks(monkeypatch):
+    """工具卡 id 全会话唯一：TaskRunner 的 index 每任务从 1 重新计数，直接
+    透传会让多个任务的卡同 id——前端 slot/feed root 按 id 迁移互抢宿主
+    （每帧重挂 = 闪烁）、store 堆同 id 卡、tool_end 改错卡。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    await _install_fake_runner(monkeypatch, FakeToolRunner)
+    _wire_presenter(w)
+
+    w._start_ai("第一读")
+    await _wait(lambda: w._ai_task is None)
+    w._start_ai("第二读")
+    await _wait(lambda: w._ai_task is None)
+    starts = [x["event"] for x in sink.json()
+              if x.get("event", {}).get("kind") == "ai_tool"
+              and x["event"].get("phase") == "start"]
+    assert [t["id"] for t in starts] == [1, 2], starts
+
+
 async def test_worker_usage_estimated_fallback(monkeypatch):
     """网关不回传 usage：累计 tiktoken 估算量，usage 带 estimated=1。"""
     w, sink = await _make_worker(monkeypatch)

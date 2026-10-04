@@ -6054,10 +6054,10 @@ function id({ card: m, dispatch: v }) {
   ] });
 }
 function ud({ card: m }) {
-  return /* @__PURE__ */ C.jsxs("div", { className: "acard aprobe", children: [
+  return /* @__PURE__ */ C.jsxs("div", { className: "acard aprobe tcard", children: [
     /* @__PURE__ */ C.jsxs("div", { className: "aphead", children: [
       /* @__PURE__ */ C.jsxs("span", { className: "apq", children: [
-        "🔧 ",
+        "调用工具：",
         m.name
       ] }),
       m.done ? /* @__PURE__ */ C.jsx("span", { className: "apstate " + (m.failed ? "fail" : "ok"), children: m.failed ? "✗ 失败" : "✓ 完成" }) : null

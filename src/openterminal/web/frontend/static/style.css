@@ -300,6 +300,11 @@ body.sidebar-collapsed #sidebar { display: none; }
 .aprobe.high { border-color: var(--danger); background: #1c1113; }
 .aprobe.ok { border-color: var(--border); background: var(--panel); }   /* 决策后转静态中性框 */
 
+/* 工具调用小卡：橙色系（区别审批蓝/高危红） */
+.aprobe.tcard { border-color: #c66a1e; background: #181207; }
+.aprobe.tcard .aphead { background: rgba(230, 145, 56, 0.13); }
+.aprobe.tcard .aphead .apq { color: #e8933a; }
+
 .aphead {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 8px 12px; background: rgba(47, 111, 235, 0.12);
