@@ -581,6 +581,7 @@ class CliRenderer:
         self._think_buf = ""       # 行缓冲残余半行（框内逐行落笔用）
         self._think_box = False    # 本思考段走边框（窄终端退回裸暗灰流）
         self._token_open = False   # 常规流式行开着（写过未换行）
+        self._tool_open = False    # 工具调用行开着（写过未换行，end 补状态尾巴）
         self._last_summary = ""    # final 与 ai_card 同文去重（对齐 web store）
 
     def _writer(self) -> object:
@@ -705,6 +706,8 @@ class CliRenderer:
             self._on_ai_think(ev.get("text", ""))
         elif kind == "ai_collapse":
             self._on_ai_collapse(ev.get("command", ""))
+        elif kind == "ai_tool":
+            self._on_ai_tool(ev)
         elif kind in ("final", "ai_card"):
             text = ev.get("text") or ev.get("markdown") or ""
             self._on_final_card(text)
@@ -846,6 +849,32 @@ class CliRenderer:
         self._print(Panel(body, title="▶ 执行", title_align="left",
                           border_style="cyan"))
 
+    def _on_ai_tool(self, ev: dict) -> None:
+        """工具调用一行式（web 工具卡的 CLI 映射）：青色 `🔧 read_file(path) …`，
+        end 原行补 ✓/✗ 尾巴。start 时若思考框/流式行开着先收底（对齐 token
+        打断思考的行为）；任务结束前未收的工具行由 _flush_streams 收尾。"""
+        if self._frontend is None:
+            return
+        if ev.get("phase") == "start":
+            self._end_think()
+            if self._token_open:
+                self._stream_write("\r\n")
+                self._token_open = False
+            if self.status is not None and self.status.active:
+                self.status.erase()   # 状态行让位：工具行从其行首起写
+            name = ev.get("name", "")
+            args = ev.get("args", "")
+            self._tool_open = True
+            self._stream_write(
+                f"\x1b[36m🔧 {name}\x1b[0m"
+                + (f"({args})" if args else "") + " …")
+        else:
+            if not self._tool_open:
+                return
+            mark = "\x1b[31m✗\x1b[0m" if ev.get("failed") else "\x1b[32m✓\x1b[0m"
+            self._stream_write(f" {mark}\r\n")
+            self._tool_open = False
+
     def _flush_streams(self) -> None:
         """final/error/denied/limit/task_fail/closed 前收束进行中的流式行。"""
         self._end_think()
@@ -853,6 +882,10 @@ class CliRenderer:
             if self._frontend is not None:
                 self._stream_write("\r\n")
             self._token_open = False
+        if self._tool_open:
+            if self._frontend is not None:
+                self._stream_write("\r\n")
+            self._tool_open = False
 
     def _on_final_card(self, text: str) -> None:
         self._flush_streams()

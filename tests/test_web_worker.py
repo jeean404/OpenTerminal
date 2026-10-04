@@ -545,6 +545,23 @@ async def _install_fake_runner(monkeypatch, runner_cls=FakeRunner):
     monkeypatch.setattr(amod, "TaskRunner", runner_cls)
 
 
+class FakeToolRunner(FakeRunner):
+    """非 execute 工具调用：tool_start/tool_end 实时事件（工具卡通路）。"""
+
+    def __init__(self, agent, thread_id, *, max_tool_turns=10, on_event=None):
+        self.on_event = on_event
+
+    async def run(self, text):
+        if self.on_event:
+            self.on_event(SimpleNamespace(kind="tool_start", text="notes.txt",
+                                          name="read_file", index=1,
+                                          failed=False, command=""))
+            self.on_event(SimpleNamespace(kind="tool_end", text="",
+                                          name="read_file", index=1,
+                                          failed=False, command=""))
+        return [SimpleNamespace(kind="final", text="读完了")]
+
+
 class FakeEstRunner(FakeRunner):
     """网关不回传 usage_metadata：只有 tiktoken 估算量。"""
     input_tokens = 0
@@ -574,6 +591,30 @@ async def test_worker_task_flow_events(monkeypatch):
     usage = await _wait_json(sink, lambda m: any(
         x["type"] == "usage" and x.get("tokens_in") == 123 for x in m))
     assert any(x.get("tokens_out") == 45 for x in usage)
+
+
+async def test_worker_tool_card_events(monkeypatch):
+    """非 execute 工具：先 ai_collapse 定格分析卡，再 ai_tool start/end
+    挂工具调用小卡（end 用同 id 配对置状态徽标）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    await _install_fake_runner(monkeypatch, FakeToolRunner)
+    _wire_presenter(w)
+
+    w._start_ai("读一下 notes.txt")
+    await _wait(lambda: w._ai_task is None)
+    kinds = _event_kinds(sink)
+    assert kinds == ["task_start", "ai_collapse", "ai_tool", "ai_tool",
+                     "final", "ai_card"], kinds
+    tools = [x["event"] for x in sink.json()
+             if x.get("event", {}).get("kind") == "ai_tool"]
+    assert tools[0]["phase"] == "start"
+    assert tools[0]["name"] == "read_file"
+    assert tools[0]["args"] == "notes.txt"
+    assert tools[0]["id"] == 1
+    assert tools[1]["phase"] == "end"
+    assert tools[1]["id"] == 1
+    assert not tools[1].get("failed")
 
 
 async def test_worker_usage_estimated_fallback(monkeypatch):

@@ -113,7 +113,7 @@ class ServerMsg:
     host: str = ""
     user: str = ""
     distro: str = ""
-    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_card/final/denied/limit/error
+    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_tool/ai_card/final/denied/limit/error
     command: str = ""              # approval：待审批命令
     reasons: str = ""
     label: str = ""
@@ -1284,6 +1284,22 @@ class PipelineCore:
             elif ev.kind == "denied":
                 self._emit_nowait(ServerMsg(
                     type="event", event={"kind": "denied", "text": ev.text}))
+            elif ev.kind == "tool_start":
+                # 阶段边界先定格当前分析卡（工具卡挂流底，之后模型输出开新卡，
+                # 叙事节奏与分析卡→命令→分析卡一致）；再挂工具调用小卡。
+                # 工具执行期无 PTY 输出，不需要 boundary 门闩（execute 除外，
+                # 其展示走既有 ai_collapse/输出流路径，不发工具卡）
+                self._emit_nowait(ServerMsg(
+                    type="event", event={"kind": "ai_collapse"}))
+                self._emit_nowait(ServerMsg(
+                    type="event",
+                    event={"kind": "ai_tool", "phase": "start", "id": ev.index,
+                           "name": ev.name, "args": ev.text}))
+            elif ev.kind == "tool_end":
+                self._emit_nowait(ServerMsg(
+                    type="event",
+                    event={"kind": "ai_tool", "phase": "end", "id": ev.index,
+                           "failed": ev.failed}))
             elif ev.kind == "limit":
                 self._emit_nowait(ServerMsg(
                     type="event", event={"kind": "limit", "text": ev.text}))
@@ -1345,6 +1361,10 @@ class PipelineCore:
             for ev in events:
                 if ev.kind == "tool_call":
                     self.transcript.append("tool_call", command=ev.command)
+                elif ev.kind == "tool_start":
+                    self.transcript.append(
+                        "tool_call",
+                        command=ev.name + (f" {ev.text}" if ev.text else ""))
                 elif ev.kind == "denied":
                     self.transcript.append("denied", text=ev.text)
                 elif ev.kind in ("limit", "error"):

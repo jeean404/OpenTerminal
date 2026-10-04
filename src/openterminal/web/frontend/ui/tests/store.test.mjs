@@ -249,4 +249,43 @@ describe("CardsStore", () => {
     const c = s.getSnapshot().cards[0];
     expect(c.text).toBe("开头");   // 未 runAllTimers：flushNow 先冲再裁
   });
+
+  it("tool_start 挂工具卡（不占 _activeId），tool_end 同 id 置状态徽标", () => {
+    const s = new CardsStore();
+    s.handle({ kind: "task_start", id: 30 });
+    s.handle({ kind: "ai_think", text: "读文件" });
+    s.handle({ kind: "ai_collapse" });                  // 分析卡定格
+    s.handle({ kind: "tool_start", id: "tool1", name: "read_file", args: "notes.txt" });
+    let cards = s.getSnapshot().cards;
+    expect(cards).toHaveLength(2);
+    expect(cards[1]).toMatchObject({ id: "tool1", type: "tool",
+      name: "read_file", args: "notes.txt", done: false, failed: false });
+    // 工具卡不占流式位：后续 token 开新分析卡，不写进工具卡
+    s.handle({ kind: "tool_end", id: "tool1" });
+    s.handle({ kind: "ai_token", text: "读到了" });     // 无 ai_collapse 不会到这，仅防御
+    vi.runAllTimers();
+    cards = s.getSnapshot().cards;
+    expect(cards[1]).toMatchObject({ id: "tool1", done: true, failed: false });
+    expect(cards[0].done).toBe(true);                    // ai_collapse 已定格分析卡
+  });
+
+  it("tool_end failed 置失败徽标；未知 id 静默", () => {
+    const s = new CardsStore();
+    s.handle({ kind: "tool_start", id: "tool2", name: "grep", args: "pattern" });
+    s.handle({ kind: "tool_end", id: "tool2", failed: true });
+    expect(s.getSnapshot().cards[0]).toMatchObject({ done: true, failed: true });
+    s.handle({ kind: "tool_end", id: "nope" });          // 不炸不挂卡
+    expect(s.getSnapshot().cards).toHaveLength(1);
+  });
+
+  it("task_fail 把未决工具卡标失败（⏳ 不得悬挂到任务结束）", () => {
+    const s = new CardsStore();
+    s.handle({ kind: "tool_start", id: "tool3", name: "read_file", args: "x" });
+    s.handle({ kind: "tool_start", id: "tool4", name: "ls", args: "." });
+    s.handle({ kind: "tool_end", id: "tool4" });
+    s.handle({ kind: "task_fail", reason: "error" });
+    const cards = s.getSnapshot().cards;
+    expect(cards[0]).toMatchObject({ id: "tool3", done: true, failed: true });
+    expect(cards[1]).toMatchObject({ id: "tool4", done: true, failed: false });
+  });
 });

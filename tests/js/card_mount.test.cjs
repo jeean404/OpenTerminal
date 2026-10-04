@@ -187,3 +187,24 @@ test("首笔输出引发渲染 → onRender 补挂载（_finishMount：mount+pad
   assert.deepStrictEqual(s.mounts, [9], "补挂载应 feed.mount");
   assert.strictEqual(s.pads, 1, "补挂载应补差 pad");
 });
+
+test("ai_tool start→end：挂 tool 卡，tool_start/tool_end 依序进 feed 且不占 _taskCardId", async () => {
+  const s = makeMountSession({refreshFiresOnRender: true});
+  const handled = [];
+  s._ensureFeed = () => Promise.resolve({
+    handle: e => handled.push(e),
+    mount: (id, el) => s.mounts.push(id),
+    unmount() {}, destroy() {},
+  });
+  s._cardReady = Promise.resolve();
+  s._onAiTool({phase: "start", id: 1, name: "read_file", args: "notes.txt"});
+  s._onAiTool({phase: "end", id: 1, failed: false});
+  await s._cardReady;
+  assert.deepStrictEqual(handled, [
+    {kind: "tool_start", id: "tool1", name: "read_file", args: "notes.txt"},
+    {kind: "tool_end", id: "tool1", failed: false},
+  ], "end 链在 start 挂载之后：store 收到的顺序即 worker 发送序");
+  assert.ok(s._slots.has("tool1"), "工具卡 slot 以 tool<id> 登记");
+  assert.strictEqual(s._taskCardId, undefined,
+    "工具卡不得占用流式分析卡位（后续 token 要开新分析卡）");
+});

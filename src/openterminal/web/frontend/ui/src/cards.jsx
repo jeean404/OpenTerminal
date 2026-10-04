@@ -17,6 +17,7 @@ function Card({ card, dispatch }) {
     case "summary": return <SummaryCard card={card} dispatch={dispatch} />;
     case "approval": return <ApprovalCard card={card} dispatch={dispatch} />;
     case "rescue": return <RescueCard card={card} dispatch={dispatch} />;
+    case "tool": return <ToolCard card={card} />;
     default: return null;
   }
 }
@@ -151,6 +152,24 @@ function RescueCard({ card, dispatch }) {
       </div>
       <pre className="apcode">{card.line}</pre>
       {card.output ? <div className="apreasons">{card.output}</div> : null}
+    </div>
+  );
+}
+
+// 工具调用小卡：AI 任务的文件/检索类工具（read_file/glob/grep 等，execute 走
+// 主终端）。工具名+关键参数+状态徽标（⏳→✓/✗）；复用审批卡骨架与回执徽标样式。
+// tool_end 只换徽标不增内容 → 卡高不变，零 pad 往返。
+function ToolCard({ card }) {
+  return (
+    <div className="acard aprobe">
+      <div className="aphead">
+        <span className="apq">🔧 {card.name}</span>
+        {card.done
+          ? <span className={"apstate " + (card.failed ? "fail" : "ok")}>
+              {card.failed ? "✗ 失败" : "✓ 完成"}</span>
+          : null}
+      </div>
+      {card.args ? <pre className="apcode">{card.args}</pre> : null}
     </div>
   );
 }

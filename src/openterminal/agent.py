@@ -189,6 +189,22 @@ class TaskEvent:
     text: str = ""
     command: str = ""
     reasons: list[str] = field(default_factory=list)
+    name: str = ""      # tool_start/tool_end：工具名
+    index: int = 0      # tool_start/tool_end：start/end 配对序号
+    failed: bool = False  # tool_end：ToolMessage status=error
+
+
+def _tool_args_summary(name: str, args: dict) -> str:
+    """工具卡参数摘要：逐工具取关键参数（deepagents 内置文件工具的路径
+    参数名是 file_path），未命中按常见参数名兜底，再取首个非空字符串值。"""
+    keyed = {"read_file": "file_path", "write_file": "file_path",
+             "edit_file": "file_path", "ls": "path", "glob": "pattern",
+             "grep": "pattern", "load_skill": "file_path"}
+    for key in (keyed.get(name), "file_path", "path", "pattern"):
+        v = args.get(key) if key else None
+        if isinstance(v, str) and v:
+            return v[:120]
+    return next((v[:120] for v in args.values() if isinstance(v, str) and v), "")
 
 
 class TaskRunner:
@@ -204,6 +220,9 @@ class TaskRunner:
         self.on_event = on_event
         self.interrupt_payload: dict | None = None
         self._tool_calls = 0
+        # 非 execute 工具的 start/end 配对记账（前端工具调用小卡）
+        self._tool_seq = 0
+        self._pending_tools: dict[str, tuple[int, str]] = {}
         self.input_tokens = 0    # 本次任务的累计输入 token（usage_metadata）
         self.output_tokens = 0   # 本次任务的累计输出 token
         # 会话栏 token 估算（tiktoken，token_est）：网关不回传 usage_metadata
@@ -310,12 +329,27 @@ class TaskRunner:
             # 工具结果回灌模型上下文 = 下轮输入 token 的大头（命令输出）
             self._est_in.append(m.content if isinstance(m.content, str)
                                 else str(m.content))
+            # start/end 按 tool_call_id 配对：execute 不发（命令直写主终端，
+            # 展示走 ai_collapse/输出流），其余工具实时外送供前端挂工具卡
+            pending = self._pending_tools.pop(m.tool_call_id, None)
+            if pending is not None:
+                self._add(events, TaskEvent(
+                    "tool_end", name=pending[1], index=pending[0],
+                    failed=m.status == "error"))
         if isinstance(m, AIMessage) and m.tool_calls:
             for tc in m.tool_calls:
                 if tc["name"] == "execute":
                     self._tool_calls += 1
                     self._add(events, TaskEvent(
                         "tool_call", command=tc["args"].get("command", "")
+                    ))
+                else:
+                    self._tool_seq += 1
+                    self._pending_tools[tc["id"]] = (self._tool_seq, tc["name"])
+                    self._add(events, TaskEvent(
+                        "tool_start", name=tc["name"],
+                        text=_tool_args_summary(tc["name"], tc.get("args", {})),
+                        index=self._tool_seq,
                     ))
         if isinstance(m, ToolMessage) and m.status == "error" and "安全策略拒绝" in m.content:
             self._add(events, TaskEvent("denied", text=m.content))

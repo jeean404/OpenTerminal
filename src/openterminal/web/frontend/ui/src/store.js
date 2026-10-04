@@ -1,6 +1,6 @@
 // 卡片流状态机：纯 JS store（不依赖 React，vitest 可直接单测）。
 // 事件契约与 worker 的 ServerMsg event kinds 一一对应：
-//   task_start / ai_token / ai_think / ai_collapse / ai_card / final /
+//   task_start / ai_token / ai_think / ai_collapse / ai_tool / ai_card / final /
 //   task_fail / approval / approval_key / decide / rescue / rescue_decide / clear
 // （fold/toggle 折叠机制已随 v5 spec §3.4/§8 删除——分析卡整卡长留）
 // React 侧经 useSyncExternalStore(subscribe, getSnapshot) 订阅快照。
@@ -174,7 +174,33 @@ export class CardsStore {
         this._freezeActive(false);
         this._emit();
         break;
+      case "tool_start": {
+        // 工具调用小卡：不占 _activeId（不参与流式 token/思考——ai_collapse
+        // 已定格分析卡，后续模型输出经 app.js 开新分析卡）；end 置状态徽标
+        const card = {
+          id: evt.id || ++this._seq, type: "tool", name: evt.name || "",
+          args: evt.args || "", done: false, failed: false,
+        };
+        this.cards.push(card);
+        this._emit();
+        break;
+      }
+      case "tool_end": {
+        const card = this._card(evt.id);
+        if (!card || card.type !== "tool" || card.done) return;
+        card.done = true;
+        card.failed = !!evt.failed;
+        this._emit();
+        break;
+      }
       case "task_fail":
+        // 任务中止时未决工具卡一并标失败，⏳ 不得悬挂到任务结束
+        for (const c of this.cards) {
+          if (c.type === "tool" && !c.done) {
+            c.done = true;
+            c.failed = true;
+          }
+        }
         this._freezeActive(true);
         this._emit();
         break;

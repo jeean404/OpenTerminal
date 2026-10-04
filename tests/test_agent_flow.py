@@ -7,7 +7,7 @@ import pytest
 if sys.platform == "win32":
     pytest.skip("PTY 仅 POSIX", allow_module_level=True)
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from openterminal.agent import (
@@ -136,6 +136,63 @@ async def test_recursion_budget_reports_limit():
     events = await runner.run("loop")
     assert "limit" in [e.kind for e in events]
     await session.close()
+
+
+async def test_non_execute_tool_emits_tool_start_end():
+    # 非 execute 工具（read_file 等）此前被静默吸收：任务全程只看到分析卡。
+    # 现在 tool_start/tool_end 成对实时外送（前端挂工具调用小卡）
+    from pathlib import Path
+
+    Path("notes.txt").write_text("hello")
+    model = scripted(
+        tool_call("read_file", {"file_path": "notes.txt"}, "r1"),
+        AIMessage(content="读完了。"),
+    )
+    graph, session, _, _ = await _agent(model)
+    seen: list = []
+    runner = TaskRunner(graph, "th-toolcard", max_tool_turns=10,
+                        on_event=seen.append)
+    events = await runner.run("x")
+    starts = [e for e in seen if e.kind == "tool_start"]
+    ends = [e for e in seen if e.kind == "tool_end"]
+    assert len(starts) == 1
+    assert starts[0].name == "read_file"
+    assert "notes.txt" in starts[0].text      # 参数摘要（卡上展示）
+    assert len(ends) == 1
+    assert ends[0].index == starts[0].index   # 按 tool_call_id 配对
+    assert not ends[0].failed
+    assert any(e.kind == "final" for e in events)
+    await session.close()
+
+
+async def test_tool_end_failure_flag_from_tool_message_status():
+    # ToolMessage status="error" → tool_end.failed=True（前端 ✗ 徽标）
+    from pathlib import Path
+
+    seen: list = []
+    runner = TaskRunner(object(), "th-absorb", on_event=seen.append)
+    ai = AIMessage(content="", tool_calls=[
+        {"name": "read_file", "args": {"path": "x"}, "id": "a1",
+         "type": "tool_call"}])
+    events: list = []
+    await runner._absorb(ai, "model", events)
+    await runner._absorb(ToolMessage(content="boom", tool_call_id="a1",
+                                     status="error"), "tools", events)
+    kinds = [e.kind for e in seen]
+    assert kinds == ["tool_start", "tool_end"]
+    assert seen[1].index == seen[0].index
+    assert seen[1].failed is True
+
+
+async def test_tool_summary_prefers_keyed_arg_and_truncates():
+    from openterminal.agent import _tool_args_summary
+
+    assert _tool_args_summary("read_file", {"path": "a/b.txt"}) == "a/b.txt"
+    assert _tool_args_summary("glob", {"pattern": "**/*.py"}) == "**/*.py"
+    assert _tool_args_summary("unknown", {"x": "v"}) == "v"
+    assert _tool_args_summary("unknown", {}) == ""
+    long = _tool_args_summary("read_file", {"path": "p" * 200})
+    assert len(long) <= 120 and long.startswith("ppp")
 
 
 def test_system_prompt_contains_dialect():

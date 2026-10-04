@@ -1695,7 +1695,9 @@ class Session {
     // 挂载完成由 _cardOnScreen 接班回卡本体——否则空隙期卡与徽标都不显＝假死
     this._phaseLive = false;
     this._refreshThink();
-    this._cardReady = this._mountCard(cardId).then(slot => {
+    // 链在在途开卡之后（工具卡/上一阶段卡可能还在挂载临界区内）：挂载全程
+    // 扣流，两段并发会把 marker 钉错
+    this._cardReady = this._cardReady.then(() => this._mountCard(cardId)).then(slot => {
       if (!slot) return null;
       return this._ensureFeed().then(f => f && f.handle({kind: "task_start", id: cardId}));
     });
@@ -1725,6 +1727,26 @@ class Session {
       .then(f => f && f.handle({kind: "ai_think", text: text || ""}))
       .then(() => { const s = this._slots.get(id); if (s) this._scheduleReanchor(s); })
       .then(() => this._followBottom());
+  }
+
+  // 工具调用小卡（ai_tool start/end，worker 在 ai_collapse 定格分析卡后发）：
+  // start 在流底挂 tool 卡（kind 同 phase——宁藏不盖/夹紧兜底全复用），end 经
+  // store 同 id 置状态徽标（卡高不变，零 pad 往返）。不占 _taskCardId：工具卡
+  // 不是流式分析卡，之后的模型输出由 _onAiToken/_onAiThink 开新分析卡。
+  _onAiTool(ev) {
+    const id = "tool" + ev.id;
+    if (ev.phase === "start") {
+      this._cardReady = this._cardReady.then(() => this._mountCard(id, "phase")
+        .then(slot => {
+          if (!slot) return null;
+          return this._ensureFeed().then(f => f && f.handle({
+            kind: "tool_start", id, name: ev.name || "", args: ev.args || "",
+          }));
+        }));
+    } else {
+      this._cardReady = this._cardReady.then(() => this._ensureFeed())
+        .then(f => f && f.handle({kind: "tool_end", id, failed: !!ev.failed}));
+    }
   }
 
   // 阶段边界前置结账：worker 在**执行命令前**发 ai_boundary 并等本片 ack
@@ -2194,6 +2216,7 @@ class Session {
       case "ai_think": this._onAiThink(ev.text); break;
       case "ai_boundary": this._onBoundary(); break;
       case "ai_collapse": this._onAiCollapse(); break;
+      case "ai_tool": this._onAiTool(ev); break;
       case "ai_card": this._onAiCard(ev.markdown); break;
       case "final": this._onFinal(ev.text); break;
       case "interrupt": this._onTaskFail("interrupt", ev.text || "已中断"); break;

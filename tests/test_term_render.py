@@ -245,6 +245,36 @@ async def test_think_box_closed_by_token_without_summary():
     assert "正文来了" in out
 
 
+async def test_tool_line_start_end_status_tail():
+    """ai_tool：start 开一行 `🔧 工具(参数) …`，end 原行补 ✓/✗ 尾巴。"""
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_tool", phase="start", id=1, name="read_file",
+                       args="notes.txt"))
+    out = sink.getvalue()
+    assert "\x1b[36m🔧 read_file\x1b[0m(notes.txt) …" in out
+    await r.render(_ev("ai_tool", phase="end", id=1, failed=False))
+    out = sink.getvalue()
+    assert "\x1b[32m✓\x1b[0m\r\n" in out
+    assert not r._tool_open
+
+
+async def test_tool_line_end_without_start_is_noop():
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_tool", phase="end", id=9))
+    assert sink.getvalue() == ""
+
+
+async def test_tool_line_flushed_by_final_when_end_missing():
+    """任务收尾前未收 end 的工具行由 _flush_streams 收底，不悬挂半行。"""
+    r, sink, _ = _make_renderer()
+    await r.render(_ev("ai_tool", phase="start", id=2, name="grep",
+                       args="pattern"))
+    await r.render(_ev("final", text="完"))
+    out = sink.getvalue()
+    assert "🔧 grep" in out
+    assert not r._tool_open
+
+
 async def test_approval_panel_closes_think_box_first():
     """硬纪律回归：思考流半开（残余半行未落）时审批面板到达——_print 先
     收束流式段再画面板；否则面板嵌进框线中间、盒底/摘要落在面板之后。
