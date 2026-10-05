@@ -154,6 +154,10 @@ class BasePtySession:
     async def _interrupt(self) -> None:
         raise NotImplementedError
 
+    async def recover(self) -> bool:
+        """外部（worker 键盘路径）触发的断线恢复；成功时已回调 on_reconnect。"""
+        return await self._recover_connection()
+
     async def _recover_connection(self) -> bool:
         return False
 

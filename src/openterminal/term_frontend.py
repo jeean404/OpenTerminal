@@ -611,6 +611,8 @@ class CliRenderer:
             self._on_ask_host_key(msg)
         elif t == "closed":
             self._on_closed()
+        elif t == "reconnected":
+            self._print(Text(msg.text))
         elif t == "event" and isinstance(msg.event, dict):
             await self._on_event(msg.event)
         # 未知 type 静默忽略（对齐 web handleEvent 的 default 分支）

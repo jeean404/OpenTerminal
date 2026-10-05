@@ -31,9 +31,16 @@ class FakeSession:
         self.cwd = "/tmp"
         self.calls = []
         self.raw_times = []   # 与 calls 中 raw 项对齐的 monotonic 时间戳
+        self._run_lock = asyncio.Lock()
+        self.recover_calls = 0
+        self.recover_ok = True
 
     async def start(self):
         pass
+
+    async def recover(self):
+        self.recover_calls += 1
+        return self.recover_ok
 
     async def run(self, command, *, timeout=None, on_output=None):
         self.calls.append(("run", command))
@@ -937,6 +944,60 @@ async def test_worker_reconnect_reinjects_history(monkeypatch, tmp_path):
     await w._on_session_reconnect()
     raws = [d for k, d in w.session.calls if k == "raw"]
     assert any(b"history -r" in r for r in raws)
+    await w.close()
+
+
+# --- 断线后敲键自动重连（_pump_eof → _on_keys → _revive_session）---
+
+async def test_worker_keys_revive_dead_session(monkeypatch):
+    """泵 EOF 置死亡标记后，首个键触发会话恢复 + 泵补启 + reconnected 通知，
+    按键送往恢复后的会话。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    pump_dead = w._pump
+    pump_dead.cancel()   # 模拟真实断线：泵循环先于 _pump_eof 返回
+    try:
+        await pump_dead
+    except asyncio.CancelledError:
+        pass
+    await w._pump_eof("连接已断开")
+    assert w._session_dead
+
+    await w._on_keys(b"ls")
+    assert w.session.recover_calls == 1
+    assert not w._session_dead
+    assert w._pump is not pump_dead and not w._pump.done()
+    assert ("raw", b"ls") in w.session.calls
+    msgs = await _wait_json(sink, lambda m: any(x.get("type") == "reconnected"
+                                                for x in m))
+    assert "已重新连接" in next(x["text"] for x in msgs
+                                if x.get("type") == "reconnected")
+    await w.close()
+
+
+async def test_worker_keys_revive_failure_keeps_dead(monkeypatch):
+    """恢复失败：状态栏提示重试、按键丢弃、死亡标记保留（下个键再试）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w.session.recover_ok = False
+    await w._pump_eof("连接已断开")
+
+    await w._on_keys(b"ls")
+    assert w.session.recover_calls == 1
+    assert w._session_dead
+    assert ("raw", b"ls") not in w.session.calls
+    await _wait_json(sink, lambda m: any(
+        "重连失败" in x.get("text", "") for x in m))
+    await w.close()
+
+
+async def test_worker_no_revive_when_alive(monkeypatch):
+    """会话健康时敲键不触发恢复（死亡标记是唯一开关）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    await w._on_keys(b"echo hi")
+    assert w.session.recover_calls == 0
+    await w.close()
 
 
 # --- 外部触发链 submit：健康路径（Workbench 蓝色回显）与降级路径 ---

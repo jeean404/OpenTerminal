@@ -385,9 +385,13 @@ class Session {
     this.ws = ws;
     // 开连（或重连）后按序回放 WS 未就绪期缓存的按键（onData 不丢键）
     ws.onopen = () => {
+      this._wsRetries = 0;
       const bl = this._keyBacklog;
       this._keyBacklog = null;
       if (bl) for (const d of bl) this._feedData(d);
+      // 退避重连成功的回连：worker 宽限期内 PTY 还活着，不会再发 ready，
+      // 自行把状态翻回已连接（若 PTY 已死，首个键走 worker 重连链再纠正）
+      if (this._everRetried && !this._dead) this.setStatus("connected", "连接已恢复");
     };
     // PTY 原始字节走二进制帧直写唯一 xterm（契约），JSON 控制事件走 handleMsg
     ws.onmessage = ev => {
@@ -397,10 +401,28 @@ class Session {
         this._ingestBytes(u8);
       } else this.handleMsg(JSON.parse(ev.data));
     };
-    ws.onclose = () => {
+    ws.onclose = ev => {
       this.setStatus("closed", "连接已关闭");
       this._failPads();
+      // 断线自动重连（指数退避）；4401/4404（鉴权失败/worker 已回收）重试无意义
+      if (!this._dead && ev.code !== 4401 && ev.code !== 4404) {
+        this._scheduleWsRetry();
+      }
     };
+  }
+
+  // ws 断线自动重连：0.5s 起指数退避、上限 8s，最多 8 次（覆盖约 50s 的
+  // 网络抖动；服务端 worker 宽限期 5 分钟，期内回连 PTY 无缝续用）
+  _scheduleWsRetry() {
+    if (this._wsRetryT) return;
+    if ((this._wsRetries || 0) >= 8) return;
+    this._everRetried = true;
+    const delay = Math.min(8000, 500 * 2 ** (this._wsRetries || 0));
+    this._wsRetries = (this._wsRetries || 0) + 1;
+    this._wsRetryT = setTimeout(() => {
+      this._wsRetryT = null;
+      if (!this._dead) this.connectWS();
+    }, delay);
   }
 
   sendJson(obj) {
@@ -2187,6 +2209,9 @@ class Session {
       case "closed":
         this.setStatus("closed", msg.text || "连接已关闭");
         break;
+      case "reconnected":
+        this.setStatus("connected", msg.text || "已重新连接");
+        break;
       // --- AI 事件：新契约顶层直接下发；兼容旧 {type:"event"} 包装 ---
       case "event":
         this.handleEvent(msg.event);
@@ -2250,6 +2275,7 @@ class Session {
   close() {
     this._dead = true;
     if (this._healT) { clearTimeout(this._healT); this._healT = null; }
+    if (this._wsRetryT) { clearTimeout(this._wsRetryT); this._wsRetryT = null; }
     if (this._ghostTimer) { clearInterval(this._ghostTimer); this._ghostTimer = null; }
     this._hideGhost();
     this._destroySlots();

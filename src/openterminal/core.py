@@ -274,6 +274,8 @@ class PipelineCore:
         self._pump: asyncio.Task | None = None
         self._closed = False
         self._closed_sent = False  # closed 消息已入 outbox（sender 退出门闩）
+        # 泵 EOF（_pump_eof）置位：断线后首个键经 _on_keys 触发 _revive_session
+        self._session_dead = False
         # 模型上下文轮次：/clear 自增 → TaskRunner 换新 thread_id，langgraph
         # MemorySaver 按 thread 存历史，旧上下文不再进新任务的提示词（省 token，
         # 语义同 CLI /clear 换 session_id）
@@ -1167,10 +1169,39 @@ class PipelineCore:
         AI 注入的 Ctrl+U/Ctrl+Y 括号保护覆盖唯一竞争点——真提示符半行）。"""
         if self.session is None or not data:
             return
+        if self._session_dead and not await self._revive_session():
+            return
         _dbg("keys=", repr(data[:60]))
         if self._interactive and b"\x03" in data:
             await self._maybe_cancel_ai()
         await self.session.send_raw(data)
+
+    async def _revive_session(self) -> bool:
+        """断线后首个键触发重连：恢复会话、补启泵并通知前端。
+
+        持 _run_lock 防 AI 命令超时路径（_handle_timeout）并发恢复——双
+        close/start 会交错杀进程。run() 哨兵路径可能已把会话换新（泵读到
+        旧 fd 的 EOF 才走到这里），此时恢复是多余的但无害：新 shell 再
+        重启一次，历史注入随 _notify_reconnect 重放。恢复期间的密码弹窗
+        经 _pws 队列应答（不走 _inbox），此处阻塞不饿死应答。
+        """
+        if self.session is None:
+            return False
+        async with self.session._run_lock:
+            try:
+                ok = await self.session.recover()
+            except Exception:  # noqa: BLE001 - 目标不可达/认证取消等
+                ok = False
+        if not ok:
+            await self.emit_msg(ServerMsg(
+                type="status", text="重连失败：目标暂不可达，稍后敲键可重试"))
+            return False
+        self._session_dead = False
+        if self._pump is None or self._pump.done():
+            self._pump = asyncio.create_task(self._pump_loop())
+        await self.emit_msg(ServerMsg(
+            type="reconnected", text=f"已重新连接 {self._target_host or '目标'}"))
+        return True
 
     def _ai_cancellable(self) -> bool:
         return self._ai_task is not None and not self._exec_stack
@@ -1508,7 +1539,8 @@ class PipelineCore:
         if self._ai_task is not None:
             self._ai_queue.clear()
             self._ai_task.cancel()
-        await self.emit_msg(ServerMsg(type="closed", text=text))
+        self._session_dead = True
+        await self.emit_msg(ServerMsg(type="closed", text=f"{text}；敲键自动重连"))
 
     # --- 集成模式：标记流事件 ---
     async def _on_stream_event(self, ev: tuple) -> None:
