@@ -117,14 +117,67 @@ def test_echo_command_native():
         app.send(b"\x1b[A\r")
         _wait_count(app, "hi_ot_LIVE", before + 2, timeout=20)
 
-        # Tab 补全：唯一前缀 ot_live_tab_u → 补全出完整文件名
+        # Tab 补全：唯一前缀 ot_live_tab_u → 补全出完整文件名。
+        # 断言验证执行效果（补全后的命令输出）而非补全回显本身：长提示符
+        # （CI runner 超长主机名）下 zsh 重绘把回显行切成带 ANSI 的碎片，
+        # 完整路径在裸字节流上不连续（macos CI 实录）；echo 输出是 shell
+        # 单次写入、恒连续，路径完整出现 ⟸ 补全成功，不完整 ⟸ 失败。
         app.send(b"echo /tmp/ot_live_tab_u\t")
-        app.expect(re.escape(TAB_FILE), timeout=20)
         app.send(b"\r")
-        _wait_count(app, TAB_FILE, 2, timeout=20)
+        _wait_count(app, TAB_FILE, 1, timeout=20)
     finally:
         app.close()
         _rm(TAB_FILE)
+
+
+# --- 1b. ↑ 历史召回的内容 = 历史命令（用户命令 + AI 工具命令），不含自然语言 ---
+
+@_requires_hook_classify
+def test_history_recall_is_commands_not_nl():
+    """用户报障：CLI 按 ↑/↓ 翻看的是历史输入的自然语言，而不是历史命令。
+
+    契约：AI 自然语言行绝不写入 shell 历史（hook AI 分支只清缓冲+重绘+上报）；
+    AI 工具命令（EXEC 注入通道，与真 agent execute 同路径）解码后入史。
+    断言用出现次数增量：召回会把命令文本重新画进提示符行（+1 次），
+    自然语言无论按多少次 ↑ 次数都不得增加。"""
+    _rm(TOUCH_TARGET)
+    app = _spawn("approval")
+    try:
+        app.send(b"please create the marker file\r")
+        app.expect("待审批", timeout=30)
+        app.send(b"\r")
+        if app.expect_optional("确认执行", timeout=2.0):
+            app.send(b"\r")   # 高危二段确认
+        app.expect("✓ 已执行", timeout=30)
+        app.expect("▶ 执行", timeout=30)
+        # 工具命令经注入通道真执行过：屏上已有青色回显（≥1 次）
+        cmd = f"touch {TOUCH_TARGET}"
+        cmd_before = app.screen().count(cmd)
+        assert cmd_before >= 1, (
+            f"工具命令 {cmd!r} 未上屏（注入执行链断了）；"
+            f"屏文本：\n{app.tail(2000)!r}")
+        nl_before = app.screen().count("please create the marker file")
+
+        # 最近一条历史 = AI 工具命令：一次 ↑ 即召回（提示符行重画 +1 次）
+        app.send(b"\x1b[A")
+        _wait_count(app, cmd, cmd_before + 1, timeout=10)
+
+        # 继续翻历史：自然语言行不得被召回（它根本不入史）
+        app.send(b"\x1b[A\x1b[A\x1b[A\x1b[A")
+        time.sleep(1.0)
+        assert app.screen().count(
+            "please create the marker file") == nl_before, (
+            "自然语言被 ↑ 召回（AI 行不得写入 shell 历史）；"
+            f"屏文本：\n{app.tail(2000)!r}")
+        # 注入内部行同样不得被召回（用户截图报障现场：↑ 翻页全是
+        # __ot_inj="$__ot_inj"'<base64>' 分片——静默窗口 + 尾部保洁契约）
+        assert "__ot_inj" not in app.screen(), (
+            "注入分片行被 ↑ 召回（内部行不得写入 shell 历史）；"
+            f"屏文本：\n{app.tail(2000)!r}")
+        app.send(b"\x03")   # 丢弃召回的半行，避免干扰收尾
+    finally:
+        app.close()
+        _rm(TOUCH_TARGET)
 
 
 # --- 2. 自然语言任务：流式 + 总结框 + 状态行无残留 ---
@@ -235,6 +288,56 @@ def test_approval_backspace_rejects():
             f"拒绝后 {TOUCH_TARGET} 不应存在；屏文本：\n{app.tail(2000)!r}"
         # 决策回执（spec §3.2 decide 行：✗ 已拒绝）
         app.expect("✗ 已拒绝", timeout=10)
+    finally:
+        app.close()
+        _rm(TOUCH_TARGET)
+
+
+# --- 5b. 多轮自然语言：无害/审批放行/无害/拒绝/无害 交替不假死（二十波） ---
+
+@_requires_hook_classify
+def test_approval_multi_round_nl_no_stall():
+    """审批假死回归：五轮自然语言连发，轮间不得有未决态泄漏。
+
+    每轮必须收束（final 收尾语上屏）；放行轮经注入通道真执行；拒绝轮
+    不得真执行且回执在屏；收尾轮证明审批窗释放后任务生命周期干净。"""
+    _rm(TOUCH_TARGET)
+    app = _spawn("multi")
+    try:
+        app.send(b"round one please\r")
+        app.expect("MULTI_ROUND_1_DONE", timeout=30)
+
+        before2 = app.screen().count("待审批")
+        app.send(b"round two please\r")
+        _wait_count(app, "待审批", before2 + 1, timeout=30)
+        app.send(b"\r")
+        if app.expect_optional("确认执行", timeout=2.0):
+            app.send(b"\r")   # 高危二段确认
+        app.expect("✓ 已执行", timeout=30)
+        deadline = time.monotonic() + 15
+        while not os.path.exists(TOUCH_TARGET):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"放行轮 {TOUCH_TARGET} 未被创建；屏文本：\n{app.tail(2000)!r}")
+            time.sleep(0.1)
+        _rm(TOUCH_TARGET)
+
+        app.send(b"round three please\r")
+        app.expect("MULTI_ROUND_3_DONE", timeout=30)
+
+        # 屏含 scrollback：第二轮的旧审批面板还在，expect 会命中旧面板把
+        # 拒绝键发早（空闲态透传被 shell 吞）——按出现次数增量等本轮面板
+        before4 = app.screen().count("待审批")
+        app.send(b"round four please\r")
+        _wait_count(app, "待审批", before4 + 1, timeout=30)
+        app.send(b"\x7f")   # Backspace 拒绝
+        app.expect("✗ 已拒绝", timeout=10)
+        time.sleep(1.0)
+        assert not os.path.exists(TOUCH_TARGET), \
+            f"拒绝轮不应真执行；屏文本：\n{app.tail(2000)!r}"
+
+        app.send(b"round five please\r")
+        app.expect("MULTI_ROUND_5_DONE", timeout=30)
     finally:
         app.close()
         _rm(TOUCH_TARGET)

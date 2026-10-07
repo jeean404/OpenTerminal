@@ -1984,3 +1984,34 @@ async def test_prompt_curtain_released_at_task_end(monkeypatch):
     await w._curtain_open()
     await _wait(lambda: b"root@x" in _sink_bytes(sink))
     t.cancel()
+
+
+async def test_pending_approval_resends_on_reattach(monkeypatch):
+    """WS 断隙/刷新重挂补发未决审批（真机 2026-10-06 假死根因的 core 侧防线）。
+
+    sender 在 sink=None 时静默丢帧——审批帧只发一次即可能落进断隙；
+    attach 重挂必须凭 _pending_approval 补投同命令帧，决策落地后不再补。"""
+    w, sink1 = await _make_worker(monkeypatch)
+    try:
+        task = asyncio.create_task(w.ask_approval(
+            "rm -rf /tmp/ot_resend", "高危命令需要审批", "h", "high"))
+        await _wait_json(sink1, lambda m: any(
+            x.get("type") == "approval" for x in m))
+        assert w._pending_approval is not None
+        w.detach(sink1)
+        sink2 = FakeSink()
+        w.attach(sink2)
+        msgs = await _wait_json(sink2, lambda m: any(
+            x.get("type") == "approval"
+            and x.get("command") == "rm -rf /tmp/ot_resend" for x in m))
+        assert msgs, "重挂应补发同命令审批帧"
+        await w._decisions.put({"type": "reject", "message": "用户拒绝了该命令"})
+        assert await task == {"type": "reject", "message": "用户拒绝了该命令"}
+        assert w._pending_approval is None
+        sink3 = FakeSink()
+        w.attach(sink3)
+        await asyncio.sleep(0.15)
+        assert not any(x.get("type") == "approval" for x in sink3.json()), \
+            "决策落地后重挂不得再补发"
+    finally:
+        await w.close()

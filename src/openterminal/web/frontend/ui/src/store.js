@@ -214,6 +214,14 @@ export class CardsStore {
         this._emit();
         break;
       }
+      case "approval_void": {
+        // 看门狗转模态：终端卡同步撤掉（键盘快捷键路径随之无未决卡，
+        // 防模态+快捷键双决策）
+        const n = this.cards.length;
+        this.cards = this.cards.filter(c => c.id !== evt.id);
+        if (this.cards.length !== n) this._emit();
+        return true;
+      }
       case "decide":
         this._decide(evt.decision, evt.edited);
         break;

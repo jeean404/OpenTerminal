@@ -89,9 +89,10 @@ def make_scripted_runner(scenario: str, core: "CliCore") -> type:
     approval 场景决策放行后经 core.backend（InteractiveRunner，真注入
     通道）执行命令，与真 agent 的 execute 工具同一执行路径）。"""
 
+    rounds = [0]   # multi 场景轮次计数（每任务一个新 runner 实例，闭包共享）
+
     class ScriptedRunner:
         """事件形态与真实 TaskRunner 完全同形（见模块头侦查结论 1-6）。"""
-
         def __init__(self, agent, thread_id, max_tool_turns: int = 10, *,
                      on_event=None) -> None:
             self.agent = agent
@@ -131,6 +132,20 @@ def make_scripted_runner(scenario: str, core: "CliCore") -> type:
                     "description": "高危命令需要审批",
                 }]}
                 return []
+            if scenario == "multi":
+                # 多轮自然语言回归（二十波审批假死）：无害→审批→无害→拒绝→
+                # 无害五轮交替，断言轮间无未决态泄漏（每轮都收束、拒绝轮不真
+                # 执行）。轮次经闭包计数推进；审批轮与 approval 场景同形态。
+                rounds[0] += 1
+                if rounds[0] in (2, 4):
+                    self.interrupt_payload = {"action_requests": [{
+                        "args": {"command": f"touch {TOUCH_TARGET}"},
+                        "description": "高危命令需要审批",
+                    }]}
+                    return []
+                self._emit("token", f"round{rounds[0]} ok")
+                return [TaskEvent(
+                    "final", text=f"MULTI_ROUND_{rounds[0]}_DONE")]
             if scenario == "rescue":
                 # 只服务救援 y 路径（n 路径不起任务）
                 return [TaskEvent("final",
@@ -174,8 +189,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", default="local")
     ap.add_argument("--scenario", default="none",
-                    choices=["echo", "think", "approval", "rescue", "slow",
-                             "none"])
+                    choices=["echo", "think", "approval", "multi", "rescue",
+                             "slow", "none"])
     ap.add_argument("--text", default="", help="预留（当前场景不消费）")
     args = ap.parse_args()
     try:

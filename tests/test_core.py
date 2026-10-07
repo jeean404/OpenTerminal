@@ -60,3 +60,50 @@ def test_patch_bridge_skips_dunders():
         assert cmod.__doc__ == old_core_doc   # dunder 不转发
     finally:
         wmod.__doc__ = old_wmod_doc
+
+
+def test_ask_approval_tracks_pending_and_clears_on_decision():
+    """未决审批记账：等待期间 _pending_approval 在位，决策落地即清。"""
+    core = PipelineCore(Config.load(), "default")
+    emitted = []
+
+    async def _emit(msg):
+        emitted.append(msg)
+
+    core.emit_msg = _emit
+
+    async def _main():
+        task = asyncio.create_task(core.ask_approval(
+            "rm -rf /tmp/ot_pending", "高危命令需要审批", "h", "high"))
+        await asyncio.sleep(0.05)
+        assert core._pending_approval is not None
+        assert core._pending_approval.command == "rm -rf /tmp/ot_pending"
+        await core._decisions.put({"type": "approve"})
+        val = await task
+        assert val == {"type": "approve"}
+        assert core._pending_approval is None
+
+    asyncio.run(_main())
+    assert emitted[0].type == "approval"
+
+
+def test_ask_approval_pending_cleared_on_close_sentinel():
+    """close() 的 None 哨兵解阻塞后 pending 也必须清（否则重挂误补发）。"""
+    core = PipelineCore(Config.load(), "default")
+
+    async def _emit(msg):
+        return None
+
+    core.emit_msg = _emit
+
+    async def _main():
+        task = asyncio.create_task(
+            core.ask_approval("rm -rf /tmp/ot_pending2", "r", "h"))
+        await asyncio.sleep(0.05)
+        assert core._pending_approval is not None
+        await core._decisions.put(None)
+        with pytest.raises(ConnectionError):
+            await task
+        assert core._pending_approval is None
+
+    asyncio.run(_main())
