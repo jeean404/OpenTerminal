@@ -66,6 +66,7 @@ function makeApprovalSession(slot) {
     flush() {}, mount() {}, unmount() {}, destroy() {},
   };
   s._ensureFeed = () => Promise.resolve(s._feed);
+  s._cardReady = Promise.resolve();   // 产线构造函数初始化；审批挂载排链尾
   s._mountCard = async () => slot;
   s._discardSlot = sl => s.discards.push(sl);
   s._approvalModal = cmd => s.modals.push(cmd);   // spy：模态真体另路由

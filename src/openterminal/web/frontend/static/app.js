@@ -830,9 +830,24 @@ class Session {
     return this._feedPromise;
   }
 
+  // 锚定临界区串行化：_cardReady 只串了走链的调用方（task_start/ai_tool），
+  // showApproval/_showRescue/_mountSummary 不走它——tool_start 与 approval
+  // 同包到达时两个 _mountCard 并发跑到底，registerMarker 都钉在同一光标行
+  // ＝两张 island 叠同行、后贴纸者盖住先者；被盖的是审批卡时按钮点不到，
+  // 看门狗又视 mounted+未夹紧为健康不转模态＝决策死锁（真机「工具卡盖审批
+  // 卡、界面干等审批」）。锁必须落在 _mountCard 内部才罩得住所有调用方；
+  // 范围含尾部 _ensurePad——下张卡的 marker 必须钉在本卡预留空行落地、光标
+  // 下移之后，否则空行落进新卡区、新卡出生即盖帽夹紧。
+  async _mountCard(cardId, kind = "phase") {
+    const run = () => this._runMountCard(cardId, kind);
+    // 前卡挂载抛错不得堵住后卡锚定（onRejected 同样排队放行）
+    this._mountQ = (this._mountQ || Promise.resolve()).then(run, run);
+    return this._mountQ;
+  }
+
   // 挂载一张卡：marker 钉流底，decoration 贴纸盖在 pad 预留行上。
   // 整段在扣流临界区内完成，输出不可能插进占位区。失败返回 null。
-  async _mountCard(cardId, kind = "phase") {
+  async _runMountCard(cardId, kind = "phase") {
     await this._settle();
     // 提交在途门闩：task_start 可能先于 \r 的回显/重绘字节到达，此刻 settle 误判
     // 静默、marker 钉在回显行上——卡盖住输入行（真机「中文提交行消失」根因）。
@@ -2176,7 +2191,26 @@ class Session {
       // 随后长到 7 行再补一轮；那 150ms 窗口里卡是钉死截断的，若用户此刻已按
       // Ctrl+Enter 放行、输出随即从卡底流走，预留区断开就永久盖帽补不回来。
       feed.handle({kind: "approval", id: cardId, command, reasons, risk});
-      const slot = await this._mountCard(cardId, "approval");
+      // 挂载不加塞：并行 tool_calls 会让 core 在消息到达时一次发齐全部
+      // tool_start（工具卡＝调用宣告，不是已执行），approval 消息随后才到。
+      // showApproval 不走 _cardReady 就会抢在「已宣告未挂载」的工具卡前面
+      // 锚定＝审批卡居中、下面挂一排未决策的宣告卡（真机 2026-10-08「还没
+      // 审批工具卡已经在审批卡下面」）。排进链尾：审批卡落在这批工具卡之
+      // 下，决策前屏底不再长新卡。
+      const slotP = this._cardReady.then(() => this._mountCard(cardId, "approval"));
+      this._cardReady = slotP.then(() => {}, () => {});   // 链不断：挂载失败也放行后续
+      const slot = await slotP;
+      // 排队等链扩出了窗口：挂载返回时命令可能已决策/被下一令顶掉（WS 重连
+      // 补发、卡内快捷键在 handle 后即生效）——迟到的审批卡上屏＝给已决的
+      // 命令再摆一扇按钮。void 进 store + 出清槽，与看门狗同口径。
+      if (this._dead || this._approvalResolved ||
+          this._approvalCmd !== command) {
+        if (slot) {
+          feed.handle({kind: "approval_void", id: cardId});
+          this._discardSlot(slot);
+        }
+        return;
+      }
       if (!slot) return this._approvalModal(command, reasons);
       // 可点性看门狗：mounted 且未夹紧（pinnedRows == null）才等于用户真点
       // 得到。pad 未落账/盖帽 → pinnedRows 钉死；审批期终端静默 → xterm 不跑
@@ -2376,7 +2410,14 @@ class Session {
       this._csTimer = setTimeout(() => { el.textContent = ""; }, 4000);
       return;
     }
-    el.textContent = `命令集 ${msg.index || ""}/${msg.total || ""}`;
+    // 状态栏说清在跑哪条:只报 1/3 计数时用户看不出第 2、3 条到底执行了
+    // 没有(真机反馈「只显示了第 1 条命令的执行记录」)。应答行不带内容
+    // (core 对 `>` 行传空串),防密码泄进状态栏。
+    const cmd = msg.cmd ? String(msg.cmd) : "";
+    const short = cmd.length > 40 ? cmd.slice(0, 40) + "…" : cmd;
+    el.textContent = `命令集 ${msg.index || ""}/${msg.total || ""}` +
+      (short ? "：" + short : "");
+    el.title = cmd ? "正在执行：" + cmd : "";
   }
 
   _setStopVisible(visible) {
