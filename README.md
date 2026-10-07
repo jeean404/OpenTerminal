@@ -13,10 +13,12 @@ exactly as you'd expect. It can hop to your remote servers over SSH too, so
 you can leave Xshell behind.
 
 <div align="center">
+  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal terminal demo: plain command → natural language task → streaming analysis → approval → execution → summary"><br><br>
   <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal demo: natural language task → analysis → approval → execution → summary">
 </div>
 
-Here's what happens in the demo above:
+Both GIFs show the same flow — the first in the plain terminal (`ot`), the
+second in the browser (`ot web`). Here's what happens:
 
 1. A plain command first — `ls /tmp/ot-demo` runs in your real shell,
    colored output and all;
@@ -34,6 +36,7 @@ Here's what happens in the demo above:
 > ⚠️ **Beta**: OpenTerminal runs real commands on real machines — including
 > production servers. Every state-changing command needs your approval (see
 > [Security model](#security-model)), but please still read what you're approving.
+> Security-sensitive disclosures: [SECURITY.md](SECURITY.md).
 
 ## Why you might like it
 
@@ -52,6 +55,65 @@ Here's what happens in the demo above:
 - **Two ways in.** A single-pipeline terminal (`ot`), or `ot web` — a
   browser UI with a server sidebar and multi-tab terminals, sharing the
   same core.
+
+## Features
+
+**Natural-language tasks**
+
+- Streaming **thinking → analysis → approval → execution → summary** for
+  every task; summaries are markdown built from the real command output
+- Plain commands and plain sentences share one input line — `!` forces a
+  command, `?` forces a task; Ctrl+C interrupts a running task
+- Slash commands: `/target` switch host · `/system` override dialect ·
+  `/clear` new task · `/model` show model · `/exit` quit
+- Bounded self-correction: a failed command is retried at most once,
+  tool-call turns are budget-capped
+
+**Shells & systems**
+
+- Persistent sessions — `cd`, exports, and venvs survive across tasks
+- Full-screen programs (vim / top / tmux) run inline via true PTY
+  passthrough
+- Dialects auto-detected: Ubuntu/Debian→apt, CentOS 7→yum, Rocky/Fedora→dnf,
+  Alpine→apk, Arch→pacman, macOS→brew — with `/system` manual override
+- Local shells on macOS & Linux (PTY) and Windows (ConPTY + PowerShell)
+
+**SSH & connections**
+
+- Hosts from `~/.ssh/config`, ad-hoc `user@host:port`, or remembered
+  connections
+- Password and key auth; passwords live in the OS keyring, never in
+  plaintext files
+- Host-key TOFU confirmation; per-target history is replayed into the
+  shell on reconnect
+
+**Safety** — details in [Security model](#security-model)
+
+- Three-tier command policy (auto / approve / deny) enforced as agent
+  middleware, plus custom exact-match rules (`auto_extra` / `approve_extra`
+  / `deny_extra`)
+- Every input, command, approval, and summary lands in a JSONL transcript
+  under `~/.openterminal/sessions/`
+
+**Web UI** (`ot web`)
+
+- Server sidebar + multi-tab terminals; Agent view and plain Shell view
+  per tab
+- Browser-dialog password and host-key entry; optional LAN access with a
+  mandatory token for non-loopback binds
+
+**Headless / scripting**
+
+- `ot exec -t <target> -c "<cmd>" --output json` — one policy-gated
+  command per invocation, with machine-readable output and exit codes
+  (`APPROVAL_REQUIRED` / `DENIED` / `HOST_KEY_UNKNOWN`), safe to wire
+  into cron or CI
+- `ot list targets --output json`
+
+**Model gateways**
+
+- Any Anthropic-compatible or OpenAI-compatible gateway — protocol, base
+  URL, model, and key env var all configurable
 
 ## Installation
 
@@ -199,6 +261,16 @@ password-free.
 **LAN access**: `ot web --host 0.0.0.0 --token <TOKEN>` — a token is
 mandatory for non-loopback binds. Config: `[web] host/port/token` in
 `config.toml`.
+
+**In scripts**: `ot exec` runs one command against a target behind the
+same policy gate and speaks JSON — read-only commands execute; anything
+needing approval exits with `APPROVAL_REQUIRED` (67) instead of running,
+and refused commands exit with `DENIED` (66), so automation can react
+instead of guessing:
+
+```sh
+ot exec -t prod-web -c "df -h /" --output json
+```
 
 ## Security model
 

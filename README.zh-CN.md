@@ -13,10 +13,12 @@ OpenTerminal 住在你的终端里(也可以住进浏览器)。你输入一句�
 Xshell 可以省了。
 
 <div align="center">
+  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal 终端演示:普通命令 → 自然语言任务 → 流式分析 → 审批 → 执行 → 总结"><br><br>
   <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal 演示:自然语言任务 → 分析 → 审批 → 执行 → 总结">
 </div>
 
-上面这张动图里发生了什么:
+两张动图是同一条流程——第一张在纯终端(`ot`)里,第二张在浏览器
+(`ot web`)里。里面发生了什么:
 
 1. 先敲一条普通命令:`ls /tmp/ot-demo`——在你的真 shell 里原样执行,
    带彩色输出;
@@ -28,7 +30,8 @@ Xshell 可以省了。
 
 > ⚠️ **Beta 阶段**:OpenTerminal 会在真实机器上执行真实命令——包括生产
 > 服务器。所有改动性命令都要经你审批(见[安全模型](#安全模型)),但点
-> 「执行」之前,还是请看一眼它要干什么。
+> 「执行」之前,还是请看一眼它要干什么。安全类漏洞披露见
+> [SECURITY.md](SECURITY.md)。
 
 ## 你为什么会喜欢它
 
@@ -42,6 +45,59 @@ Xshell 可以省了。
   vim/top/tmux 这类全屏程序原生内联——管线就是真终端直通,无需任何登记。
 - **两种打开方式。** 单管线终端(`ot`),或者 `ot web`——浏览器里的服务器
   侧栏 + 多 tab 终端,底层是同一套核心。
+
+## 功能特性
+
+**自然语言任务**
+
+- 每个任务都走 流式**思考 → 分析 → 审批 → 执行 → 总结**;总结里的
+  markdown 表格直接由真实命令输出汇总而成
+- 命令和人话共用一个输入行——`!` 强制命令、`?` 强制任务;
+  Ctrl+C 中断正在跑的任务
+- 斜杠命令:`/target` 切主机 · `/system` 手动方言 · `/clear` 新任务 ·
+  `/model` 查看模型 · `/exit` 退出
+- 有界自纠:同一失败最多重试一次,工具调用轮次有预算上限
+
+**Shell 与系统**
+
+- 会话持久——`cd`、环境变量、venv 跨任务保留
+- 全屏程序(vim / top / tmux)经真 PTY 直通原生内联
+- 发行版方言自动探测:Ubuntu/Debian→apt、CentOS 7→yum、
+  Rocky/Fedora→dnf、Alpine→apk、Arch→pacman、macOS→brew,
+  可用 `/system` 手动覆盖
+- 本机 shell 支持 macOS 与 Linux(PTY)、Windows(ConPTY + PowerShell)
+
+**SSH 与连接**
+
+- 主机来自 `~/.ssh/config`、临时 `user@host:port`,或记住的连接
+- 密码与密钥认证;密码存系统凭据库,不落明文文件
+- 主机密钥 TOFU 确认;每 target 的历史在重连时灌回 shell
+
+**安全**——详见[安全模型](#安全模型)
+
+- 三级命令策略(auto / approve / deny)在 Agent 中间件层强制,
+  另支持精确匹配的自定义规则(`auto_extra` / `approve_extra` / `deny_extra`)
+- 每条输入、命令、审批、总结都落 JSONL 会话记录
+  (`~/.openterminal/sessions/`)
+
+**Web UI**(`ot web`)
+
+- 服务器侧栏 + 多 tab 终端;每个 tab 可在 Agent 视图与纯 Shell 视图切换
+- 密码、主机密钥用浏览器弹窗输入;可选局域网访问,绑定非本机地址
+  必须带 token
+
+**无头 / 脚本**
+
+- `ot exec -t <目标> -c "<命令>" --output json`——一次调用跑一条
+  策略闸门把关的命令,输出与退出码机器可读
+  (`APPROVAL_REQUIRED` / `DENIED` / `HOST_KEY_UNKNOWN`),
+  可放心接入 cron 或 CI
+- `ot list targets --output json`
+
+**模型网关**
+
+- 任意 Anthropic 兼容或 OpenAI 兼容网关——协议、base URL、模型、
+  key 环境变量均可配置
 
 ## 安装
 
@@ -177,6 +233,14 @@ tab 想开几个开几个,Agent 视图和纯 Shell 视图随意切换。密码�
 
 **局域网访问**:`ot web --host 0.0.0.0 --token <TOKEN>`——绑定非本机地址
 必须带 token。配置:`config.toml` 的 `[web] host/port/token`。
+
+**进脚本**:`ot exec` 对指定目标跑一条命令,同样过策略闸门,并说 JSON——
+只读命令直接执行;需审批的命令不执行,以退出码 `APPROVAL_REQUIRED`(67)
+返回;被策略拒绝的以 `DENIED`(66)返回,自动化可以按码处置而不是瞎猜:
+
+```sh
+ot exec -t prod-web -c "df -h /" --output json
+```
 
 ## 安全模型
 
