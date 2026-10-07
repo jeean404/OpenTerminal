@@ -28,6 +28,8 @@ from dataclasses import dataclass, replace
 
 _OT_DBG = bool(os.environ.get("OT_WEB_DEBUG"))
 
+_OFFLINE_CAP = 500   # 断线期缓存的 JSON 控制帧上限（防长期断线涨内存）
+
 
 def _dbg(*a) -> None:
     """OT_WEB_DEBUG=1 时打印交互式状态机轨迹（排障用，默认静默）。"""
@@ -225,6 +227,10 @@ CMDSET_ECHO_TIMEOUT = 2.0     # 等命令回显封顶(秒)
 CMDSET_QUIET = 0.3            # 输出静默判定窗口(秒)
 CMDSET_PROMPT_TIMEOUT = 10.0  # 等交互提示封顶(秒);超时跳过该应答行
 CMDSET_RESUME_QUIET = 1.2     # 暂停等输入:提示消失后再静默此时长才继续(秒)
+# 静默≠跑完:ssh/sudo 类握手期会静默数秒才吐交互提示(password:),静默判定把
+# 这段空档当「命令跑完」,下一条命令就抢跑进它的 stdin。密码类命令静默后按
+# CMDSET_PROMPT_TIMEOUT 继续观察:见交互提示即停下等应答、见新 shell 提示符
+# 即判定跑完,两者都到才放行。非密码类命令不观察(不引入额外延迟)。
 _CMDSET_PROMPT_RE = re.compile(
     r"(password|passphrase|密码|口令)\s*[:：]\s*$|\[sudo\]|yes/no|verification code",
     re.IGNORECASE)
@@ -234,6 +240,9 @@ _CMDSET_PROMPT_RE = re.compile(
 _CMDSET_SECRET_RE = re.compile(
     r"(password|passphrase|密码|口令)\s*[:：]\s*$|\[sudo\]", re.IGNORECASE)
 _CMDSET_CONFIRM_RE = re.compile(r"yes/no|verification code", re.IGNORECASE)
+# 新 shell 提示符 = 命令真跑完(含嵌套 ssh/su - 登录后的新提示符)。
+# 密码类提示不以 $/#/%/> 结尾,故与 _CMDSET_PROMPT_RE 互斥,不会互相误判。
+_CMDSET_DONE_RE = re.compile(r"[$#%>]\s*$")
 
 
 class PipelineCore:
@@ -275,11 +284,15 @@ class PipelineCore:
         # 未决审批记账：审批帧只发一次，WS 断隙/刷新即丢，core 会永久等决策
         # （= 任务假死，真机 2026-10-06）；attach 重挂时据此补发
         self._pending_approval: ServerMsg | None = None
+        # 断线期攒下的 JSON 控制帧（终局/用量/状态…）：PTY 字节帧照旧丢，
+        # 控制帧丢了前端就永久收不到任务收尾（真机「AI 正在思考」不收）
+        self._offline: list = []
         self._boundary_ack = asyncio.Event()  # 前端阶段结账完成（ai_boundary 门闩）
         self._pad_task: asyncio.Task | None = None  # 在途 pad 打字任务（门闩排序用）
         self._task: asyncio.Task | None = None
         self._target: TargetConfig | None = None   # _connect 时持有(命令集等读取)
         self._cs_tail: bytearray | None = None     # 命令集监听的输出滚动缓冲
+        self._cs_pw_pending = False   # 上一条命令是密码类:发下条前先确认未停在提示
         self._cs_task: asyncio.Task | None = None
         self._cs_resume = asyncio.Event()          # 「继续」按钮强制放行
         self._target_host = ""       # _connect 时填充
@@ -321,6 +334,7 @@ class PipelineCore:
         # Permission denied）；hold 项 ("raw", bytes) / ("submit", text, dirty)
         self._pw_verifying = False
         self._pw_verify_at = 0.0
+        self._pw_verify_timer = None   # 验证窗口强制到期(不依赖输出驱动)
         self._pw_hold: list[tuple] = []
         self._pw_hold_timer = None     # hold 释放防抖任务（_PW_HOLD_RELEASE）
         self._pw_at_end = False        # 上一 pump 块尾窗是否以密码提示符结尾
@@ -451,6 +465,7 @@ class PipelineCore:
             self._task = asyncio.create_task(self._run())
         if self._hb is None:
             self._hb = asyncio.create_task(self._heartbeat())
+        self._flush_offline()
         if self._pending_approval is not None:
             # 重连/刷新重挂：补发未决审批（首挂时必为 None，不会重复投）
             self._emit_nowait(self._pending_approval)
@@ -464,6 +479,25 @@ class PipelineCore:
             if self._closed:
                 break
             self._emit_nowait(ServerMsg(type="ping"))
+
+    def _flush_offline(self) -> None:
+        """补发断线期攒下的控制帧：插到 outbox 队头，保证先于重挂后新帧。
+
+        全程无 await：drain + 回填在同一事件循环步内完成，不会与并发生产者
+        交错乱序。"""
+        if not self._offline:
+            return
+        buf, self._offline = self._offline, []
+        pending = []
+        while True:
+            try:
+                pending.append(self._outbox.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for item in buf:
+            self._outbox.put_nowait(item)
+        for item in pending:
+            self._outbox.put_nowait(item)
 
     def detach(self, sink) -> None:
         if self._sink is sink:
@@ -493,7 +527,7 @@ class PipelineCore:
                 # 模态取消/点遮罩：用户改终端手输密码，立即退出验证窗口
                 # （否则手输的密码被 hold 到 _PW_VERIFY_TIMEOUT 才放行）；
                 # 已 hold 的抢跑输入不丢，仍等 auth 结果输出后依序释放
-                self._pw_verifying = False
+                self._end_pw_verify()
                 self._pw_modal_open = False
             elif msg.auth_kind == "host_key":
                 await self._hks.put(msg.text == "true")
@@ -685,7 +719,7 @@ class PipelineCore:
         if self._pw_verifying and (
                 not at_end
                 or time.monotonic() - self._pw_verify_at > _PW_VERIFY_TIMEOUT):
-            self._pw_verifying = False   # auth 结果已出（或超时）：不再 hold 新输入
+            self._end_pw_verify()   # auth 结果已出（或超时）：不再 hold 新输入
             if not at_end and self._innermost_ssh_frame() is not None:
                 # 嵌套 ssh 登录成功：后台主动注入 hook——首条自然语言到达时
                 # hook 已在位走健康路径，免当场探测+分片注入的秒级代价
@@ -710,6 +744,40 @@ class PipelineCore:
         self._pw_prompt_seen = False
         self._pw_verifying = True
         self._pw_verify_at = time.monotonic()
+        self._schedule_pw_verify_expiry()
+
+    def _end_pw_verify(self) -> None:
+        """退出验证窗口并撤销强制到期定时器。"""
+        self._pw_verifying = False
+        t = getattr(self, "_pw_verify_timer", None)
+        if t is not None:
+            t.cancel()
+            self._pw_verify_timer = None
+
+    def _schedule_pw_verify_expiry(self) -> None:
+        t = getattr(self, "_pw_verify_timer", None)
+        if t is not None:
+            t.cancel()
+        self._pw_verify_timer = asyncio.get_running_loop().create_task(
+            self._pw_verify_expiry())
+
+    async def _pw_verify_expiry(self) -> None:
+        """验证窗口强制到期：输出驱动的超时判定在 shell 无输出时永远跑不到
+        （_detect_password_prompt 只在 pump 收到字节时被调用），验证窗口就此
+        永久开启、前端输入被永久 hold（真机「终端命令行无法输入任何文字」）。
+        这里用独立定时器兜底：到点即放行，已 hold 的输入依序释放。"""
+        try:
+            await asyncio.sleep(_PW_VERIFY_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._pw_verify_timer = None
+        if not self._pw_verifying:
+            return
+        self._pw_verifying = False
+        _dbg("pw verify expiry -> release hold", len(self._pw_hold))
+        if self._pw_hold:
+            self._schedule_pw_hold_release()
 
     def _schedule_pw_hold_release(self) -> None:
         if self._pw_hold_timer is None:
@@ -1132,6 +1200,12 @@ class PipelineCore:
             self._ai_task.cancel()
         if self._cs_task is not None:
             self._cs_task.cancel()
+        # 密码 hold/验证窗口的定时器一并撤掉：不然会话关了它们还空转到点
+        self._cancel_pw_hold_release()
+        t = getattr(self, "_pw_verify_timer", None)
+        if t is not None:
+            t.cancel()
+            self._pw_verify_timer = None
         # 解阻塞挂起的认证/审批等待（ask_* 收到 None 视为已关闭）
         for q in (self._pws, self._hks, self._decisions):
             q.put_nowait(None)
@@ -1208,18 +1282,36 @@ class PipelineCore:
         raise NotImplementedError
 
     # --- 输出：全部经 outbox 串行（保持顺序）---
+    def _buffer_offline(self, kind, payload) -> None:
+        """断线隙的 JSON 控制帧攒住等重挂补发。
+
+        字节帧丢——重放会与前端已有缓冲重复画屏。控制帧（final/审批收尾/
+        closed…）丢了前端就永远收不到收束，真机表现为「AI 正在思考」不收。"""
+        if kind == "bytes":
+            return
+        self._offline.append((kind, payload))
+        if len(self._offline) > _OFFLINE_CAP:
+            del self._offline[:-_OFFLINE_CAP]
+
     async def _sender_loop(self) -> None:
         while True:
             kind, payload = await self._outbox.get()
             sink = self._sink
-            if sink is not None:
+            if sink is None:
+                self._buffer_offline(kind, payload)
+            else:
                 try:
                     if kind == "bytes":
                         await sink.send_bytes(payload)
                     else:
                         await sink.send_text(payload)
                 except Exception:
-                    continue
+                    # sink 已死但 detach 尚未回来（网络刚断的那几毫秒）：帧必须
+                    # 攒住，否则断线瞬间发出的收束帧就永久丢了（旧实现 continue
+                    # 直接丢弃）。顺手摘掉死 sink，后续帧不再逐条撞异常。
+                    if self._sink is sink:
+                        self._sink = None
+                    self._buffer_offline(kind, payload)
             # 关闭后把剩余消息发完（含 closed）再退出，避免协程泄漏。
             # 只看 _closed 不够：close 会先置 _closed 再入队 closed，若此刻
             # backlog 未排空，sender 会在 closed 入队前按 empty 提前退出
@@ -1435,6 +1527,9 @@ class PipelineCore:
         自动继续;前端「继续」按钮(cmdset_resume)随时强制放行。输错
         密码导致提示重现时保持暂停。
         """
+        if self._cs_pw_pending:
+            await self._cs_watch_prompt()
+            self._cs_pw_pending = False
         if not _CMDSET_PROMPT_RE.search(self._cs_lastline()):
             return
         self._cs_resume.clear()
@@ -1475,6 +1570,9 @@ class PipelineCore:
                 else:
                     await self._cs_pause_for_input()
                     await self._cs_command(line.strip())
+            # 末条命令可能停在交互提示上(如最后一条是 ssh):先按待输入暂停,
+            # 否则状态栏报「完成」而终端还卡在密码提示
+            await self._cs_pause_for_input()
             await self.emit_msg(ServerMsg(
                 type="cmdset", state="done", index=total, total=total))
         except asyncio.CancelledError:
@@ -1483,6 +1581,7 @@ class PipelineCore:
             return  # 弹窗等待期间连接关闭:静默退出,close 流程已接管
         finally:
             self._cs_tail = None   # runner 退出即停缓冲(pump 钩子归零)
+            self._cs_pw_pending = False
 
     async def _cs_command(self, cmd: str) -> None:
         """命令行:写入 PTY,等回显再等输出静默(自回显起封顶 ECHO_TIMEOUT)。
@@ -1502,7 +1601,31 @@ class PipelineCore:
                 last = len(self._cs_tail)
                 await asyncio.sleep(CMDSET_QUIET)   # 有新字节:再等一个静默窗
             else:
-                break                               # 静默期满:命令大概率跑完
+                break                               # 静默期满:命令可能跑完
+        # 静默≠跑完:记下这条是不是密码类,交给 _cs_pause_for_input 在发下一条
+        # 前确认它没停在交互提示上(见 _cs_watch_prompt)
+        self._cs_pw_pending = _needs_password_prompt(cmd)
+
+    async def _cs_watch_prompt(self) -> None:
+        """上一条是密码类命令时,发下一条前先确认它没停在交互提示上。
+
+        ssh/sudo 类握手期会静默数秒才吐 password:,静默判定把这段空档当成
+        「命令跑完」,下一条命令就抢跑进它的 stdin 被当下一条密码吃掉(真机:
+        ssh 该阻塞等密码,sudo su - / cd /root 却已回显,登录后又排队执行)。
+
+        见交互提示即返回(交 _cs_pause_for_input 暂停等应答);见新 shell 提示符
+        = 命令已结束(含 ssh/su - 登录后的新提示符)立即返回,零额外延迟。
+        """
+        if not self._cs_tail:
+            return                        # 无输出证据可判:不做无谓等待
+        deadline = time.monotonic() + CMDSET_PROMPT_TIMEOUT
+        while time.monotonic() < deadline:
+            line = self._cs_lastline()
+            if _CMDSET_PROMPT_RE.search(line):
+                return                    # 交互提示在前台:停下等应答
+            if _CMDSET_DONE_RE.search(line):
+                return                    # 新 shell 提示符:命令已结束
+            await asyncio.sleep(0.05)
 
     async def _cs_answer(self, ref: str) -> None:
         """应答行:等密码类提示出现后自动输入;10s 等不到则跳过(容错)。
@@ -1538,6 +1661,7 @@ class PipelineCore:
                     return
                 if pat.search(self._cs_text()):
                     await self.session.send_raw((answer + "\r").encode())
+                    self._cs_pw_pending = False   # 已接管该提示
                     await asyncio.sleep(CMDSET_QUIET)   # 密码不回显,静默即稳
                     return
                 await asyncio.sleep(0.05)

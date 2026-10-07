@@ -184,12 +184,15 @@ class Session {
     this._holdDepth = 0;        // 字节扣流嵌套深度（welcome + card 临界区）
     this._holdBuf = null;       // 扣住的 PTY 字节队列
     this._welcomeHold = null;   // 连接横幅扣留态（先横幅后提示符，见 _holdWelcome）
+    this._welcomeTimer = null;  // 扣留到点自放行的定时器（见 _armWelcomeDeadline）
     this._taskActive = false;   // 任务进行中（task_start → final/denied/limit/error）
     this._phaseLive = false;    // 有活分析卡在流底（task_start/新段 token → ai_collapse/ai_card）
     this._summaryShown = false; // 本轮总结卡已挂（挂出即不再显示思考徽标）
     this._approvalOpen = false; // 有未决策审批卡（球在用户侧，不显思考徽标）
     this._approvalCmd = null;   // 未决审批的命令（补发去重：同命令不叠第二张卡）
     this._approvalGraceMs = 3000; // 审批卡可点性看门狗：fund 未到限内转模态兜底
+    this._approvalResolved = false; // 本令决策已发：看门狗/模态不得再发第二发
+    this._runningTool = "";      // 在跑的工具（徽标说人话：执行中: docker ps）
     this._timer = null;         // 任务计时 setInterval id
     this._taskStart = 0;        // 最近一次任务开始时间戳
     this._csTimer = 0;          // cmdset 完成提示的消隐定时器
@@ -472,14 +475,17 @@ class Session {
     };
   }
 
-  // ws 断线自动重连：0.5s 起指数退避、上限 8s，最多 8 次（覆盖约 50s 的
-  // 网络抖动；服务端 worker 宽限期 5 分钟，期内回连 PTY 无缝续用）
+  // ws 断线自动重连：0.5s 起指数退避、封顶 10s，**不限次数**。旧实现 8 次
+  // （约 50s）后彻底停手，页面就此冻结在「连接已关闭」——终端打不进字、
+  // 「AI 正在思考」徽标永远收不到收尾（真机截图二）。服务端 worker 宽限期
+  // 5 分钟，网络/服务抖动回来即自动续上；4401/4404 仍在 onclose 判死不重试。
   _scheduleWsRetry() {
     if (this._wsRetryT) return;
-    if ((this._wsRetries || 0) >= 8) return;
     this._everRetried = true;
-    const delay = Math.min(8000, 500 * 2 ** (this._wsRetries || 0));
+    const delay = Math.min(10000, 500 * 2 ** (this._wsRetries || 0));
     this._wsRetries = (this._wsRetries || 0) + 1;
+    if (this._wsRetries === 1 || this._wsRetries % 8 === 0)
+      console.warn(`[ot] 第 ${this._wsRetries} 次重连，${delay}ms 后`);
     this._wsRetryT = setTimeout(() => {
       this._wsRetryT = null;
       if (!this._dead) this.connectWS();
@@ -583,25 +589,43 @@ class Session {
         .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
       if (plain.includes(this._welcomeNeed)) {
         this._releaseWelcome();
-        return false;
+        return true;   // 缓冲里已含本块 u8，别再写一遍
       }
     }
     if (performance.now() - h.at > 1500) {
       this._releaseWelcome();
-      return false;
+      return true;     // 同上
     }
     return true;
   }
 
+  // 扣留期到点自放行：_holdWelcome 只在新字节到达时被调用，而提示符之后
+  // 本来就没有输出——静默期就永远走不到超时判定，横幅扣着整屏永不落字、
+  // 打字也不回显（真机：本地目标终端全空白、「无法输入任何文字」）。与密码
+  // 验证窗口的 _pw_verify_expiry 同类：超时不能靠输出驱动。
+  _armWelcomeDeadline() {
+    if (this._welcomeTimer) clearTimeout(this._welcomeTimer);
+    this._welcomeTimer = setTimeout(() => {
+      this._welcomeTimer = null;
+      if (this._welcomeHold) {
+        console.warn("[ot] 欢迎横幅扣留到点，强制放行");
+        this._releaseWelcome();
+      }
+    }, 1600);
+  }
+
   _releaseWelcome() {
+    if (this._welcomeTimer) { clearTimeout(this._welcomeTimer); this._welcomeTimer = null; }
     const h = this._welcomeHold;
     this._welcomeHold = null;
     if (this._dead || !h) return;
     if (this._welcomeText) {
       this._writeTerm("\x1b[2m" + this._welcomeText + "\x1b[0m\r\n");
     }
-    const tail = h.cleared ? h.raw.subarray(h.cleared) : h.raw;
-    if (tail.length) this._writeTerm(tail);
+    // 静默期定时器放行时 h.raw 可能还是 null（一块字节都没到）——
+    // 这里不判就会在 setTimeout 回调里抛 uncaught
+    const tail = !h.raw ? null : (h.cleared ? h.raw.subarray(h.cleared) : h.raw);
+    if (tail && tail.length) this._writeTerm(tail);
   }
 
   // 键盘字节注入（等价于用户在终端里敲入）：审批卡「开启新会话」等场景用
@@ -778,6 +802,7 @@ class Session {
             this.setStatus(this.status, stateText + " " + (command || ""));
             this._approvalOpen = false;   // 决策完成：思考徽标接管执行空隙期
             this._approvalCmd = null;
+            this._approvalResolved = true;   // 卡内快捷键路径也算已决策
             this._refreshThink();
             this._releaseDecision(decision, cardId);
             this.focusCursor();   // 卡内 mousedown 不冒泡：焦点显式还给终端
@@ -1769,6 +1794,8 @@ class Session {
     this._phaseLive = false;
     this._summaryShown = false;
     this._approvalOpen = false;
+    this._approvalResolved = false;
+    this._runningTool = "";
     this._refreshThink();
   }
 
@@ -1944,7 +1971,12 @@ class Session {
   // 不是流式分析卡，之后的模型输出由 _onAiToken/_onAiThink 开新分析卡。
   _onAiTool(ev) {
     const id = "tool" + ev.id;
+    // 徽标同步说人话：模型在跑哪条命令。旧实现全程「AI 正在思考」，
+    // 长命令/多轮排查时用户看到的就是假死（真机 bug2 的观感根因之一）。
     if (ev.phase === "start") {
+      this._runningTool = (ev.name === "execute"
+        ? String(ev.args || "") : String(ev.name || "")).trim();
+      this._refreshThink();
       this._cardReady = this._cardReady.then(() => this._mountCard(id, "phase")
         .then(slot => {
           if (!slot) return null;
@@ -1953,6 +1985,8 @@ class Session {
           }));
         }));
     } else {
+      this._runningTool = "";
+      this._refreshThink();
       this._cardReady = this._cardReady.then(() => this._ensureFeed())
         .then(f => f && f.handle({kind: "tool_end", id, failed: !!ev.failed}));
     }
@@ -2009,6 +2043,8 @@ class Session {
     this._taskActive = false;
     this._approvalOpen = false;   // 任务收束：未决审批窗（若有）一并释放
     this._approvalCmd = null;
+    this._approvalResolved = false;
+    this._runningTool = "";
     this._endTimer();
     this._setStopVisible(false);
     this._refreshThink();
@@ -2064,6 +2100,8 @@ class Session {
     this._taskActive = false;
     this._approvalOpen = false;   // 中止即收束：审批窗释放，徽标归位
     this._approvalCmd = null;
+    this._approvalResolved = false;
+    this._runningTool = "";
     this._endTimer();
     this._setStopVisible(false);
     this._refreshThink();
@@ -2095,14 +2133,20 @@ class Session {
   // 落点：任务分区仍在流底就复用同区（卡片下紧跟提示符，阿里 图二），
   // 否则（用户已跑过命令）开新分区。
   showApproval(command, reasons, host, risk) {
+    // 补发去重（WS 重连/刷新重挂时 attach 会再投一次未决审批）：同命令
+    // 的未决卡/模态已在，不叠第二张（core 的 _pending_approval 只记一条）
+    if (this._approvalOpen && this._approvalCmd === command) return;
+    // 未决态必须同步记账，不能等卡片层落定：_ensureFeed() 一卡（脚本加载
+    // 慢、promise 不落），徽标就停在「AI 正在思考」、审批 UI 一张不出，而
+    // core 侧在干等决策——真机看就是任务卡死（bug2 截图）。球此刻已在用户侧。
+    this._approvalOpen = true;
+    this._approvalCmd = command;
+    this._approvalResolved = false;   // 新一令：上一令的已决策态不带到本令
+    this._refreshThink();
     this._ensureFeed().then(async feed => {
+      // 慢到的卡片层：决策已下 / 命令已换就别再挂旧卡
+      if (this._dead || this._approvalCmd !== command) return;
       if (!feed) return this._approvalModal(command, reasons);
-      // 补发去重（WS 重连/刷新重挂时 attach 会再投一次未决审批）：同命令
-      // 的未决卡/模态已在，不叠第二张（core 的 _pending_approval 只记一条）
-      if (this._approvalOpen && this._approvalCmd === command) return;
-      this._approvalOpen = true;   // 球在用户侧：思考徽标换「等待审批」文案
-      this._approvalCmd = command;
-      this._refreshThink();
       // 审批到达＝本模型段已结束：先冲刷 token 缓冲、把活分析卡定格并结账垫满
       // 最终高度，再锚审批卡。否则分析卡在审批锚定后继续长高，而 pad 只能追加
       // 在流底、插不进流中——卡底被审批卡/随后输出切掉（真机「审批头压分析卡
@@ -2143,8 +2187,23 @@ class Session {
       while ((!slot.mounted || slot.pinnedRows != null) &&
              Date.now() - t0 < this._approvalGraceMs) await this._sleep(100);
       if (!slot.mounted || slot.pinnedRows != null) {
+        // grace 期内用户可能已按 Ctrl+Enter 放行：再转模态就是给已决策的
+        // 命令再开一扇「批准」，点下去第二发决策会落到 core 下一次
+        // ask_decision 头上＝幽灵批准（真机 B1：卡被夹紧→Ctrl+Enter 放行
+        // →3s 后模态又冒出来，再点一次就双决策）。
+        if (this._dead || this._approvalResolved ||
+            this._approvalCmd !== command) return;
         feed.handle({kind: "approval_void", id: cardId});
         this._discardSlot(slot);
+        this._approvalModal(command, reasons);
+      }
+    }).catch(e => {
+      // 卡片层中途抛错也不能让审批静默死掉——core 在等决策，任务会假死。
+      // 转模态兜底，决策永远有可点入口；已有模态就不叠第二张。
+      console.error("[ot] 审批卡渲染失败，转模态兜底:", e);
+      if (this._dead || this._approvalResolved ||
+          this._approvalCmd !== command) return;
+      if (!document.querySelector("#modal-root .modal")) {
         this._approvalModal(command, reasons);
       }
     });
@@ -2155,13 +2214,26 @@ class Session {
   _approvalModal(command, reasons) {
     modalShell("审批：" + (command || ""),
       `<p>${esc(reasons || "")}</p>`,
-      [{label: "批准", primary: true, onClick: () => {
-          this.sendJson({type: "decision", decision: {type: "approve"}});
-        }},
-       {label: "拒绝", onClick: () => {
-          this.sendJson({type: "decision",
-                         decision: {type: "reject", message: "用户拒绝了该命令"}});
-        }}]);
+      [{label: "批准", primary: true,
+        onClick: () => this._sendDecision({type: "approve"}, command)},
+       {label: "拒绝",
+        onClick: () => this._sendDecision(
+          {type: "reject", message: "用户拒绝了该命令"}, command)}]);
+  }
+
+  // 决策单发出口：卡内 Ctrl+Enter（feed onDecision）与模态按钮都会到，
+  // 只放一发。第二发决策会落到 core 下一次 ask_decision 头上，等于替用户
+  // 批准一条根本没看过的命令（真机 B1 的幽灵模态双决策）。
+  _sendDecision(decision, command) {
+    if (this._dead || this._approvalResolved) return false;
+    // 命令串对不上＝本令已决策或已被下一令顶掉
+    if (command != null && this._approvalCmd !== command) return false;
+    this._approvalResolved = true;
+    this._approvalOpen = false;
+    this._approvalCmd = null;
+    this._refreshThink();
+    this.sendJson({type: "decision", decision});
+    return true;
   }
 
   // 审批快捷键路由（终端保持焦点）：island 的 approval_key 返回是否消费，
@@ -2322,10 +2394,22 @@ class Session {
       // 等审批期间球在用户侧：徽标文案说实话（旧实现照转「AI 正在思考」，
       // 真机假死 25min 无人知晓在等决策）
       const tt = el.querySelector ? el.querySelector(".ttext") : null;
-      if (tt) tt.textContent = this._approvalOpen ? "等待审批" : "AI 正在思考";
-      el.title = this._approvalOpen
-        ? "命令等待你的决定（Ctrl+Enter 执行 / Ctrl+Backspace 拒绝）"
-        : "任务未结束：AI 正在分析或执行";
+      // 徽标三态说实话：等审批 > 在跑命令 > 在思考。长命令/多轮排查时
+      // 不能一路「AI 正在思考」——用户看到的就是假死（bug2 观感根因）。
+      let text = "AI 正在思考";
+      let title = "任务未结束：AI 正在分析或执行";
+      if (this._runningTool) {
+        const t = this._runningTool.length > 36
+          ? this._runningTool.slice(0, 36) + "…" : this._runningTool;
+        text = "执行中: " + t;
+        title = "正在执行: " + this._runningTool;
+      }
+      if (this._approvalOpen) {
+        text = "等待审批";
+        title = "命令等待你的决定（Ctrl+Enter 执行 / Ctrl+Backspace 拒绝）";
+      }
+      if (tt) tt.textContent = text;
+      el.title = title;
     }
     const bar = this.paneEl && this.paneEl.querySelector(".statusbar");
     if (bar) bar.classList.toggle("task-on", this._taskActive);
@@ -2379,6 +2463,7 @@ class Session {
           // 进入扣留态：PTY 字节扣到提示符落屏，先写横幅再重放（P0-3：
           // 此前 _welcomeHold 从未被赋值，横幅永不落屏、扣留机制全死）
           this._welcomeHold = {raw: null, cleared: 0, at: performance.now()};
+          this._armWelcomeDeadline();
         }
         this.setStatus(this.status, msg.text);
         break;

@@ -2015,3 +2015,129 @@ async def test_pending_approval_resends_on_reattach(monkeypatch):
             "决策落地后重挂不得再补发"
     finally:
         await w.close()
+
+
+# --- 断线隙控制帧补发 + 任务卡死兜底（真机 2026-10-07「AI 正在思考」卡死）---
+
+
+async def test_offline_control_frames_replay_on_reattach(monkeypatch):
+    """断线隙里的 JSON 控制帧不得丢：任务终局帧丢了，前端「AI 正在思考」
+    徽标永远收不到收尾（真机截图二 11m3s 卡死）。PTY 字节帧照旧丢——
+    重放会与前端已有缓冲重复画屏。"""
+    from openterminal.core import ServerMsg
+    w, sink1 = await _make_worker(monkeypatch)
+    try:
+        w.detach(sink1)
+        await w.emit_msg(ServerMsg(
+            type="event", event={"kind": "final", "text": "答案正文"}))
+        await w.emit_bytes(b"\x1b[31mred-only\x1b[0m")
+        await w.emit_msg(ServerMsg(type="status", text="断线期的状态"))
+        await asyncio.sleep(0.05)
+        assert not sink1.json(), "detach 后不应再投给旧 sink"
+
+        sink2 = FakeSink()
+        w.attach(sink2)
+        msgs = await _wait_json(sink2, lambda m: any(
+            x.get("type") == "event" and x.get("event", {}).get("kind") == "final"
+            for x in m) and any(x.get("type") == "status" for x in m))
+        finals = [x["event"]["text"] for x in msgs
+                  if x.get("type") == "event" and x.get("event", {}).get("kind") == "final"]
+        assert finals == ["答案正文"]
+        assert any(x.get("text") == "断线期的状态" for x in msgs), "控制帧按原序补发"
+        assert b"red-only" not in _sink_bytes(sink2), "PTY 字节帧不补发"
+    finally:
+        await w.close()
+
+
+async def test_offline_replay_is_not_repeated_on_next_attach(monkeypatch):
+    """补发一次即清空：再次重挂不得把旧终局帧再投一遍（避免重复画卡）。"""
+    from openterminal.core import ServerMsg
+    w, sink1 = await _make_worker(monkeypatch)
+    try:
+        w.detach(sink1)
+        await w.emit_msg(ServerMsg(
+            type="event", event={"kind": "final", "text": "只补一次"}))
+        await asyncio.sleep(0.05)
+        sink2 = FakeSink()
+        w.attach(sink2)
+        await _wait_json(sink2, lambda m: any(
+            x.get("event", {}).get("kind") == "final" for x in m))
+        w.detach(sink2)
+        sink3 = FakeSink()
+        w.attach(sink3)
+        await asyncio.sleep(0.15)
+        assert not any(x.get("event", {}).get("kind") == "final"
+                       for x in sink3.json()), "同帧不得重复补发"
+    finally:
+        await w.close()
+
+
+async def test_send_failure_buffers_control_frames(monkeypatch):
+    """sink 还挂着但发送抛错（网络刚断、detach 尚未回来）：控制帧不得丢。
+
+    旧实现 except: continue 直接丢帧——断线瞬间发出的 final 就永久没了，
+    前端徽标永远不收（真机「AI 正在思考」卡死）。"""
+    from openterminal.core import ServerMsg
+
+    class DeadSink:
+        async def send_bytes(self, data):
+            raise RuntimeError("ws dead")
+
+        async def send_text(self, text):
+            raise RuntimeError("ws dead")
+
+    w, sink1 = await _make_worker(monkeypatch)
+    try:
+        w._sink = DeadSink()          # 网络已断、detach 还没回调
+        await w.emit_msg(ServerMsg(
+            type="event", event={"kind": "final", "text": "断线瞬间的收束"}))
+        await asyncio.sleep(0.05)
+        assert w._sink is None, "死 sink 应被摘掉，后续帧直接进攒帧路径"
+        assert any(k == "json" and json.loads(p)["event"]["kind"] == "final"
+                   for k, p in w._offline), w._offline
+
+        sink2 = FakeSink()
+        w.attach(sink2)
+        msgs = await _wait_json(sink2, lambda m: any(
+            x.get("event", {}).get("kind") == "final" for x in m))
+        assert [x["event"]["text"] for x in msgs
+                if x.get("event", {}).get("kind") == "final"] == ["断线瞬间的收束"]
+    finally:
+        await w.close()
+
+
+class _HungAgent:
+    """永远不产出片段的 agent：模拟网关挂起/连接半死。"""
+
+    def astream(self, payload, cfg, stream_mode=None):
+        async def _gen():
+            await asyncio.Event().wait()
+            yield ("messages", (None, {}))   # pragma: no cover
+        return _gen()
+
+
+async def test_task_stall_emits_error_and_ends(monkeypatch):
+    """astream 无超时 → 任务永不收束 → 「AI 正在思考」永久不收（真机截图二）。
+    静默看门狗必须把任务收成 error 事件。"""
+    import openterminal.agent as amod
+    monkeypatch.setattr(amod, "AGENT_STALL_TIMEOUT", 0.25)
+    runner = amod.TaskRunner(_HungAgent(), "th-stall", max_tool_turns=10)
+    events = await asyncio.wait_for(runner.run("x"), timeout=5)
+    assert any(e.kind == "error" and "无响应" in e.text for e in events), events
+
+
+async def test_task_stall_not_triggered_while_tool_pending(monkeypatch):
+    """有在途工具＝命令真在跑（长构建合法）：短阈值不得误杀，只按工具阈值判。"""
+    import openterminal.agent as amod
+    monkeypatch.setattr(amod, "AGENT_STALL_TIMEOUT", 0.05)
+    monkeypatch.setattr(amod, "AGENT_TOOL_TIMEOUT", 5.0)
+    runner = amod.TaskRunner(_HungAgent(), "th-tool", max_tool_turns=10)
+    runner._pending_tools["t1"] = (1, "execute")   # 工具已开、结果没回
+    task = asyncio.create_task(runner.run("x"))
+    await asyncio.sleep(0.4)      # 远超 AGENT_STALL_TIMEOUT，但工具阈值未到
+    assert not task.done(), "在途工具期间不得按模型静默阈值中止"
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass

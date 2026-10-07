@@ -124,3 +124,103 @@ test("attach 补发去重：同命令未决期间二次 approval 不叠第二张
     s.handled.filter(e => e.kind === "approval").length, 1,
     "同命令补发不得叠第二张未决卡");
 });
+
+// 真机 2026-10-07 B1：审批卡被夹紧点不到，用户走 Ctrl+Enter 放行；3s 后看门狗
+// 仍按「点不到」转模态，模态再点一次就发第二发决策——落到 core 下一次
+// ask_decision 头上＝幽灵批准。看门狗转模态前必须认「本令已决策」。
+test("看门狗不得弹幽灵模态：grace 期内已下决策就不再转模态", async () => {
+  const slot = {mounted: false, pinnedRows: 1};
+  const {s} = makeApprovalSession(slot);
+  s.sent = [];
+  s.sendJson = m => s.sent.push(m);
+  s.showApproval("sc query com.docker.service", "r", "h", "high");
+  await settle(30);
+  assert.strictEqual(s._approvalResolved, false, "未决策前票是开的");
+  // grace 期内用户按 Ctrl+Enter：走单发出口放行
+  assert.strictEqual(s._sendDecision({type: "approve"},
+    "sc query com.docker.service"), true);
+  await settle(250);
+  assert.strictEqual(s.modals.length, 0,
+    "已决策后看门狗再转模态＝给已放行的命令再开一扇「批准」");
+  assert.ok(!s.handled.some(e => e.kind === "approval_void"),
+    "已决策不得再 void 终端卡");
+  assert.strictEqual(s.sent.length, 1, "决策只发一帧");
+});
+
+test("看门狗不接顶掉的旧令：命令换了就不给旧令弹模态", async () => {
+  const slot = {mounted: false, pinnedRows: 1};
+  const {s} = makeApprovalSession(slot);
+  s.sent = [];
+  s.sendJson = m => s.sent.push(m);
+  s.showApproval("rm -rf /tmp/old", "r", "h", "high");
+  await settle(30);
+  // 下一令顶掉旧令（core 侧已换 ask_decision）
+  s.showApproval("rm -rf /tmp/new", "r", "h", "high");
+  await settle(250);
+  assert.ok(!s.modals.includes("rm -rf /tmp/old"),
+    "旧令不得再弹模态（点下去的决策会发到下一令头上）");
+});
+
+test("_sendDecision 单发：同令第二发不落帧", async () => {
+  const {s} = makeApprovalSession({mounted: true, pinnedRows: null});
+  s.sent = [];
+  s.sendJson = m => s.sent.push(m);
+  s.showApproval("rm -rf /tmp/once", "r", "h", "high");
+  await settle(30);
+  assert.strictEqual(s._sendDecision({type: "approve"},
+    "rm -rf /tmp/once"), true);
+  assert.strictEqual(s._sendDecision({type: "approve"},
+    "rm -rf /tmp/once"), false, "第二发必须被吃掉");
+  assert.strictEqual(s.sent.length, 1);
+  assert.strictEqual(s._approvalOpen, false, "决策后徽标必须回「AI 正在思考」");
+});
+
+test("_sendDecision 不认错令：命令串对不上不发", async () => {
+  const {s} = makeApprovalSession({mounted: true, pinnedRows: null});
+  s.sent = [];
+  s.sendJson = m => s.sent.push(m);
+  s.showApproval("rm -rf /tmp/a", "r", "h", "high");
+  await settle(30);
+  assert.strictEqual(s._sendDecision({type: "approve"}, "rm -rf /tmp/b"), false);
+  assert.strictEqual(s.sent.length, 0, "错令的决策一帧都不许发");
+});
+
+// 徽标三态（真机 bug2 观感根因）：一路「AI 正在思考」时用户分不清「在跑命令」
+// 和「假死」。工具在跑就说命令，审批优先级最高。
+test("徽标三态：执行中说命令，审批优先", async () => {
+  const {s, els} = makeApprovalSession({mounted: true, pinnedRows: null});
+  s._cardReady = Promise.resolve();
+  s._runningTool = "";
+  s._taskActive = true;
+  s._refreshThink();
+  const badge = els.get("think-t1");
+  assert.strictEqual(badge._ttext.textContent, "AI 正在思考");
+
+  s._onAiTool({phase: "start", id: 1, name: "execute", args: "docker ps"});
+  assert.strictEqual(badge._ttext.textContent, "执行中: docker ps",
+    "在跑命令就得说命令，不能一路「AI 正在思考」");
+
+  s._approvalOpen = true;   // 审批压过执行中
+  s._refreshThink();
+  assert.strictEqual(badge._ttext.textContent, "等待审批");
+
+  s._approvalOpen = false;
+  s._onAiTool({phase: "end", id: 1, failed: false});
+  assert.strictEqual(badge._ttext.textContent, "AI 正在思考",
+    "工具收尾后回到思考态");
+});
+
+test("徽标：超长命令截断，title 保留全文", async () => {
+  const {s, els} = makeApprovalSession({mounted: true, pinnedRows: null});
+  s._cardReady = Promise.resolve();
+  s._runningTool = "";
+  s._taskActive = true;
+  const long = "Get-Process *docker* | Stop-Process -Force; Start-Sleep -s 3";
+  s._onAiTool({phase: "start", id: 2, name: "execute", args: long});
+  const badge = els.get("think-t1");
+  assert.ok(badge._ttext.textContent.length < long.length,
+    "徽标文案必须截断，否则状态栏被撑爆");
+  assert.ok(badge._ttext.textContent.endsWith("...") ||
+    badge._ttext.textContent.endsWith("…"), "截断要有省略号");
+  assert.strictEqual(badge.title, "正在执行: " + long, "title 保留全文");
+});

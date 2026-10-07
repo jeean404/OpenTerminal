@@ -59,7 +59,8 @@ test("横幅未落屏前 PTY 字节一律扣住不写终端", () => {
 test("提示符出现 → 先写横幅、再重放清屏之后的字节", () => {
   const s = makeSession();
   assert.strictEqual(s._holdWelcome(CLEAR), true);
-  assert.strictEqual(s._holdWelcome(PROMPT), false, "提示符出现即释放");
+  assert.strictEqual(s._holdWelcome(PROMPT), true,
+                     "提示符出现即释放，且当前块已被合并缓冲消费");
   // 横幅在最前，其后只有清屏之后的提示符字节（清屏序列本身被丢弃）
   assert.ok(s.writes[0].includes("已连接 1.2.3.4"), "第一笔必须是横幅");
   assert.strictEqual(
@@ -73,7 +74,7 @@ test("无清屏序列时全部字节原样重放", () => {
   const s = makeSession();
   const plain = new TextEncoder().encode("Last login: ...\r\n");
   assert.strictEqual(s._holdWelcome(plain), true);
-  assert.strictEqual(s._holdWelcome(PROMPT), false);
+  assert.strictEqual(s._holdWelcome(PROMPT), true);
   assert.ok(s.writes[0].includes("已连接"));
   assert.strictEqual(s.writes.slice(1).join(""), "Last login: ...\r\n[xiaojian@VM-0-11-centos ~]$ ");
 });
@@ -85,7 +86,7 @@ test("提示符对不上 → 1.5s 超时释放，横幅照写、字节不丢", (
   assert.strictEqual(s._holdWelcome(chunk), true);
   // performance 桩恒 0：at = -2000 即已超时
   s._welcomeHold.at = -2000;
-  assert.strictEqual(s._holdWelcome(new Uint8Array([0x41])), false);
+  assert.strictEqual(s._holdWelcome(new Uint8Array([0x41])), true);
   assert.ok(s.writes[0].includes("已连接"), "超时也先写横幅");
   assert.ok(s.writes.slice(1).join("").includes("weird shell output"),
             "字节不丢");
@@ -95,7 +96,7 @@ test("status 文案未到（1.5s 超时）→ 只重放字节、不写空横幅"
   const s = makeSession();
   s._welcomeText = "";
   s._welcomeHold.at = -2000;
-  assert.strictEqual(s._holdWelcome(PROMPT), false);
+  assert.strictEqual(s._holdWelcome(PROMPT), true);
   assert.strictEqual(s.writes.length, 1);
   assert.strictEqual(s.writes[0], "[xiaojian@VM-0-11-centos ~]$ ");
 });
@@ -138,10 +139,43 @@ test("产线初始化：ready(interactive) + status → 进入扣留态，提示
   assert.strictEqual(s._welcomeText, "已连接 1.2.3.4（CentOS Stream 9）。…");
 
   // 提示符字节到达 → 释放：横幅在最前，其后是提示符
-  assert.strictEqual(s._holdWelcome(PROMPT), false);
+  assert.strictEqual(s._holdWelcome(PROMPT), true);
   assert.ok(s.writes[0].includes("已连接 1.2.3.4"), "第一笔必须是横幅");
   assert.strictEqual(s.writes.slice(1).join(""),
                      "[xiaojian@VM-0-11-centos ~]$ ");
+});
+
+// 真机 bug2 的「无法输入任何文字」：提示符之后 PTY 静默，_holdWelcome 再也
+// 不被调用——输出驱动的 1.5s 超时永远走不到，横幅扣着整屏永不落字、打字
+// 不回显。到点必须由 _armWelcomeDeadline 的定时器自放行。
+test("PTY 静默期：扣留到点由定时器自放行、横幅落屏", async () => {
+  const s = makeSession();
+  s._welcomeHold = null;
+  s._awaitWelcome = false;
+  s._welcomeText = "";
+  s._welcomeNeed = "";
+  s.setStatus = () => {};
+  s.sendJson = () => {};
+  s._renderModelSelect = () => {};
+  s.setMode = () => {};
+  s.fit = () => {};
+  s.focusCursor = () => {};
+  s.tabId = "t1";
+  s.term = Object.assign(s.term, {cols: 80, rows: 24});
+
+  s.handleMsg({type: "ready", host: "1.2.3.4", distro: "X",
+               interactive: 1, prompt: "[u@h ~]$"});
+  s.handleMsg({type: "status", text: "已连接 1.2.3.4"});
+  assert.ok(s._welcomeHold, "status 建扣留态");
+  assert.strictEqual(s.writes.length, 0, "扣留期不落字");
+
+  // 关键：一块字节都不喂。旧实现超时只在 _holdWelcome 里判，静默期永远
+  // 走不到 → 整屏空白（真机「无法输入任何文字」）。
+  await new Promise(r => setTimeout(r, 1800));
+
+  assert.strictEqual(s._welcomeHold, null, "到点必须自放行");
+  assert.ok(s.writes.length > 0, "横幅必须落屏");
+  assert.ok(s.writes[0].includes("已连接 1.2.3.4"), "第一笔是横幅");
 });
 
 test("产线初始化：非交互 ready → 不等横幅，status 不建扣留态", () => {

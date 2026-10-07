@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -183,6 +185,16 @@ def _with_skills(backend: PtyShellBackend, middleware: list):
     return agent_backend
 
 
+# 任务卡死兜底（astream 自身无超时）：静默到点即中止任务并给前端 error 收尾，
+# 否则「AI 正在思考」永久不收。两档：无在途工具=模型挂起；有=工具没回。
+AGENT_STALL_TIMEOUT = 120.0   # 无在途工具的静默上限(秒)
+AGENT_TOOL_TIMEOUT = 1800.0   # 有在途工具的静默上限(秒)
+
+
+class _Stalled(Exception):
+    """流静默超时：转成 TaskEvent(error) 收尾，不外抛给 core。"""
+
+
 @dataclass
 class TaskEvent:
     kind: str
@@ -231,6 +243,7 @@ class TaskRunner:
         self.est_output_tokens = 0
         self._est_in: list[str] = []
         self._est_out: list[str] = []
+        self._last_progress = time.monotonic()   # 最近一次流片段(静默判据)
 
     def _add(self, events: list[TaskEvent], ev: TaskEvent) -> None:
         """live 事件：收集进返回列表的同时实时投递给展示层。"""
@@ -260,12 +273,36 @@ class TaskRunner:
         # 属于已废弃且被静默忽略的 kwarg（实测不会生效，图会跑到默认上限），
         # 必须写进 config 顶层键才生效；实测每轮模型+工具约耗 3 个 superstep。
         run_cfg = {**self.cfg, "recursion_limit": self.max_tool_turns * 2 + 4}
+        self._last_progress = time.monotonic()
+        q: asyncio.Queue = asyncio.Queue()
+
+        async def _pump_stream() -> None:
+            try:
+                async for mode, chunk in self.agent.astream(
+                        payload, run_cfg,
+                        stream_mode=["updates", "messages"]):
+                    self._last_progress = time.monotonic()
+                    await q.put(("item", mode, chunk))
+            except asyncio.CancelledError:
+                raise
+            except BaseException as e:  # noqa: BLE001 - 原样交回主循环再抛
+                q.put_nowait(("err", e, None))
+            else:
+                q.put_nowait(("end", None, None))
+
+        feeder = asyncio.create_task(_pump_stream())
         try:
-            stream = self.agent.astream(
-                payload, run_cfg,
-                stream_mode=["updates", "messages"],
-            )
-            async for mode, chunk in stream:
+            while True:
+                try:
+                    kind, a, b = await asyncio.wait_for(q.get(), 1.0)
+                except asyncio.TimeoutError:
+                    self._check_stall()
+                    continue
+                if kind == "end":
+                    break
+                if kind == "err":
+                    raise a
+                mode, chunk = a, b
                 if mode == "messages":
                     msg, meta = chunk
                     if isinstance(msg, AIMessage) and msg.content and \
@@ -291,6 +328,10 @@ class TaskRunner:
                     for node, val in (chunk or {}).items():
                         for m in val.get("messages", []) if isinstance(val, dict) else []:
                             await self._absorb(m, node, events)
+        except _Stalled as e:
+            self._flush_est()
+            self._add(events, TaskEvent("error", str(e)))
+            return events
         except GraphRecursionError:
             self._flush_est()
             self._add(events, TaskEvent(
@@ -299,6 +340,8 @@ class TaskRunner:
                 "请缩小目标或换一种问法。",
             ))
             return events
+        finally:
+            feeder.cancel()
         self._flush_est()
 
         state = await self.agent.aget_state(self.cfg)
@@ -314,6 +357,23 @@ class TaskRunner:
             if final:
                 events.append(TaskEvent("final", final))
         return events
+
+    def _check_stall(self) -> None:
+        """静默超时判定：到点抛 _Stalled，由 _drive 转 error 事件收尾。
+
+        无在途工具＝卡在模型调用（网关挂起/连接半死），短阈值即可判定；
+        有在途工具＝命令真在跑（长构建合法），给足工具阈值。"""
+        idle = time.monotonic() - self._last_progress
+        if self._pending_tools:
+            if idle > AGENT_TOOL_TIMEOUT:
+                raise _Stalled(
+                    f"工具执行超过 {int(AGENT_TOOL_TIMEOUT)} 秒无响应，任务已中止。"
+                    "可按 ⏹ 中断后缩小命令范围重试。")
+            return
+        if idle > AGENT_STALL_TIMEOUT:
+            raise _Stalled(
+                f"模型超过 {int(AGENT_STALL_TIMEOUT)} 秒无响应，任务已中止。"
+                "请稍后重试，或按 ⏹ 重新提问。")
 
     def _flush_est(self) -> None:
         """把本轮驱动攒下的双向文本一次计价（tiktoken 按整段切，边界准确）。"""
