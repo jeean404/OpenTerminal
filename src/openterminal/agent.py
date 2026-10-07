@@ -329,8 +329,9 @@ class TaskRunner:
             # 工具结果回灌模型上下文 = 下轮输入 token 的大头（命令输出）
             self._est_in.append(m.content if isinstance(m.content, str)
                                 else str(m.content))
-            # start/end 按 tool_call_id 配对：execute 不发（命令直写主终端，
-            # 展示走 ai_collapse/输出流），其余工具实时外送供前端挂工具卡
+            # start/end 按 tool_call_id 配对：execute 也发（远程目标上模型几乎
+            # 只走 execute，不发卡则全程无工具卡可见），命令本体展示仍走
+            # ai_collapse/输出流原生路径，卡片只做状态 Trail
             pending = self._pending_tools.pop(m.tool_call_id, None)
             if pending is not None:
                 self._add(events, TaskEvent(
@@ -342,6 +343,13 @@ class TaskRunner:
                     self._tool_calls += 1
                     self._add(events, TaskEvent(
                         "tool_call", command=tc["args"].get("command", "")
+                    ))
+                    self._tool_seq += 1
+                    self._pending_tools[tc["id"]] = (self._tool_seq, "execute")
+                    self._add(events, TaskEvent(
+                        "tool_start", name="execute",
+                        text=tc["args"].get("command", "")[:120],
+                        index=self._tool_seq,
                     ))
                 else:
                     self._tool_seq += 1

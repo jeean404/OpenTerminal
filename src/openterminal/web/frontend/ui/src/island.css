@@ -45,6 +45,14 @@
   line-height: 1.5;
   margin-bottom: 4px;
 }
+/* 卡内文字可选可复制：xterm.css 的 .xterm{user-select:none} 会继承进
+   decoration host，这里显式恢复；配合 app.js 的 mousedown 不冒泡（拖选不
+   启动终端选区）与 Cmd/Ctrl+C 有 DOM 选区时交还浏览器原生复制，成完整
+   复制链路（真机反馈 2026-10-07）。放在 .ahead 之前：卡头标签保持不可选 */
+.ot-card-host, .ot-card-host * {
+  user-select: text;
+  -webkit-user-select: text;
+}
 .ahead { cursor: pointer; user-select: none; }
 .afold {
   margin-left: auto;
