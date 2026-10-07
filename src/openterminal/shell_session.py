@@ -14,8 +14,12 @@ _BEGIN_RE = re.compile(rb"__OT_BEGIN__\r?\n")
 _END_RE = re.compile(rb"__OT_END__(-?\d+)__(.*)__\r?\n")
 _ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)")
 
+# 中文提示符（密码：/口令：）单独以 str 编码拼进 bytes 正则（bytes 字面量
+# 不能含非 ASCII）
 _PASSWORD_PROMPT_RE = re.compile(
-    rb"(\[sudo\] password for |'s password:|^password:)", re.IGNORECASE | re.MULTILINE
+    rb"(\[sudo\] password for |'s password:|\([^)\r\n]{1,80}\)\s*password:"
+    rb"|^password:|" + "密码[:：]|口令[:：]".encode() + rb")",
+    re.IGNORECASE | re.MULTILINE,
 )
 _PASSWORD_NEEDING_PREFIXES = {"sudo", "su", "ssh", "scp", "rsync"}
 

@@ -13,6 +13,7 @@ from openterminal.shell_integration import (
     injection_line,
     injection_lines,
     history_inject_line,
+    history_quiet_line,
     parse_probe,
     probe_command,
     strip_ansi,
@@ -161,7 +162,9 @@ def test_injection_line_posix_and_ps():
     chunks = injection_lines("bash", 3, "-d")
     assert all(c.endswith(b"\r") for c in chunks)
     assert all(len(c) < 1024 for c in chunks), "单片不得超 tty canonical 缓冲"
-    assert chunks[-1].decode().startswith("eval")
+    # 前导空格：静默窗口（history_quiet_line）内原生入史被整体跳过
+    assert all(c.startswith(b" ") for c in chunks)
+    assert chunks[-1].decode().lstrip().startswith("eval")
     b64 = "".join(
         c.decode().split("'")[1] for c in chunks[:-1])
     script = base64.b64decode(b64).decode()
@@ -171,7 +174,9 @@ def test_injection_line_posix_and_ps():
     line = injection_line("bash", 3, "-d")
     assert line == b"".join(chunks)
 
+    # PowerShell 无前导空格机制，维持原样
     line = injection_line("powershell", 1)
+    assert not line.startswith(b" ")
     b64 = line.decode().split("FromBase64String('")[1].split("'")[0]
     script = base64.b64decode(b64).decode()
     assert "__ot_i = 1" in script and "Set-PSReadLineKeyHandler" in script
@@ -309,16 +314,20 @@ def test_strip_ansi():
 def test_history_inject_line_bash():
     line = history_inject_line("bash", ["ls -la", "ls -la", "df -h"])
     assert line.endswith(b"\r")
+    assert line.startswith(b" ")               # 静默窗口前导空格
     b64 = line.decode().split("echo ")[1].split(" |")[0]
     # 连续重复去重
     assert base64.b64decode(b64).decode() == "ls -la\ndf -h"
     assert b"history -r" in line
-    assert b'history -d "$HISTCMD"' in line   # 注入行自身不入历史
+    # 自删 history -d "$HISTCMD" PTY 实测无效且有误删相邻条目风险，已移除
+    # （入史抑制改走静默窗口，残留清理由脚本尾部保洁兜底）
+    assert b"history -d" not in line
 
 
 def test_history_inject_line_zsh():
     line = history_inject_line("zsh", ["ls"])
     assert line.endswith(b"\r")
+    assert line.startswith(b" ")               # 静默窗口前导空格
     assert b"fc -R" in line
 
 
@@ -344,6 +353,7 @@ def test_is_internal_line_filters_injection_junk():
     assert is_internal_line('eval "$(echo "$__ot_inj" | base64 -d)"')
     assert is_internal_line("__ot_exec__ ls -la")
     assert is_internal_line("  __ot_pad 3")
+    assert is_internal_line('__ot_hc="$HISTCONTROL"; HISTCONTROL=ignorespace')
     assert not is_internal_line("df -h")
     assert not is_internal_line('echo __ot_inj 是变量名')
 
@@ -407,3 +417,123 @@ def test_bash_run_restores_readline_tty_mode():
     assert run.index('eval "$1"') < run.index('__ot_rl_tty')
     submit = _BASH_SCRIPT.split("__ot_submit() {", 1)[1].split("__ot_run(", 1)[0]
     assert "__ot_rl_tty=$(stty -g" in submit, "__ot_submit 缺裸模式快照"
+
+
+# --- ↑/↓ 历史召回 = 历史命令（用户命令 + AI 工具命令），不含自然语言 ---
+
+def test_ai_lines_stay_out_of_shell_history():
+    """自然语言不得写入 shell 历史（真机「按 ↑ 翻看的全是历史输入的自然语言，
+    而不是历史命令」根因）：三 shell 的 AI 分支只做 清缓冲+重绘+6337 上报。"""
+    bash = build_script("bash", 1)
+    ai = bash[bash.index('if [ "$kind" = AI ]'):]
+    assert "history -s" not in ai[:ai.index("return 0")]
+    zsh = build_script("zsh", 1)
+    tail = zsh[zsh.index('if [[ "$kind" == AI ]]; then'):]
+    assert "print -s" not in tail
+    ps = build_script("powershell", 1)
+    # AddToHistory 仅剩 2 处：! 强制命令分支 + EXEC 工具命令分支
+    assert ps.count("AddToHistory") == 2
+
+
+def test_exec_tool_commands_enter_shell_history():
+    """AI 工具命令（EXEC 注入）解码后写入 shell 历史：↑ 能召回工具命令；
+    base64 包装体记解码后的可读原文，多行体跳过（单行召回装不下换行）。"""
+    bash = build_script("bash", 1)
+    fn = bash[bash.index("__ot_exec_run() {"):]
+    fn = fn[:fn.index("\n}")]
+    assert 'history -s -- "$d"' in fn
+    assert '*"$nl"*) ;;' in fn, "多行体须跳过入史"
+    zsh = build_script("zsh", 1)
+    # 包装体解码成单行：BUFFER 换成原文走 accept-line 原生入史（同明文路径）；
+    # zsh 侧不得出现 print -s——widget 内无法抑制 accept-line 原生入史
+    # （localoptions histignorespace 在 widget 返回时已还原，PTY 实验证实），
+    # 再 print -s 就是双份历史
+    assert 'BUFFER="$show"; CURSOR=${#show}' in zsh
+    assert "print -s" not in zsh
+    ps = build_script("powershell", 1)
+    ex = ps[ps.index("$line.StartsWith('__ot_exec__ ')"):]
+    assert "AddToHistory($h)" in ex[:ex.index("__ot_exec_inline")]
+
+
+def test_internal_lines_stay_out_of_shell_history():
+    """注入管线内部行（__ot_inj 分片装配 / eval 解包）不入 shell 历史：
+    每任务重注入 ~8 条 base64 分片，进史后 ↑ 翻历史全是垃圾。
+    （bash 侧：入史是 hook 显式 history -s，可精确排除；zsh 侧入史是
+    accept-line 原生行为、widget 内无法抑制——见 EXEC 分支实验注释。）"""
+    bash = build_script("bash", 1)
+    # history -s 与青色重绘同属「非内部行」分支（内部行分支为空动作）
+    assert ('*) history -s -- "$line" 2>/dev/null; __ot_repaint "$exp" ;;'
+            in bash)
+
+
+# --- 注入垃圾不得污染 shell 历史（用户报障：↑ 召回的全是 __ot_inj 分片） ---
+
+def test_history_quiet_line_snapshot_and_enable():
+    """静默行：快照双 shell 的「前导空格跳过入史」开关后临时打开。
+    快照必须先于覆盖；本行自身以 __ot_hc= 开头（is_internal_line 成立，
+    hook 在位时按内部行静默处理、尾部保洁清除）。"""
+    line = history_quiet_line()
+    assert line.endswith(b"\r") and line.startswith(b"__ot_hc=")
+    s = line.decode()
+    assert '__ot_hc="$HISTCONTROL"' in s                 # bash 快照
+    assert '__ot_his="$options[hist_ignore_space]"' in s  # zsh 快照
+    assert s.index("__ot_hc=") < s.index("HISTCONTROL=ignorespace")
+    assert "setopt hist_ignore_space 2>/dev/null" in s
+    from openterminal.shell_integration import is_internal_line
+    assert is_internal_line(s)
+
+
+def test_script_tails_purge_legacy_history_junk():
+    """脚本尾部历史保洁：旧版本已落盘/已载入的注入垃圾（分片、探测包装行、
+    历史注入行、静默行）必须在安装时清掉——它们随 HISTFILE 每次会话重载，
+    ↑ 头几页全是看不懂的 base64（用户截图报障现场）。
+    bash：降序 history -d（升序错位）+ 非纯数字防御（多行命令续行无编号）；
+    zsh：无逐条删除 API——fc -W 快照→过滤→HISTSIZE=0 清空→fc -R 读回整体
+    重建（fc -R 追加语义，PTY 实验证实；不用 fc -p 推栈——栈上旧表的未落盘
+    条目会在退出追加保存时写回垃圾，且 fc -p 重置 HISTFILE/HISTSIZE/
+    SAVEHIST 为空/30/0，均 PTY 实测）。两侧都做 HISTFILE 落盘文件过滤重写。"""
+    bash = build_script("bash", 1)
+    assert bash.rstrip().endswith(": __ot_script_end")
+    assert 'history -d "$__ot_n"' in bash and "sort -rn" in bash
+    assert "*[!0-9]*) continue" in bash          # 续行防御
+    zsh = build_script("zsh", 1)
+    assert 'fc -W "$__ot_mh"' in zsh
+    assert 'HISTSIZE=0; HISTSIZE="$__ot_hs"' in zsh
+    assert 'fc -R "$__ot_cf"' in zsh
+    assert not any(l.strip().startswith("fc -p") for l in zsh.splitlines()), \
+        "禁用以 fc -p 推栈重建（注释提及不算）"
+    # 垃圾行判定模式：覆盖分片/探测/静默/历史注入/pad/EXEC 全部内部行形态
+    for s in (bash, zsh):
+        pat = s.split("__ot_jk='", 1)[1].split("'", 1)[0]
+        for frag in ("_ot_inj", "__ot_exec__", "__ot_pad ", "__ot_hc=",
+                     "__OT", r"\.ot_hist_"):
+            assert frag in pat, f"保洁模式缺 {frag!r}"
+        # HISTFILE 落盘文件过滤重写
+        assert 'grep -vE "$__ot_jk"' in s and 'cat "$__ot_cf"' in s
+
+
+def test_script_tails_restore_history_quiet_window():
+    """静默窗口必须按快照收口：用户原 HISTCONTROL / hist_ignore_space 还原；
+    快照缺失（静默行没跑过）不得动用户设置。"""
+    bash = build_script("bash", 1)
+    assert '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"' in bash
+    zsh = build_script("zsh", 1)
+    assert ('[[ -n "${__ot_his+x}" && "$__ot_his" != on ]]'
+            ' && unsetopt hist_ignore_space') in zsh.replace(" 2>/dev/null", "")
+
+
+def test_zsh_widget_suppresses_internal_line_history():
+    """zsh 重注入内部行的原生入史抑制：widget 内 accept-line 的入史发生在
+    widget 返回之后且绕过 zshaddhistory（PTY 实验证实）——唯一可靠组合是
+    全局 setopt hist_ignore_space + 前导空格 BUFFER，命令起跑后由
+    __ot_preexec（preexec_functions 注册）按静默行快照还原。"""
+    zsh = build_script("zsh", 1)
+    assert "__ot_preexec" in zsh
+    assert "preexec_functions=(__ot_preexec $preexec_functions)" in zsh
+    # 抑制分支是内部行 case 模式的第二处出现（第一处是 POSTEDIT 重绘豁免）
+    sup = zsh[zsh.rindex("'__ot_inj='*|'_ot_inj='*|'__ot_hc='*"):]
+    sup = sup[:sup.index("zle .accept-line")]
+    assert "setopt hist_ignore_space" in sup
+    assert '[[ "$BUFFER" == \' \'* ]] || BUFFER=" $BUFFER"' in sup
+    assert "__ot_sup=1" in sup
+

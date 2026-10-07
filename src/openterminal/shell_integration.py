@@ -14,7 +14,8 @@
    - ``ESC]133;D;<ec>;<i>;<cwd>BEL`` 执行结束（PROMPT_COMMAND / prompt() 发出）
 2. 私有行报告 ``ESC]6337;<i>;<KIND>;<line>BEL``（KIND ∈ CMD/AI/EXEC）：
    Enter hook 对每个非空行发出。CMD=原样原生执行；AI=自然语言被拦截（清空
-   缓冲、写入 shell 历史）；EXEC=worker 注入通道（``__ot_exec__ `` 前缀）。
+   缓冲、蓝色重绘，不写入 shell 历史——↑/↓ 只召回历史命令：用户命令 + AI
+   工具命令）；EXEC=worker 注入通道（``__ot_exec__ `` 前缀，解码后入史）。
 
 Enter hook 分类顺序：``__ot_exec__ `` 前缀→注入执行（任何模式下都处理）；
 ``__ot_off=1``→纯透传（Shell 模式=普通终端）；空行→原生；``?`` 前缀→AI；
@@ -166,18 +167,24 @@ __ot_run() {
   if [ "$__ot_off" != 1 ] && [ "$__ot_clear" = 1 ]; then printf '\033[H\033[2J'; fi
   return 0
 }
-# EXEC 注入体还原可读命令后青色重绘再执行：注入行经过 tty 回显，明文时是
-# "__ot_exec__ <命令>"、非打印字符时是 base64 包装——直接留在屏上就是内部
-# 语法残留。这里把包装解码回原命令，回显行重绘为 提示符+青色命令（§5.6），
+# EXEC 注入体还原可读命令后 入史+青色重绘 再执行：注入行经过 tty 回显，明文
+# 时是 "__ot_exec__ <命令>"、非打印字符时是 base64 包装——直接留在屏上就是
+# 内部语法残留。这里把包装解码回原命令，单行体写进 shell 历史（↑/↓ 召回的
+# 是历史命令：用户命令 + AI 工具命令），回显行重绘为 提示符+青色命令（§5.6），
 # 再交 __ot_run 执行原注入体。
 __ot_exec_run() {
-  local d="$1"
+  local d="$1" nl=$'\n'
   case "$1" in
     'eval "$(echo '*)
       d="${1#*echo }"; d="${d%% | base64*}"
       d="$(printf %s "$d" | base64 -d 2>/dev/null)" || d="$1" ;;
   esac
   [ -z "$d" ] && d="$1"
+  # 多行命令跳过：readline 历史条目按行召回，含 \n 的条目召回即残行
+  case "$d" in
+    *"$nl"*) ;;
+    *) history -s -- "$d" 2>/dev/null ;;
+  esac
   __ot_repaint "$d"
   __ot_run "$1"
 }
@@ -325,7 +332,8 @@ __ot_submit() {
   esac
   printf '\033]6337;%s;%s;%s\007' "$__ot_i" "$kind" "$t"
   if [ "$kind" = AI ]; then
-    history -s -- "$line" 2>/dev/null
+    # 自然语言不入 shell 历史：↑/↓ 翻看的是历史命令（用户命令走 CMD 路径
+    # 入史、AI 工具命令走 __ot_exec_run 入史），不是历史输入的自然语言
     READLINE_LINE=""; READLINE_POINT=0
     # 蓝色重绘（§5.6）：AI 行默认色回显清掉，提示符+原文按主题蓝重画
     # （Workbench 观感：用户自然语言蓝，工具/用户命令青）
@@ -334,13 +342,13 @@ __ot_submit() {
   fi
   exp=$(builtin history -p -- "$t" 2>/dev/null) || exp=$t
   [ -n "$exp" ] || exp=$t
-  history -s -- "$line" 2>/dev/null
   READLINE_LINE=""; READLINE_POINT=0
-  # 注入管线内部行（__ot_inj 分片装配 / eval 解包）不青色重绘：重绘会把
-  # base64 分片当命令回显画进主屏（内部语法不该出现在屏幕上）
+  # 注入管线内部行（__ot_inj 分片装配 / eval 解包）不青色重绘、不入史：
+  # 内部语法不该出现在屏幕上，也不该被 ↑ 召回（每次重注入 ~8 条 base64
+  # 分片进史，翻历史全是垃圾）
   case "$t" in
-    __ot_inj=*|_ot_inj=*|'eval "$(echo "$__ot_inj"'*) ;;
-    *) __ot_repaint "$exp" ;;
+    __ot_inj=*|_ot_inj=*|__ot_hc=*|'eval "$(echo "$__ot_inj"'*) ;;
+    *) history -s -- "$line" 2>/dev/null; __ot_repaint "$exp" ;;
   esac
   __ot_run "$exp"
   return 0
@@ -354,6 +362,29 @@ export __ot_i __ot_off __ot_clear __ot_last_ec __ot_pc_mine __ot_pc_orig __ot_ps
 export __ot_tty_save
 export PROMPT_COMMAND PS1
 export -f __ot_prompt_cmd __ot_run __ot_submit __ot_repaint __ot_exec_run
+# --- 历史保洁（用户报障：↑ 召回的全是 __ot_inj base64 分片/探测行）---
+# ① 内存列表：扫 history 取垃圾行号 → 降序逐条 history -d（升序删会错位；
+#   多行命令的续行无编号，非纯数字防御跳过——PTY 实测：HISTFILE 载入的
+#   旧垃圾与连接期探测行/静默行全清、正常条目零损伤）。
+# ② HISTFILE 落盘文件过滤重写（histappend 用户下次会话不再载入旧垃圾；
+#   非 histappend 用户退出时 bash 本就以内存列表重写文件，同样干净）。
+__ot_jk='_ot_inj|__ot_exec__|__ot_pad |__ot_hc=|__OT|\.ot_hist_'
+for __ot_n in $(history | grep -E "$__ot_jk" 2>/dev/null | awk '{print $1}' | sort -rn); do
+  case "$__ot_n" in ''|*[!0-9]*) continue ;; esac
+  history -d "$__ot_n" 2>/dev/null
+done
+unset __ot_n
+if [ -n "$HISTFILE" ] && [ -r "$HISTFILE" ] \
+   && grep -qE "$__ot_jk" "$HISTFILE" 2>/dev/null; then
+  __ot_cf="${TMPDIR:-/tmp}/.ot_hc2.$$"
+  grep -vE "$__ot_jk" "$HISTFILE" > "$__ot_cf" 2>/dev/null \
+    && cat "$__ot_cf" > "$HISTFILE" 2>/dev/null
+  rm -f "$__ot_cf"; unset __ot_cf
+fi
+unset __ot_jk
+# 连接期静默窗口收口（history_quiet_line 设 ignorespace 让前导空格注入行
+# 原生跳过入史；快照缺失=静默行没跑过，不动用户 HISTCONTROL）
+[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"
 # 尾部吸收行：分片二次追加的拼接点必须落在本行参数上，
 # 否则上一行 export -f 名单会被拼接改名成不存在的假函数名
 : __ot_script_end
@@ -374,6 +405,21 @@ __ot_precmd() {
 case " ${precmd_functions[*]} " in
   *" __ot_precmd "*) ;;
   *) precmd_functions=(__ot_precmd $precmd_functions) ;;
+esac
+# 重注入期内部行的入史抑制还原点：__ot_submit 抑制内部行入史时全局开
+# hist_ignore_space（widget 内 accept-line 的入史动作发生在 widget 返回之后
+# 且绕过 zshaddhistory，localoptions 届时已还原——PTY 实验证实，只有全局
+# 选项活到入史时刻才有效），命令起跑后由本函数按 line A 快照还原
+__ot_sup=
+__ot_preexec() {
+  if [[ -n "$__ot_sup" ]]; then
+    unset __ot_sup
+    [[ "${__ot_his:-off}" == on ]] || unsetopt hist_ignore_space 2>/dev/null
+  fi
+}
+case " ${preexec_functions[*]} " in
+  *" __ot_preexec "*) ;;
+  *) preexec_functions=(__ot_preexec $preexec_functions) ;;
 esac
 if [[ -z "$__ot_ps1_orig" ]]; then __ot_ps1_orig="$PS1"; fi
 # PS1 不另行配色（观感对齐 main 分支：提示符用终端默认前景白）；原生 PS1
@@ -444,7 +490,17 @@ __ot_submit() {
         show="$(printf %s "$b" | base64 -d 2>/dev/null)" || show="$t"
         [[ -z "$show" ]] && show="$t"
       fi
-      BUFFER="$t"; CURSOR=${#t} ;;
+      if [[ "$show" != "$t" && "$show" != *$'\n'* && "$show" != *$'\r'* ]]; then
+        # 包装体解码后是单行（多为中文等非 ASCII 命令）：BUFFER 直接换成原
+        # 命令，与明文注入走同一条原生路径——accept-line 原生入史记下的就是
+        # 可读原文（↑ 召回工具命令而非 base64 包装语法）。注意：不能用
+        # 「前置空格+histignorespace」抑制原生入史——widget 内 zle
+        # .accept-line 的入史动作发生在 widget 返回之后，localoptions 届时
+        # 已还原，抑制无效（PTY 字节级实验证实）；多行体仍走包装体执行
+        BUFFER="$show"; CURSOR=${#show}
+      else
+        BUFFER="$t"; CURSOR=${#t}   # 明文 / 多行包装体：原样执行
+      fi ;;
     *)
       if (( __ot_off == 1 )); then zle .accept-line; return; fi
       # 去掉行首空白（## [[:space:]]#）。原写法 ${line#"${line%%[![:space:]]#}"}
@@ -505,7 +561,7 @@ __ot_submit() {
   # 语法，重绘会把 base64 分片当命令回显画进主屏（且重绘字节落在 C…D exec
   # 相位，绕过 worker 的 _suppress_live 吞除，每任务泄 ~8 行垃圾）
   case "$t" in
-    '__ot_inj='*|'_ot_inj='*|'eval "$(echo "$__ot_inj"'*) ;;
+    '__ot_inj='*|'_ot_inj='*|'__ot_hc='*|'eval "$(echo "$__ot_inj"'*) ;;
     *)
       local p="${PWD/#$HOME/\~}" c='#' col=51
       [[ $EUID != 0 ]] && c='%'
@@ -514,11 +570,21 @@ __ot_submit() {
       POSTEDIT=$'\e[F\e[2K['"$USER@$HOST $p"$']'"$c"$' \e[38;5;'"$col"$'m'"$show"$'\e[0m\n' ;;
   esac
   if [[ "$kind" == AI ]]; then
-    print -s -- "$line"
+    # 自然语言不入 shell 历史：↑/↓ 翻看的是历史命令（用户命令走 accept-line
+    # 原生入史、AI 工具命令走 __ot_exec__ 分支），不是历史输入的自然语言
     BUFFER=""
     zle .accept-line
   else
     printf '\033]133;C;%s\007' "$__ot_i"
+    # 重注入期内部行（__ot_inj 分片 / 探测行 / 静默行）抑制原生入史：
+    # 全局开 hist_ignore_space + 确保前导空格，入史时刻（widget 返回后）
+    # 选项仍在位 → 跳过；命令起跑后 __ot_preexec 按快照还原（见脚本头）
+    case "$t" in
+      '__ot_inj='*|'_ot_inj='*|'__ot_hc='*|'eval "$(echo "$__ot_inj"'*)
+        setopt hist_ignore_space 2>/dev/null
+        [[ "$BUFFER" == ' '* ]] || BUFFER=" $BUFFER"
+        __ot_sup=1 ;;
+    esac
     zle .accept-line
   fi
 }
@@ -542,14 +608,44 @@ bindkey '^M' __ot_submit
 # PTY 开 ICRNL：发送端 \r 会被内核翻成 \n（^J）才到 zle，必须同时绑 ^J
 # （与 bash 脚本绑 \C-m + \C-j 同理），否则 Enter 走默认 accept-line、hook 不上报
 bindkey '^J' __ot_submit
+# --- 历史保洁（用户报障：↑ 召回的全是 __ot_inj base64 分片/探测行）---
+# 两路清理：① 内存列表——zsh 无逐条删除 API，整体重建：fc -W 快照 →
+#   过滤垃圾行 → HISTSIZE=0 清空 → fc -R 读回（fc -R 是追加语义，PTY 实验
+#   证实；DB 灌入的命令一并保留）。不用 fc -p 推栈：栈上旧表的未落盘条目
+#   （静默行）会在退出追加保存时被写回历史文件（PTY 实测），且 fc -p 会
+#   重置 HISTFILE/HISTSIZE/SAVEHIST。连接期的探测行/静默行恰在内存而未
+#   落盘，①顺手清掉。
+# ② HISTFILE 落盘文件过滤重写（旧版本垃圾不再被下次会话载入）。
+# 两路都仅在确有垃圾时动手；每次重注入重复执行是幂等的廉价扫描。
+__ot_jk='_ot_inj|__ot_exec__|__ot_pad |__ot_hc=|__OT|\.ot_hist_'
+__ot_hf="$HISTFILE"; __ot_hs="$HISTSIZE"
+__ot_mh="${TMPDIR:-/tmp}/.ot_hc1.$$"; __ot_cf="${TMPDIR:-/tmp}/.ot_hc2.$$"
+fc -W "$__ot_mh" 2>/dev/null
+if [[ -s "$__ot_mh" && -n "$__ot_hs" && "$__ot_hs" != *[!0-9]* ]] \
+   && grep -qE "$__ot_jk" "$__ot_mh" 2>/dev/null; then
+  grep -vE "$__ot_jk" "$__ot_mh" > "$__ot_cf" 2>/dev/null
+  HISTSIZE=0; HISTSIZE="$__ot_hs"
+  fc -R "$__ot_cf" 2>/dev/null
+  if [[ -n "$__ot_hf" && -r "$__ot_hf" ]] \
+     && grep -qE "$__ot_jk" "$__ot_hf" 2>/dev/null; then
+    grep -vE "$__ot_jk" "$__ot_hf" > "$__ot_cf" 2>/dev/null \
+      && cat "$__ot_cf" > "$__ot_hf" 2>/dev/null
+  fi
+fi
+rm -f "$__ot_mh" "$__ot_cf" 2>/dev/null
+unset __ot_mh __ot_cf __ot_jk __ot_hf __ot_hs
+# 连接期静默窗口收口：按 line A 快照还原（用户原本开着 hist_ignore_space
+# 则保持开；快照缺失=静默行没跑过，不动用户选项）
+[[ -n "${__ot_his+x}" && "$__ot_his" != on ]] && unsetopt hist_ignore_space 2>/dev/null
 # 尾部吸收行（同 bash）：分片拼接尾巴不得改写上面的绑定行
 : __ot_script_end
 '''.strip()
 
-# PowerShell 5.1 + PSReadLine 2.0.0：无 SetBufferState，AI/注入路径用
-# AddToHistory+CancelLine（清缓冲）与 $global:__ot_pending + prompt() 内执行
-# （注入命令）达成。prompt() 顶部发 D（上一条 AcceptLine 命令的退出码）、
-# pending 执行内联发 C…D（不能等下一个 prompt——那会把用户输入期挂进 EXEC 相位）。
+# PowerShell 5.1 + PSReadLine 2.0.0：无 SetBufferState，AI 路径用 OSC 上报 +
+# __ot_clearline（清缓冲、不入史——↑/↓ 只召回命令），注入命令经
+# $global:__ot_pending + prompt() 内执行达成。prompt() 顶部发 D（上一条
+# AcceptLine 命令的退出码）、pending 执行内联发 C…D（不能等下一个
+# prompt——那会把用户输入期挂进 EXEC 相位）。
 _PS_SCRIPT = r'''
 $global:__ot_i = @@INST@@
 $global:__ot_off = 0
@@ -666,6 +762,19 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
   if ($line.StartsWith('__ot_exec__ ')) {
     $inj = $line.Substring(12)
     __ot_osc("6337;$($global:__ot_i);EXEC;$inj")
+    # AI 工具命令入史：↑/↓ 召回历史命令。base64 包装体解码回可读原文再记；
+    # 多行/解码失败跳过（单行召回装不下换行、包装语法进史是垃圾）
+    $h = $null
+    if ($inj.StartsWith('iex (')) {
+      try {
+        $q = $inj.Substring($inj.IndexOf("'") + 1)
+        $h = [Text.Encoding]::UTF8.GetString(
+          [Convert]::FromBase64String($q.Substring(0, $q.IndexOf("'"))))
+      } catch { $h = $null }
+    } else { $h = $inj }
+    if ($h -and -not $h.Contains("`n") -and -not $h.Contains("`r")) {
+      [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($h)
+    }
     __ot_exec_inline $inj
     __ot_clearline
     return
@@ -674,8 +783,9 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
   $t = $line.TrimStart()
   if ($t -eq '') { [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine(); return }
   if ($t.StartsWith('?')) {
+    # 自然语言不入史（全部 AI 分支同）：↑/↓ 召回的是历史命令，不是历史
+    # 输入的自然语言
     __ot_osc("6337;$($global:__ot_i);AI;$line")
-    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)
     __ot_clearline
     return
   }
@@ -691,7 +801,6 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
     # 斜杠命令（/clear 等）交给 worker 拦截：按 AI 上报并清缓冲。
     # 必须放在路径规则（$first -match '[\\/]'）之前——否则被误判 CMD 原生执行报错
     __ot_osc("6337;$($global:__ot_i);AI;$line")
-    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)
     __ot_clearline
     return
   }
@@ -713,7 +822,6 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
     # 高危英文自然语言（read the log… / clear up the mess…）：首词可解析但
     # 整句是英文话——送 AI，避免 read/wait 阻塞 stdin、clear/exit 静默成功
     __ot_osc("6337;$($global:__ot_i);AI;$line")
-    [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)
     __ot_clearline
     return
   }
@@ -734,7 +842,6 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
     return
   }
   __ot_osc("6337;$($global:__ot_i);AI;$line")
-  [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($line)
   __ot_clearline
 }
 # Windows EditMode 默认 Ctrl+U 未绑定（字面入 buffer）、Ctrl+Y=Redo。
@@ -771,7 +878,28 @@ def injection_lines(shell: str, instance: int,
     for p in parts[1:]:
         lines.append(f"__ot_inj=\"$__ot_inj\"'{p}'")
     lines.append(f'eval "$(echo "$__ot_inj" | base64 {b64flag})"')
-    return [l.encode() + b"\r" for l in lines]
+    # 前导空格：配合 history_quiet_line 的静默窗口（bash ignorespace / zsh
+    # hist_ignore_space）让分片原生跳过入史——用户报障「↑ 召回的全是
+    # __ot_inj base64 分片」的根修。hook 在位时首词剥离不受影响，
+    # is_internal_line 本就 lstrip；PowerShell 无此机制，维持原样。
+    return [b" " + l.encode() + b"\r" for l in lines]
+
+
+def history_quiet_line() -> bytes:
+    """历史静默行（连接/重注入的第一条注入行，\\r 结尾，仅 POSIX shell）。
+
+    快照用户当前的「前导空格跳过入史」开关（bash HISTCONTROL / zsh
+    hist_ignore_space）并临时打开：此后所有注入行（历史注入 / 探测行 /
+    分片装配 / eval 解包）都带前导空格，原生入史被整体跳过——用户报障
+    「按 ↑ 召回的全是 __ot_inj base64 分片」的根修。集成脚本尾部按快照
+    还原，并清掉旧版本已落盘/已载入的垃圾行（见 _BASH/_ZSH_SCRIPT 尾部
+    历史保洁注释）。本行自身以 ``__ot_hc=`` 开头：hook 在位时按内部行
+    静默处理，且被保洁逻辑清除。setopt 在非 zsh 里的报错已 2>/dev/null；
+    PowerShell 不适用（调用方不发）。
+    """
+    return (b'__ot_hc="$HISTCONTROL"; __ot_his="$options[hist_ignore_space]";'
+            b' HISTCONTROL=ignorespace;'
+            b' setopt hist_ignore_space 2>/dev/null\r')
 
 
 def injection_line(shell: str, instance: int, b64flag: str = "-d") -> bytes:
@@ -788,8 +916,10 @@ def history_inject_line(shell: str, commands: list[str],
     """历史记忆注入行：把 DB 里的近期命令灌进远端 shell 历史（单行、\\r 结尾）。
 
     在集成脚本注入前（裸 shell 阶段）发送：bash 用 ``history -r``、zsh 用
-    ``fc -R`` 读入临时文件，使 ``history`` 命令与 ↑ 键原生可见；bash 再用
-    ``history -d "$HISTCMD"`` 删掉注入行自身，避免超长 base64 污染历史。
+    ``fc -R`` 读入临时文件，使 ``history`` 命令与 ↑ 键原生可见。POSIX 行
+    带前导空格：在 history_quiet_line 打开的静默窗口内原生入史被跳过
+    （旧版 bash 用 ``history -d "$HISTCMD"`` 自删，PTY 实测无效且有误删
+    相邻条目风险，已由静默窗口 + 脚本尾部保洁取代）。
     PowerShell 尽力而为：追加进 PSReadLine 历史文件（下一会话生效）。
     """
     # 连续重复去重（同一条命令反复执行是常态）+ 丢弃空行
@@ -809,17 +939,19 @@ def history_inject_line(shell: str, commands: list[str],
             "[IO.File]::AppendAllText($p, $t + \"`n\")"
         )
     elif shell == "zsh":
-        # zsh 无便捷的「删当前历史项」内建，注入行自身会留在历史里（可接受）
+        # zsh 无便捷的「删当前历史项」内建；靠静默窗口前导空格跳过入史
         cmd = (f'echo {b64} | base64 {b64flag} > "$HOME/.ot_hist_$$" && '
                f'fc -R "$HOME/.ot_hist_$$" && rm -f "$HOME/.ot_hist_$$"')
     else:  # bash
         cmd = (f'echo {b64} | base64 {b64flag} > "$HOME/.ot_hist_$$" && '
-               f'history -r "$HOME/.ot_hist_$$" && rm -f "$HOME/.ot_hist_$$"; '
-               f'[ -n "$HISTCMD" ] && history -d "$HISTCMD" 2>/dev/null')
-    return cmd.encode() + b"\r"
+               f'history -r "$HOME/.ot_hist_$$" && rm -f "$HOME/.ot_hist_$$"')
+    if shell == "powershell":
+        return cmd.encode() + b"\r"
+    return b" " + cmd.encode() + b"\r"
 
 
-_INTERNAL_LINE_PREFIXES = ("_ot_inj", "__ot_inj", "__ot_exec__", "__ot_pad")
+_INTERNAL_LINE_PREFIXES = ("_ot_inj", "__ot_inj", "__ot_exec__", "__ot_pad",
+                           "__ot_hc=")
 _INTERNAL_LINE_EVAL = 'eval "$(echo "$__ot_inj"'
 
 
@@ -882,21 +1014,30 @@ def probe_command(os_family: str) -> str:
 
 
 def parse_probe(output: str) -> tuple[str | None, str]:
-    """解析探测输出 → (shell 或 None, base64 解码参数)。None = 走旧批处理模型。"""
-    # 版本段用「到 | 为止」的宽松捕获：$BASH_VERSION 真实值形如
-    # "5.1.8(1)-release"（带括号/连字符），字符类匹配会在 ( 处截断导致
-    # 整体不匹配 → bash 主机永远静默回退批处理模型
-    m = re.search(re.escape(PROBE_TAG) + r"([^\r\n|]*)\|([^\r\n]*)", output or "")
-    if not m:
-        return None, "-d"
-    ver, flag = m.group(1), m.group(2).strip()
-    if ver.startswith("bash"):
-        major = _to_int(re.match(r"bash(\d+)", ver).group(1), 0)
-        return ("bash" if major and major >= 4 else None), (flag or "-d")
-    if ver.startswith("zsh"):
-        return "zsh", (flag or "-d")
-    if ver == "powershell":
-        return "powershell", "-d"
+    """解析探测输出 → (shell 或 None, base64 解码参数)。None = 走旧批处理模型。
+
+    版本段用「到 | 为止」的宽松捕获：$BASH_VERSION 真实值形如
+    "5.1.8(1)-release"（带括号/连字符），字符类匹配会在 ( 处截断导致
+    整体不匹配 → bash 主机永远静默回退批处理模型。
+
+    逐个遍历全部标记匹配、取第一个可解析的：嵌套 shell（su - / ssh
+    跳板机）场景探测行整行回显也混进收集缓冲，回显里字面的
+    echo "__OTPROBE__${v:-none}|$d" 模板先于真实输出出现——只取首个
+    匹配会把模板当结果解析失败，且此后永远解析不出（嵌套换壳注入
+    永远失败）。模板含 ${ / 引号，ver 段不可能以 bash/zsh/powershell
+    开头，不会被误认为真实结果。"""
+    for m in re.finditer(
+            re.escape(PROBE_TAG) + r"([^\r\n|]*)\|([^\r\n]*)", output or ""):
+        ver, flag = m.group(1), m.group(2).strip()
+        if ver.startswith("bash"):
+            major = _to_int(re.match(r"bash(\d+)", ver).group(1), 0)
+            if major and major >= 4:
+                return "bash", (flag or "-d")
+            continue    # bash 3.2 等旧版：不可集成，看后续匹配（不会有）
+        if ver.startswith("zsh"):
+            return "zsh", (flag or "-d")
+        if ver == "powershell":
+            return "powershell", "-d"
     return None, "-d"
 
 

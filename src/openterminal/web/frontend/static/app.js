@@ -71,8 +71,9 @@ function wsUrl(tabId) {
 
 // --- 通用模态框 ---
 // buttons: [{label, primary?, onClick() -> bool(true=关闭)}]
-function modalShell(title, bodyHtml, buttons) {
+function modalShell(title, bodyHtml, buttons, opts = {}) {
   const root = document.getElementById("modal-root");
+  delete root.dataset.pw;   // 新模态顶掉密码模态标记：代关只认密码模态
   const btns = buttons.map((b, i) =>
     `<button class="${b.primary ? "primary" : ""}" data-i="${i}">${esc(b.label)}</button>`).join("");
   root.innerHTML = `
@@ -98,7 +99,12 @@ function modalShell(title, bodyHtml, buttons) {
       }
     });
   }
-  root.onmousedown = ev => { if (ev.target === root) close(); };
+  root.onmousedown = ev => {
+    if (ev.target === root) {
+      opts.onDismiss && opts.onDismiss();
+      close();
+    }
+  };
   return close;
 }
 
@@ -117,10 +123,22 @@ function modalAsk(title, message, onOk, opts = {}) {
           ? document.getElementById("modal-remember").checked : false;
         onOk(document.getElementById("modal-value").value, remember);
       }},
-      {label: "取消", onClick: () => {}},
-    ]);
+      {label: "取消", onClick: () => { opts.onCancel && opts.onCancel(); }},
+    ],
+    {onDismiss: opts.onCancel});
+  document.getElementById("modal-root").dataset.pw = "1";
   const v = document.getElementById("modal-value");
   if (v) v.focus();
+}
+
+// 后端代关陈旧密码模态（密码提示符已被终端手输消费）：只关带 pw 标记的
+// 密码模态，审批/主机密钥等其他模态不受影响
+function modalDismissPassword() {
+  const root = document.getElementById("modal-root");
+  if (root && root.dataset.pw) {
+    delete root.dataset.pw;
+    root.innerHTML = "";
+  }
 }
 
 function modalConfirm(title, message, onOk, yesLabel = "信任", noLabel = "拒绝") {
@@ -160,6 +178,9 @@ class Session {
     this._healT = null;         // idle 自愈 debounce
     this._remeasurePending = false; // 备用缓冲期推迟重测，回主缓冲再补
     this._lastByteAt = 0;       // 最近 PTY 字节到达时间（开区前等流沉降）
+    this._lastMsgAt = 0;        // 最近任意服务端帧（字节/JSON/心跳）到达时间
+    this._lastSendAt = 0;       // 最近一次上行（按键/JSON）时间——看门狗判无响应用
+    this._holdSince = 0;        // 扣流持续起点（泄漏 watchdog：超阈强制放行）
     this._holdDepth = 0;        // 字节扣流嵌套深度（welcome + card 临界区）
     this._holdBuf = null;       // 扣住的 PTY 字节队列
     this._welcomeHold = null;   // 连接横幅扣留态（先横幅后提示符，见 _holdWelcome）
@@ -167,6 +188,8 @@ class Session {
     this._phaseLive = false;    // 有活分析卡在流底（task_start/新段 token → ai_collapse/ai_card）
     this._summaryShown = false; // 本轮总结卡已挂（挂出即不再显示思考徽标）
     this._approvalOpen = false; // 有未决策审批卡（球在用户侧，不显思考徽标）
+    this._approvalCmd = null;   // 未决审批的命令（补发去重：同命令不叠第二张卡）
+    this._approvalGraceMs = 3000; // 审批卡可点性看门狗：fund 未到限内转模态兜底
     this._timer = null;         // 任务计时 setInterval id
     this._taskStart = 0;        // 最近一次任务开始时间戳
     this._csTimer = 0;          // cmdset 完成提示的消隐定时器
@@ -324,6 +347,13 @@ class Session {
     // Cmd/Ctrl+Shift+C 有选中时复制（无选中时 Ctrl+C 照常发 ^C 中断）。
     // attachCustomKeyEventHandler 只有一个槽位，多个逻辑必须合并在一个 handler 里
     term.attachCustomKeyEventHandler(ev => {
+      // 卡片 island 的 DOM 选区优先原生复制：返回 false 让 xterm 不吞键
+      // （否则 Cmd/Ctrl+C 会变成 ^C 发进 PTY，中断正在跑的命令）
+      if (ev.type === "keydown" && (ev.metaKey || ev.ctrlKey) &&
+          ev.key.toLowerCase() === "c") {
+        const sel = window.getSelection ? window.getSelection() : null;
+        if (sel && !sel.isCollapsed) return false;
+      }
       if (ev.type === "keydown" && (ev.metaKey || (ev.ctrlKey && ev.shiftKey)) &&
           ev.key.toLowerCase() === "c" && term.hasSelection()) {
         this._copyText(term.getSelection());
@@ -337,6 +367,31 @@ class Session {
     });
     // 占位提示驱动:低频轮询足够(显示条件全是廉价缓冲读)
     this._ghostTimer = setInterval(() => this._updateGhost(), 250);
+    // 连接/扣流看门狗：服务端心跳 10s 一帧，输入无响应 8s 即判死重连；
+    // 扣流超 10s 未归零＝临界区泄漏，强制放行复活回显（真机「卡死无法输入」）
+    this._wdTimer = setInterval(() => this._watchdog(), 5000);
+  }
+
+  _watchdog() {
+    if (this._dead) return;
+    const now = Date.now();
+    if ((this._holdDepth || 0) > 0 && this._holdSince &&
+        now - this._holdSince > 10000) {
+      console.warn("[ot] 扣流泄漏强制放行:", (this._holdTags || []).join(","));
+      this._holdDepth = 1;
+      this._releaseBytes();
+    }
+    const ws = this.ws;
+    if (!ws || ws.readyState !== 1) return;
+    // 发过东西却久无回音（回显/事件/心跳全断）：传输层可能假活（服务端
+    // sender 卡死/sink 僵尸），等 onclose 永不触发——主动close走退避重连
+    if (this._lastSendAt > this._lastMsgAt &&
+        now - this._lastSendAt > 8000 && now - this._lastMsgAt > 15000) {
+      console.warn("[ot] 连接无响应，主动重连");
+      this.setStatus("closed", "连接无响应，正在重连");
+      this._failPads();
+      try { ws.close(); } catch (e) { this.connectWS(); }
+    }
   }
 
   // onData 主体（WS 就绪后走这里）：submit 拦截链 + 按键透传
@@ -360,6 +415,7 @@ class Session {
       this._lineBuf = "";
       this._lineCur = 0;
       if (this.mode === "agent" && line && this._looksNL(line) &&
+          !this._pwPromptLine() &&
           this.term.buffer.active.type === "normal") {
         if (out) { this.ws.send(enc.encode(out)); out = ""; }
         this.sendJson({type: "submit", text: line, dirty: this._lineDirty});
@@ -383,6 +439,10 @@ class Session {
     const ws = new WebSocket(wsUrl(this.tabId));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
+    // 上行记账（看门狗判「发过却无回音」）：send 有两个直调点（raw 字节与
+    // sendJson），统一在包装里记，避免漏记
+    const rawSend = ws.send.bind(ws);
+    ws.send = d => { this._lastSendAt = Date.now(); return rawSend(d); };
     // 开连（或重连）后按序回放 WS 未就绪期缓存的按键（onData 不丢键）
     ws.onopen = () => {
       this._wsRetries = 0;
@@ -395,6 +455,7 @@ class Session {
     };
     // PTY 原始字节走二进制帧直写唯一 xterm（契约），JSON 控制事件走 handleMsg
     ws.onmessage = ev => {
+      this._lastMsgAt = Date.now();   // 心跳 ping 也走这里：看门狗的存活基线
       if (ev.data instanceof ArrayBuffer) {
         this._lastByteAt = Date.now();
         const u8 = new Uint8Array(ev.data);
@@ -438,6 +499,7 @@ class Session {
     if (!this._holdBuf) this._holdBuf = [];
     this._holdTags = this._holdTags || [];
     this._holdTags.push(tag || "");
+    if (this._holdDepth === 1) this._holdSince = Date.now();
   }
 
   _releaseBytes() {
@@ -445,6 +507,7 @@ class Session {
     this._holdDepth -= 1;
     if (this._holdTags && this._holdTags.length) this._holdTags.pop();
     if (this._holdDepth > 0) return;
+    this._holdSince = 0;
     const q = this._holdBuf || [];
     this._holdBuf = [];
     for (const u8 of q) this._writeTerm(u8);
@@ -615,6 +678,19 @@ class Session {
       /[一-鿿぀-ヿ가-힯　-〿＀-￯]/.test(line);
   }
 
+  // 光标行是否密码提示符（ssh/sudo 讨密码）：整行原样透传、幽灵提示隐藏。
+  // 前端本地判定 + 后端 _pw_prompt_seen 兜底，两层任一命中都不拦。
+  _pwPromptLine() {
+    try {
+      const buf = this.term.buffer.active;
+      if (buf.type !== "normal") return false;
+      const line = buf.baseY + buf.cursorY;
+      const t = buf.getLine(line).translateToString(true);
+      return /passwo?r?d\s*[:：]?\s*$/i.test(t) ||
+             /密码\s*[:：]?\s*$/.test(t) || /口令\s*[:：]?\s*$/.test(t);
+    } catch (e) { return false; }
+  }
+
   // --- 终端剪贴板：右键菜单（复制/粘贴）+ Cmd/Ctrl+Shift+C ---
   // 写剪贴板优先异步 API（https/localhost），http 局域网下 navigator.clipboard
   // 不暴露 → 降级 document.execCommand("copy")：要求当前 DOM 选区存在且处于
@@ -701,18 +777,22 @@ class Session {
           onDecision: (decision, stateText, command, cardId) => {
             this.setStatus(this.status, stateText + " " + (command || ""));
             this._approvalOpen = false;   // 决策完成：思考徽标接管执行空隙期
+            this._approvalCmd = null;
             this._refreshThink();
             this._releaseDecision(decision, cardId);
+            this.focusCursor();   // 卡内 mousedown 不冒泡：焦点显式还给终端
           },
           onRescue: accept => {
             // 失败救援卡决策回传（true = 交给 AI）
             this.sendJson({type: "rescue", accept});
+            this.focusCursor();
           },
           onNewSession: cardId => {
             // 总结卡「开启新会话」：后端只重置模型上下文（不清屏）；PTY 发
             // 一个回车等效换行出新鲜提示符——界面上就像按了一下 Enter
             this.sendJson({type: "new_session"});
             this._sendInput("\r");
+            this.focusCursor();
           },
         });
         return this._feed;
@@ -798,7 +878,11 @@ class Session {
         padOut: 0,             // 已发未落账的 pad 空行（防并发双垫，见 _ensurePad）
         padP: null,            // 本格 pad 发送链尾 promise（gap=0 waiter 等落地）
       };
-      marker.onDispose(() => this._discardSlot(slot));
+      // 换钉（_stealBlankBelow 把下层卡锚点下移）会 dispose 旧 marker：旧钉的
+      // 迟到 dispose 不得删槽——只认「仍是本槽当前钉」的那次 dispose
+      marker.onDispose(() => {
+        if (slot.marker === marker) this._discardSlot(slot);
+      });
       // 同 id 防御：旧槽还占着 id 时先整体拆掉（装饰/RO/root）。孤儿槽的
       // decoration 活着就会每帧 onRender → feed.mount(id, el) 与新槽互抢
       // 宿主——React root 每帧在两个 el 间迁移拆建 = 卡片闪烁
@@ -904,6 +988,13 @@ class Session {
       if (!deco) { this._fallbackPlain(slot); return; }
       deco.onRender(el => {
         slot.host = el;
+        // 卡内 mousedown 不冒泡到 xterm：拖选卡内文字会同时启动终端选区并
+        // 抢焦点（选完字粘贴态错乱）。click 事件独立于冒泡链——按钮照点；
+        // 终端焦点由各决策回调显式 focusCursor 补回
+        if (!el._otMD && typeof el.addEventListener === "function") {
+          el._otMD = true;
+          el.addEventListener("mousedown", ev => ev.stopPropagation());
+        }
         // 追加而非覆盖：xterm.css 靠 .xterm-decoration 类给装饰元素
         // position:absolute+z-index（叠在 marker 行上）；覆盖成 ot-card-host
         // 会抹掉该类 → 元素变 static 掉到屏幕块末尾、屏上不可见（真机根因#2）
@@ -1198,8 +1289,10 @@ class Session {
           line = buf.baseY + buf.cursorY;
           x = buf.cursorX;
           const t = buf.getLine(line).translateToString(true);
-          // 光标须在行尾（容尾随空白）、行非空（=提示符行）、PTY 字节静默
+          // 光标须在行尾（容尾随空白）、行非空（=提示符行）、PTY 字节静默；
+          // 密码提示符行永远不显（正讨密码，与自然语言无关）
           show = t.trim() !== "" && x >= t.replace(/\s+$/, "").length &&
+                 !this._pwPromptLine() &&
                  Date.now() - (this._lastByteAt || 0) > 400 &&
                  Date.now() >= this._ghostQuietUntil;
         }
@@ -1248,6 +1341,19 @@ class Session {
     slot.settling = (async () => {
       this._holdBytes("card-settle");
       try {
+        // 空闲期补 host：PTY 静默窗里槽可能还 pendingMount（无 host、React 内容
+        // 没落地、高度停在出生值）——按出生高结账等于没结：等真高度量出来时
+        // 下层卡/命令回显已锚定，pad 只追加在流底、垫不进已闭合的区＝卡永久
+        // 截断在出生高、下层卡贴着切边压脸（真机 2026-10-06：工具卡只剩半截
+        // 头、分析卡紧贴其下）。强制刷视口让 onRender 空闲期交 host，再按真高
+        // 结账。离屏 marker xterm 不建元素，不等空（_markerOnScreen 门卫）
+        if (!slot.host && this._markerOnScreen(slot)) {
+          try { this.term.refresh(0, this.term.rows - 1); } catch (e) {}
+          const t0 = Date.now();
+          while (!slot.host && !this._dead && Date.now() - t0 < 300) {
+            await this._sleep(10);
+          }
+        }
         await new Promise(r => requestAnimationFrame(() => r()));
         await new Promise(r => requestAnimationFrame(() => r()));
         if (this._dead || !slot.marker) return;
@@ -1431,6 +1537,70 @@ class Session {
     }
   }
 
+  // 紧下方还没露面的卡（未 reveal 未冻结）：视觉零存在——锚点下移用户无感。
+  // 盖帽判据不区分「下方被真输出/已露面的卡占住」与「下方只是张没露面卡的
+  // 未 fund 空白尾」，后者其实可以让（见 _stealBlankBelow）
+  _unrevealedBelow(slot) {
+    if (!slot || !slot.marker) return null;
+    let low = null;
+    for (const o of this._slots.values()) {
+      if (o !== slot && o.marker && o.marker.line > slot.marker.line &&
+          (!low || o.marker.line < low.marker.line)) low = o;
+    }
+    if (!low || low.revealed || low.frozen) return null;
+    return low;
+  }
+
+  // 盖帽欠账回收：真高度量出来时区已被下层 marker 闭合（React 慢flush/徽标
+  // 折行/离屏迟到量高），pad 只追加流底、垫不进本区＝永久截断（真机 2026-10-06
+  // 工具卡半截头）。下层卡若还没露面（_unrevealedBelow），把它锚点下移到本卡
+  // 真高之后：让出的空白本是无主 run，下层缺的行它自己在流底补；重贴它的
+  // decoration（host 随 onRender 迁移，React root 同换贴纸路径）。下层已露面
+  // 则不动——宁截不跳。500ms 节流防连发撕贴纸
+  async _stealBlankBelow(slot) {
+    if (this._dead || !slot.marker || this._padFused) return false;
+    if ((slot.reserved || 0) >= (slot.rows || 0)) return false;
+    if (Date.now() - (slot._stoleAt || 0) < 500) return false;
+    slot._stoleAt = Date.now();
+    const buf = this.term.buffer.active;
+    if (buf !== this.term.buffer.normal) return false;
+    const low = this._unrevealedBelow(slot);
+    if (!low || !low.marker) return false;
+    const cursorAbs = buf.baseY + buf.cursorY;
+    const want = this._regionStart(slot) + Math.max(1, slot.rows || 1);
+    if (want <= low.marker.line || want > cursorAbs) return false;
+    // [下层旧锚, want) 必须整段空白才敢移锚：夹了真输出就不是无主 run
+    if (low.marker.line + blankRun(buf, low.marker.line, want) < want) {
+      return false;
+    }
+    const m = this.term.registerMarker(want - cursorAbs);
+    if (!m) return false;
+    const old = low.marker;
+    low.marker = m;
+    try { old.dispose(); } catch (e) {}   // 身份守卫下旧钉 dispose 不删槽
+    if (low.decoration) {
+      try { low.decoration.dispose(); } catch (e) {}
+      low.decoration = null;
+    }
+    low.host = null;
+    low.pinnedRows = null;
+    low.clamped = false;
+    low.reserved = 0;
+    low.forceReapply = false;
+    this._applyDecoration(low, 2);   // 新钉重贴；onRender 交 host 并迁 React root
+    this._holdBytes("card-steal");
+    try {
+      slot.reserved = this._blankSpan(slot);
+      this._reanchor(slot);          // reserved 追上 rows → 解钉/放行/长回
+      await this._ensurePad(low);    // 下层让出的行它自己在流底补回
+      await this._drainHeld();
+      this._reanchor(low);
+    } finally {
+      this._releaseBytes();
+    }
+    return true;
+  }
+
   // 补差：先数后打，只补真缺口；落账只认缓冲（应答只是唤醒）。
   // 扣流临界区内完成，输出插不进占位区。
   // padOut = 已发未落账的空行数：并发/连发的 _ensurePad（挂载 vs 150ms 批量 vs
@@ -1445,6 +1615,9 @@ class Session {
     let blank = this._blankSpan(slot);
     slot.reserved = blank;
     if (this._capped(slot)) {
+      // 盖帽者是「还没露面的下层卡的未 fund 空白尾」时移锚收回本区（宁矮不盖
+      // 只对已被占住的区成立）；收回成功内部已重锚双方，直接返回
+      if (blank < slot.rows && await this._stealBlankBelow(slot)) return;
       // 垫不进本区（下方已有输出/别的卡）：预留够高就原地不补；不够只能
       // 夹紧截断（宁可矮不许盖）。大头在 _mountCard 锚定新卡前的 settle
       // 窗口里提前补掉。
@@ -1663,7 +1836,9 @@ class Session {
       if (this._lastByteAt && Date.now() - this._lastByteAt < 250) continue;
       this._holdBytes("card-heal");
       Promise.resolve()
-        .then(() => (capped ? null : this._ensurePad(slot)))
+        // 盖帽卡也过一遍回收：盖帽者若只是没露面的下层卡空白尾，移锚收回
+        // 本区（节流 500ms）；真被占住的区 steal 自会空手返回
+        .then(() => (capped ? this._stealBlankBelow(slot) : this._ensurePad(slot)))
         .then(() => this._drainHeld())
         .then(() => this._reanchor(slot))
         .finally(() => this._releaseBytes());
@@ -1677,8 +1852,10 @@ class Session {
       if (!s.marker) continue;
       const owed = s.pinnedRows != null || s.clamped || s.reserved < s.rows;
       // 盖帽且仍欠账：垫不进本区，夹紧是终态（宁矮不盖），不空转；
-      // 盖帽但已 fund：_reanchor 非 short 分支解钉即可，不需要 pad，也要唤醒
-      if (owed && (!this._capped(s) || s.reserved >= s.rows)) {
+      // 盖帽但已 fund：_reanchor 非 short 分支解钉即可，不需要 pad，也要唤醒；
+      // 盖帽者还没露面：steal 可能收回本区，欠账也要唤醒重试（节流在 steal 内）
+      if (owed && (!this._capped(s) || s.reserved >= s.rows ||
+                   this._unrevealedBelow(s))) {
         this._scheduleHeal();
         break;
       }
@@ -1830,6 +2007,8 @@ class Session {
 
   _onFinal(text) {
     this._taskActive = false;
+    this._approvalOpen = false;   // 任务收束：未决审批窗（若有）一并释放
+    this._approvalCmd = null;
     this._endTimer();
     this._setStopVisible(false);
     this._refreshThink();
@@ -1883,6 +2062,8 @@ class Session {
   // 状态栏（终端网格只留原生字节，不写系统提示——单管线约束）
   _onTaskFail(kind, text) {
     this._taskActive = false;
+    this._approvalOpen = false;   // 中止即收束：审批窗释放，徽标归位
+    this._approvalCmd = null;
     this._endTimer();
     this._setStopVisible(false);
     this._refreshThink();
@@ -1915,18 +2096,13 @@ class Session {
   // 否则（用户已跑过命令）开新分区。
   showApproval(command, reasons, host, risk) {
     this._ensureFeed().then(async feed => {
-      if (!feed) {
-        modalShell("审批：" + (command || ""),
-          `<p>${esc(reasons || "")}</p>`,
-          [{label: "批准", primary: true, onClick: () => {
-              this.sendJson({type: "decision", decision: {type: "approve"}});
-            }},
-           {label: "拒绝", onClick: () => {
-              this.sendJson({type: "decision",
-                             decision: {type: "reject", message: "用户拒绝了该命令"}});
-            }}]);
-        return;
-      }
+      if (!feed) return this._approvalModal(command, reasons);
+      // 补发去重（WS 重连/刷新重挂时 attach 会再投一次未决审批）：同命令
+      // 的未决卡/模态已在，不叠第二张（core 的 _pending_approval 只记一条）
+      if (this._approvalOpen && this._approvalCmd === command) return;
+      this._approvalOpen = true;   // 球在用户侧：思考徽标换「等待审批」文案
+      this._approvalCmd = command;
+      this._refreshThink();
       // 审批到达＝本模型段已结束：先冲刷 token 缓冲、把活分析卡定格并结账垫满
       // 最终高度，再锚审批卡。否则分析卡在审批锚定后继续长高，而 pad 只能追加
       // 在流底、插不进流中——卡底被审批卡/随后输出切掉（真机「审批头压分析卡
@@ -1947,7 +2123,6 @@ class Session {
         if (up) { up.frozen = true; up.frozenAt = Date.now(); }
         this._taskCardId = null;
         this._phaseLive = false;
-        this._approvalOpen = true;   // 等用户决策期间不显思考徽标（球在用户侧）
         this._refreshThink();
         if (up) await this._settleCard(up);
       }
@@ -1958,8 +2133,35 @@ class Session {
       // Ctrl+Enter 放行、输出随即从卡底流走，预留区断开就永久盖帽补不回来。
       feed.handle({kind: "approval", id: cardId, command, reasons, risk});
       const slot = await this._mountCard(cardId, "approval");
-      if (!slot) return;
+      if (!slot) return this._approvalModal(command, reasons);
+      // 可点性看门狗：mounted 且未夹紧（pinnedRows == null）才等于用户真点
+      // 得到。pad 未落账/盖帽 → pinnedRows 钉死；审批期终端静默 → xterm 不跑
+      // 渲染循环、pendingMount 永无 host——两者都等于「用户点不到」（真机
+      // 2026-10-06：审批卡不可见、core 干等决策假死 25min）。grace 内不达标
+      // 即 void 终端卡转模态，审批永远有可点的入口。
+      const t0 = Date.now();
+      while ((!slot.mounted || slot.pinnedRows != null) &&
+             Date.now() - t0 < this._approvalGraceMs) await this._sleep(100);
+      if (!slot.mounted || slot.pinnedRows != null) {
+        feed.handle({kind: "approval_void", id: cardId});
+        this._discardSlot(slot);
+        this._approvalModal(command, reasons);
+      }
     });
+  }
+
+  // 审批模态兜底（feed 缺失 / 挂载失败 / 看门狗超时共用）：决策直发 WS、不经
+  // store——此刻终端卡已 void 或根本不存在，键盘快捷键路径无未决卡可双决策。
+  _approvalModal(command, reasons) {
+    modalShell("审批：" + (command || ""),
+      `<p>${esc(reasons || "")}</p>`,
+      [{label: "批准", primary: true, onClick: () => {
+          this.sendJson({type: "decision", decision: {type: "approve"}});
+        }},
+       {label: "拒绝", onClick: () => {
+          this.sendJson({type: "decision",
+                         decision: {type: "reject", message: "用户拒绝了该命令"}});
+        }}]);
   }
 
   // 审批快捷键路由（终端保持焦点）：island 的 approval_key 返回是否消费，
@@ -2115,7 +2317,16 @@ class Session {
   // 右侧 ⏹ 随时可中断（用户诉求：只要对话没完结就一直显示）
   _refreshThink() {
     const el = document.getElementById(`think-${this.tabId}`);
-    if (el) el.hidden = !this._taskActive;
+    if (el) {
+      el.hidden = !this._taskActive;
+      // 等审批期间球在用户侧：徽标文案说实话（旧实现照转「AI 正在思考」，
+      // 真机假死 25min 无人知晓在等决策）
+      const tt = el.querySelector ? el.querySelector(".ttext") : null;
+      if (tt) tt.textContent = this._approvalOpen ? "等待审批" : "AI 正在思考";
+      el.title = this._approvalOpen
+        ? "命令等待你的决定（Ctrl+Enter 执行 / Ctrl+Backspace 拒绝）"
+        : "任务未结束：AI 正在分析或执行";
+    }
     const bar = this.paneEl && this.paneEl.querySelector(".statusbar");
     if (bar) bar.classList.toggle("task-on", this._taskActive);
   }
@@ -2132,11 +2343,13 @@ class Session {
   }
 
   // --- WS JSON 事件 ---
-  // 契约：ready/status/closed/usage/approval/ask_password/ask_host_key/
+  // 契约：ready/status/closed/usage/approval/ask_password/ask_password_dismiss/ask_host_key/
   // interrupt/mode/auth/change_model/task_start/final/denied/limit/error/
-  // stage + 新增 ai_token/ai_think/ai_collapse/ai_card。
+  // stage + 新增 ai_token/ai_think/ai_collapse/ai_card/ping。
   handleMsg(msg) {
     switch (msg.type) {
+      case "ping":
+        break;   // 心跳：存活基线已在 onmessage 记 _lastMsgAt，这里无需动作
       case "ready": {
         this.setStatus("connected",
           `已连接 ${msg.host}${msg.distro ? "（" + msg.distro + "）" : ""}`);
@@ -2186,7 +2399,17 @@ class Session {
           this.sendJson({type: "auth", auth_kind: msg.auth_kind || "password",
                          text: value, remember});
         }, {remember: msg.auth_kind !== "cmdset",
-            rememberLabel: "记住密码（写入系统凭据库，不落数据库）"});
+            rememberLabel: "记住密码（写入系统凭据库，不落数据库）",
+            // 嵌套密码模态取消/点遮罩：改终端手输，通知 core 立即退出验证
+            // 窗口（否则手输的密码被 hold 到超时才放行）
+            onCancel: msg.auth_kind === "nested_password" ? () => {
+              this.sendJson({type: "auth", auth_kind: "nested_password_cancel",
+                             text: ""});
+            } : null});
+        break;
+      case "ask_password_dismiss":
+        // 密码提示符已被终端手输消费：后端防抖代关陈旧模态
+        modalDismissPassword();
         break;
       case "ask_host_key":
         modalConfirm("主机密钥", msg.message, ok => {

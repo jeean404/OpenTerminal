@@ -114,6 +114,10 @@ class _CaptureLayer:
         self._confirming = False    # high 风险二段确认态
         self._buf = b""             # password 累积（不回显）
         self._editing = False       # 编辑流进行中（泵已停读）
+        # 提交 auth 时回传的真实 auth_kind：渲染器从 ask_password 原样传
+        # 入（cmdset 仍归 "password"——core 侧 password/cmdset 同队列），
+        # nested_password（嵌套 ssh/sudo 密码模态）原样回传
+        self._auth_kind = "password"
 
     # --- 待决态进入/退出（渲染器调用 enter_*；exit_* 对应清除）---
 
@@ -127,10 +131,11 @@ class _CaptureLayer:
         self.state = "rescue"
 
     def enter_auth(self, kind: str) -> None:
-        # 渲染器只传 "password"|"host_key"；core 的 ask_password 带
-        # auth_kind="cmdset" 时渲染器也归 "password"（core 侧 password/
-        # cmdset 入同一 _pws 队列，ClientMsg auth_kind="password" 即达）
+        # 渲染器传 ask_password 的 auth_kind 原样（"password"|"cmdset" 归
+        # "password"，core 侧同入 _pws 队列；"nested_password" 原样回传）；
+        # host_key 走独立 y/n 键盘态
         self.state = "host_key" if kind == "host_key" else "password"
+        self._auth_kind = kind if kind in ("nested_password",) else "password"
         self._buf = b""
 
     def exit_approval(self) -> None:
@@ -261,7 +266,7 @@ class _CaptureLayer:
             if byte == 3:                       # 隐藏输入不外泄：吞掉
                 continue
             if byte == 13:                      # \\r 提交
-                self._send(ClientMsg(type="auth", auth_kind="password",
+                self._send(ClientMsg(type="auth", auth_kind=self._auth_kind,
                                      text=self._buf.decode("utf-8",
                                                             "replace")))
                 self._exit_state()
@@ -679,7 +684,7 @@ class CliRenderer:
         self._print(Text.assemble((label, "bold"), ("（输入不回显，Enter 提交）",
                                                     "dim")))
         if self._frontend is not None:
-            self._frontend.capture.enter_auth("password")
+            self._frontend.capture.enter_auth(msg.auth_kind or "password")
 
     def _on_ask_host_key(self, msg: ServerMsg) -> None:
         self._print(Text(msg.message or "未知主机指纹，是否信任？"))
@@ -857,6 +862,8 @@ class CliRenderer:
         打断思考的行为）；任务结束前未收的工具行由 _flush_streams 收尾。"""
         if self._frontend is None:
             return
+        if ev.get("name") == "execute":
+            return   # CLI 的执行面板走 ai_collapse/输出流原生路径，不叠工具行
         if ev.get("phase") == "start":
             self._end_think()
             if self._token_open:
