@@ -1908,6 +1908,155 @@ async def test_cmdset_secret_answer_skips_confirm_prompt(monkeypatch):
     # 确认提示窗口期还应有 status 提示跳过了该轮(容错不卡死由 timeout 承担)
 
 
+async def test_cmdset_bare_crlf_after_password_does_not_unleash_next_command(monkeypatch):
+    # 回归(2026-10-07 真机):ssh/sudo 读完密码先回一个裸 CRLF——提示文本没了,
+    # 但 auth 还没出结果、TTY 仍关回显。旧收束条件是「提示消失+静默」,下一条
+    # 就射进这个无回显窗口:被执行却一条回显都没有(界面只显示第 1 条命令,
+    # 还要按 Enter 才刷新状态)。收束信号必须是 shell 提示符回来。
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.2)
+    monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.02)
+    monkeypatch.setattr(wmod, "CMDSET_PROMPT_TIMEOUT", 5.0)
+    monkeypatch.setattr(wmod, "CMDSET_RESUME_QUIET", 0.05)   # 旧放行窗:压到极短
+    sess = PassthroughSession()
+    w, sink = await _make_worker(monkeypatch, session=sess,
+                                 commands=["ssh web02", "sudo su -"])
+    await asyncio.sleep(0.05)
+    sess.push(b"ssh web02\r\n")
+    await asyncio.sleep(0.05)
+    sess.push(b"web02's password: ")
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "cmdset" and x.get("state") == "paused" for x in m),
+        timeout=3)
+    assert ("raw", b"sudo su -\r") not in sess.calls
+    # 用户在终端输完密码 → ssh 吐一个裸 CRLF(提示正则不再匹配,但 shell
+    # 提示符还没回来)
+    sess.push(b"\r\n")
+    await asyncio.sleep(0.6)                 # 远超旧 RESUME_QUIET 放行窗
+    assert ("raw", b"sudo su -\r") not in sess.calls, \
+        "密码刚提交(裸 CRLF)就抢跑注入下一条——射进无回显窗口"
+    # 登录成功、新 shell 提示符回来:此刻才允许发下一条
+    sess.push(b"Last login: Wed Oct  7 15:27:35 2026\r\n[web02@web02 ~]$ ")
+    await _wait(lambda: ("raw", b"sudo su -\r") in sess.calls, timeout=5)
+
+
+async def test_cmdset_full_set_shows_every_command(monkeypatch):
+    # 真机用例复刻:连接后命令 `ssh …` / `sudo su -` / `cd /root` 三条都要上屏、
+    # 都要真发出;每条只在上一条的交互提示解决完(见到 shell 提示符)后才发。
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.25)
+    monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.02)
+    monkeypatch.setattr(wmod, "CMDSET_PROMPT_TIMEOUT", 5.0)
+    sess = PassthroughSession()
+    w, sink = await _make_worker(monkeypatch, session=sess,
+                                 commands=["ssh web02", "sudo su -", "cd /root"])
+    await asyncio.sleep(0.05)
+    # ① ssh:回显 + 密码提示 → 暂停等输入
+    sess.push(b"ssh web02\r\n")
+    await asyncio.sleep(0.05)
+    sess.push(b"web02's password: ")
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "cmdset" and x.get("state") == "paused" for x in m),
+        timeout=3)
+    sess.push(b"\r\n")                       # 密码提交(裸 CRLF)
+    await asyncio.sleep(0.3)
+    assert ("raw", b"sudo su -\r") not in sess.calls
+    sess.push(b"Last login: Wed Oct  7 15:27:35 2026\r\n[web02@web02 ~]$ ")
+    await _wait(lambda: ("raw", b"sudo su -\r") in sess.calls, timeout=5)
+    # ② sudo su -:又弹密码提示 → 再暂停,cd /root 不得抢跑
+    sess.push(b"sudo su -\r\n[sudo] password for web02: ")
+    await _wait(lambda: ("raw", b"cd /root\r") not in sess.calls, timeout=1)
+    await asyncio.sleep(0.3)
+    assert ("raw", b"cd /root\r") not in sess.calls
+    sess.push(b"\r\n")
+    await asyncio.sleep(0.3)
+    sess.push(b"[root@web02 ~]# ")
+    await _wait(lambda: ("raw", b"cd /root\r") in sess.calls, timeout=5)
+    # 三条命令的执行记录都要上屏(回显或补画),否则用户只看得到第 1 条
+    await _wait(lambda: all(x in _sink_bytes(sink)
+                            for x in (b"ssh web02", b"sudo su -", b"cd /root")),
+                timeout=3)
+
+
+async def test_cmdset_synthesizes_missing_echo(monkeypatch):
+    # TTY 关回显时命令一条回显都没有(真机「只显示第 1 条命令的执行记录」):
+    # 回显等不到就补画命令行,至少让用户看得到这条执行了什么。
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.1)
+    monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.02)
+    w, sink = await _make_worker(monkeypatch, commands=["cd /root"])
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    await _wait(lambda: ("raw", b"cd /root\r") in w.session.calls, timeout=3)
+    await _wait(lambda: b"cd /root" in _sink_bytes(sink), timeout=3)
+
+
+async def test_cmdset_running_carries_cmd_and_blanks_answers(monkeypatch):
+    # 状态栏要说清在跑哪条(只报 1/3 计数看不出第 2、3 条执行了没有);
+    # 应答行必须传空串,防密码原文泄进状态栏。
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.05)
+    monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.01)
+    monkeypatch.setattr(wmod, "CMDSET_PROMPT_TIMEOUT", 0.3)
+    w, sink = await _make_worker(monkeypatch,
+                                 commands=["echo one", "> s3cret-pw"])
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "cmdset" and x.get("state") == "done" for x in m),
+        timeout=3)
+    running = [m for m in _cmdset_msgs(sink) if m.get("state") == "running"]
+    assert running[0].get("cmd") == "echo one"
+    # 应答行不带内容(空字段被 encode_server 丢弃):状态栏只显示计数
+    assert not running[1].get("cmd")
+    assert "s3cret-pw" not in json.dumps(sink.json(), ensure_ascii=False)
+
+
+async def test_cmdset_wrong_password_keeps_paused(monkeypatch):
+    # 输错密码 → 提示重现,必须保持暂停,不能把下一条命令射进去当密码吃掉
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.2)
+    monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.02)
+    monkeypatch.setattr(wmod, "CMDSET_PROMPT_TIMEOUT", 5.0)
+    sess = PassthroughSession()
+    w, sink = await _make_worker(monkeypatch, session=sess,
+                                 commands=["ssh web02", "sudo su -"])
+    await asyncio.sleep(0.05)
+    sess.push(b"ssh web02\r\n")
+    await asyncio.sleep(0.05)
+    sess.push(b"web02's password: ")
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "cmdset" and x.get("state") == "paused" for x in m),
+        timeout=3)
+    sess.push(b"\r\nPermission denied, please try again.\r\nweb02's password: ")
+    await asyncio.sleep(0.5)
+    assert ("raw", b"sudo su -\r") not in sess.calls, \
+        "密码错(提示重现)仍抢跑注入下一条"
+
+
+async def test_cmdset_shell_prompt_with_ansi_still_unblocks(monkeypatch):
+    # 提示符重绘/PSReadLine 上色会在行尾留转义序列：不剥 ANSI 就判不出
+    # 「shell 提示符回来了」，命令集每条白等 CMDSET_PROMPT_TIMEOUT 才放行
+    # （真机浏览器复现：提示符 3.1s 回来，第 2 条 13.2s 才发出去）。
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.2)
+    monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.02)
+    monkeypatch.setattr(wmod, "CMDSET_PROMPT_TIMEOUT", 5.0)
+    sess = PassthroughSession()
+    w, sink = await _make_worker(monkeypatch, session=sess,
+                                 commands=["ssh web02", "sudo su -"])
+    await asyncio.sleep(0.05)
+    sess.push(b"ssh web02\r\n")
+    await asyncio.sleep(0.05)
+    sess.push(b"web02's password: ")
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "cmdset" and x.get("state") == "paused" for x in m),
+        timeout=3)
+    t0 = time.monotonic()
+    # 裸 CRLF + 带转义序列的提示符（标题/光标显隐/颜色复位）
+    sess.push(b"\r\n\x1b]0;web02: ~\x07\x1b[?25h[web02@web02 ~]$ \x1b[0m")
+    await _wait(lambda: ("raw", b"sudo su -\r") in sess.calls, timeout=3)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"被转义序列卡住: {elapsed:.2f}s 后才发下一条"
+
+
 # --- 提示符幕帘：任务期扣住提示符重绘，注入/收尾放行 ---
 
 def _fake_ai_task(w):

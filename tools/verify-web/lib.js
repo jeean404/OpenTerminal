@@ -28,7 +28,7 @@ async function waitServer(base, ms) {
   throw new Error("server not up: " + base);
 }
 
-async function startServer(port) {
+async function startServer(port, opts = {}) {
   const base = `http://127.0.0.1:${port}`;
   try {
     if ((await fetch(base + "/")).ok) return { base, server: null, reused: true };
@@ -38,7 +38,12 @@ async function startServer(port) {
   const args = exe.endsWith("ot.exe") || exe.includes(`${path.sep}ot`)
     ? ["web", "--port", String(port), "--no-open"]
     : ["-m", "openterminal.app", "web", "--port", String(port), "--no-open"];
-  const server = spawn(exe, args, { cwd: REPO, stdio: ["ignore", logFd, logFd] });
+  // opts.env:隔离 OPENTERMINAL_HOME / PATH 的测试专用服务端（不碰用户真实配置）
+  const server = spawn(exe, args, {
+    cwd: REPO,
+    stdio: ["ignore", logFd, logFd],
+    env: opts.env ? { ...process.env, ...opts.env } : process.env,
+  });
   await waitServer(base, 25000);
   return { base, server, reused: false };
 }

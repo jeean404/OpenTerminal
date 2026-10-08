@@ -169,7 +169,10 @@ def _pw_core(session) -> PipelineCore:
         _nested_pw_attempts=0, _nested_pw_ctx=None,
         _open_cmds={1: "ssh wujian@1.2.3.4"}, _open_cmd_at={1: 10.0},
         _exec_stack=[], _last_mark_at=11.0, _interactive=True,
-        _hook_gone=False, _hook_report_pending=None, _fallback_task=None)
+        _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
+        # 回车看门狗状态：hook 陈旧判定 + 看门狗把手（_hook_ok 会读）
+        _hook_stale=False, _hook_watch=None, _hook_watch_text=False,
+        _display="agent")
 
 
 def test_password_reprompt_retriggers_modal():
@@ -405,3 +408,203 @@ def test_task_start_precedes_agent_build():
 
     asyncio.run(c._run_task("hi", hooked=True))
     assert order == ["task_start", "agent_build", "error"]
+
+
+# --- 8. 嵌套 shell 被 TMOUT 收走：hook 陈旧假阳性 -------------------------
+#
+# 真机报障（2026-10-07）：跳板机 → 远程机 xiaojian → sudo su - root；root 空闲
+# TMOUT 自动登出掉回 xiaojian；再 sudo su - 回到 root 后输入自然语言失效——
+# 整行被 root 的裸 bash 当命令执行（-bash: 执行: command not found）。
+#
+# 根因：_hook_ok() 陈旧假阳性。带 hook 的那个 shell（root#1）已经死了，而
+#   ① bash 退出不发任何 OSC 标记，应用无从得知；
+#   ② _hook_gone 只由 _ensure_integrated 探测失败置位；
+#   ③ 它唯一的复位路径「_open_cmds 清空」在跳板机拓扑下永不发生（外层
+#      `ssh 跳板机` 帧整段会话开着）；
+#   ④ _inner_ssh_prompt_live() 拿死壳留下的 _last_mark_at 当活凭据。
+# 于是 submit 走健康路径只补一个 \r，把自然语言整行送进裸壳执行。
+
+_HOOK_LIVENESS = getattr(cmod, "_HOOK_LIVENESS", 1.0)
+
+
+def _stale_core(session) -> PipelineCore:
+    """root#1（集成壳，inst 100000）刚被 TMOUT 收走后的状态：_hook_gone 仍
+    False、_last_mark_at 仍是死壳留下的时间戳、外层 `ssh 跳板机` 帧开着。"""
+    c = _bare_core(
+        session=session, _exec_future=None, _closed=False, _session_dead=False,
+        _pw_tail=bytearray(), _pw_prompt_seen=False, _pw_verifying=False,
+        _pw_verify_at=0.0, _pw_hold=[], _pw_hold_timer=None, _pw_at_end=False,
+        _pw_modal_open=False, _pw_dismiss_timer=None,
+        _nested_pw_attempts=0, _nested_pw_ctx=None,
+        _open_cmds={1: "ssh xiaojian@101.33.233.232"}, _open_cmd_at={1: 10.0},
+        _exec_stack=[], _last_mark_at=11.0, _interactive=True,
+        _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
+        _intr_swallow_until=0.0, _intr_pending=b"",
+        _suppress_live=False, _suppressed_echo=False, _curtain=False,
+        _curtain_parts=[], _curtain_at=0.0, _ai_task=None,
+        _probe_buf=None, _hidden_exec=False, _user_out=bytearray(),
+        _last_live_at=0.0, _cur_prompt="",
+        _hook_stale=False, _hook_watch=None, _hook_watch_text=False,
+        _display="agent",
+        _ev_stream=asyncio.Event(), _ev_prompt=asyncio.Event())
+
+    async def _emit_bytes(data):
+        pass
+    c.emit_bytes = _emit_bytes
+    return c
+
+
+def test_hook_stale_after_enter_yields_text_without_markers():
+    """补发回车后「只有文本、没有任何 OSC 标记」= 承接回车的不是集成壳。
+
+    root#2 是裸 bash：`sudo su -` 的回车与它的提示符全是纯文本。看门狗到点
+    必须把 hook 判为不在位，让下一条自然语言走降级（探测 + 重注入），而不是
+    健康路径的裸 \r —— 裸 \r 会把整行自然语言交给 root 的 shell 执行。
+
+    触发点必须是**按键路径**：命令行回车不经 _on_frontend_line（前端只对自然
+    语言发 submit），真机 [otdbg] 里 `sudo su -` 只有 keys= b'\r'。用 submit
+    驱动会绕过唯一的真实武装点——测试绿、浏览器里照旧复现。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c = _stale_core(_Session())
+
+    async def main():
+        # 用户在 xiaojian 逐字敲 `sudo su -` 再回车（纯按键透传，无 submit）
+        for ch in (b"s", b"u", b"d", b"o", b" ", b"s", b"u", b" ", b"-"):
+            await c._on_keys(ch)
+        await c._on_keys(b"\r")
+        assert sent[-1] == b"\r"
+        # root#1 已死、root#2 是裸壳：sudo 提示与新提示符全是纯文本，零标记
+        await c._on_stream_event(("live", "[sudo] password for xiaojian: "))
+        await c._on_stream_event(("live", "root@host:~# "))
+        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
+        assert not c._hook_ok(), "死壳留下的 _last_mark_at 不得再当 hook 活凭据"
+
+        # 下一条自然语言必须走降级，不得把整行留给裸壳执行
+        sent.clear()
+        started: list[str] = []
+
+        async def _no_hook():
+            return False
+        c._ensure_integrated = _no_hook
+
+        async def _ai(line, hooked=False):
+            started.append(line)
+        c._on_ai_line = _ai
+
+        await c._on_frontend_line("执行 echo MARK-AI-TWO 并把输出原样告诉我",
+                                  False)
+        assert started == ["执行 echo MARK-AI-TWO 并把输出原样告诉我"]
+        assert b"\r" not in sent, "健康路径的裸回车会把自然语言当命令执行"
+
+    asyncio.run(main())
+
+
+def test_hook_stale_latch_self_heals_on_marker():
+    """外层集成壳重新画出提示符（OSC 标记到达）→ 陈旧判定即撤销。
+
+    正常拓扑里 root#1 退出后落回的是**带 hook 的** xiaojian：它的提示符标记
+    一到，健康路径必须立刻恢复，否则每次自然语言都白付一次探测+分片注入。"""
+    class _Session:
+        async def send_raw(self, data):
+            pass
+
+    c = _stale_core(_Session())
+
+    async def main():
+        await c._on_keys(b"\r")
+        await c._on_stream_event(("live", "root@host:~# "))
+        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
+        assert not c._hook_ok()
+        await c._on_stream_event(("prompt", "[xiaojian@host ~]$ "))
+        assert c._hook_ok(), "标记一到即自愈，健康路径恢复"
+        await c._on_keys(b"\r")
+        await c._on_stream_event(("prompt_start", 100000))
+        assert c._hook_ok(), "prompt_start 同样是活凭据"
+
+    asyncio.run(main())
+
+
+def test_hook_watch_disarmed_by_marker_before_deadline():
+    """健康壳里回车后标记立刻到（PROMPT_COMMAND 发 133;D + 133;A/B）：
+    看门狗必须被撤销，纯文本输出不得误判陈旧。"""
+    class _Session:
+        async def send_raw(self, data):
+            pass
+
+    c = _stale_core(_Session())
+
+    async def main():
+        await c._on_keys(b"\r")
+        await c._on_stream_event(("live", "total 8\r\n"))
+        await c._on_stream_event(("prompt", "[root@host ~]# "))
+        await c._on_stream_event(("live", "drwxr-xr-x\r\n"))
+        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
+        assert c._hook_ok()
+
+    asyncio.run(main())
+
+
+def test_hook_watch_not_armed_at_password_prompt():
+    """密码位上的回车不发标记是常态：sudo/ssh 的读取器在读密码，不是集成壳在
+    跑 PROMPT_COMMAND。据此判 hook 陈旧 = 每次嵌套登录都把健康路径打断一次。"""
+    class _Session:
+        async def send_raw(self, data):
+            pass
+
+    c = _stale_core(_Session())
+    c._pw_at_end = True          # 尾窗正停在 `[sudo] password for xiaojian: `
+
+    async def main():
+        await c._on_keys(b"\r")
+        await c._on_stream_event(("live", "\r\nroot@host:~# "))
+        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
+        assert c._hook_ok(), "密码回车不得触发陈旧判定"
+
+    asyncio.run(main())
+
+
+def test_hook_watch_not_armed_while_tool_command_running():
+    """工具命令在途的回车同理：那段的标记由 agent 帧负责，不看用户回车。"""
+    class _Session:
+        async def send_raw(self, data):
+            pass
+
+    c = _stale_core(_Session())
+    c._exec_future = object()    # 只作「工具命令在途」标志用，不驱动
+
+    async def main():
+        await c._on_keys(b"\r")
+        await c._on_stream_event(("live", "drwxr-xr-x\r\n"))
+        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
+        assert c._hook_ok(), "工具命令在途不得据用户回车判陈旧"
+
+    asyncio.run(main())
+
+
+def test_probe_buf_collects_live_text_without_killing_pump():
+    """探测窗口里的 live 文本必须落进 _probe_buf，而不是抛 TypeError 打死泵。
+
+    泵一死整个会话就哑了（无回显、无输出、无 closed 帧），且因为任务引用被
+    self._pump 持有，asyncio 连「未取回异常」都不会打印——真机表现为「终端
+    彻底不再响应」，查无实据。"""
+    class _Session:
+        async def send_raw(self, data):
+            pass
+
+    c = _stale_core(_Session())
+    c._probe_buf = bytearray()          # _probe_shell_kind 正在收集
+
+    async def main():
+        # 裸壳回显探测行 + 它的真实输出，全是 live 纯文本
+        await c._on_stream_event(
+            ("live", ' _ot_inj=""; v=""; ... echo "__OTPROBE__${v:-none}|$d"\r\n'))
+        await c._on_stream_event(("live", "__OTPROBE__bash5.1.8(1)-release|-d\r\n"))
+        got = parse_probe(c._probe_buf.decode("utf-8", "replace"))
+        assert got == ("bash", "-d"), "探测输出没被收全：%r" % (got,)
+
+    asyncio.run(main())
