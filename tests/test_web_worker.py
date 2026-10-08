@@ -838,6 +838,35 @@ async def test_runner_busy_target_returns_124(monkeypatch):
     assert not any(d == b"\x19" for k, d in w.session.calls if k == "raw")
 
 
+async def test_runner_timeout_hook_dead_skips_ctrl_c(monkeypatch):
+    """P2-5 收尾降级：执行途中壳死（TMOUT 登出落回裸壳）后超时收尾不再发
+    \x03/\x19——hook 不在位时那两个字节也是落进裸壳的垃圾。"""
+    from openterminal.web.worker import InteractiveRunner
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._shell_kind = "bash"
+    w._b64flag = "-d"
+    w._last_mark_at = 1.0          # 门禁放行：注入那一刻 hook 尚在位
+    orig = w.session.send_raw
+
+    async def _raw(data):
+        await orig(data)
+        if b"__ot_exec__" in data:
+            w._hook_stale = True   # 注入落地后壳死（TMOUT 自动登出）
+    w.session.send_raw = _raw
+
+    runner = InteractiveRunner(w)
+    res = await asyncio.wait_for(
+        runner.run("sleep 100", timeout=0.3, on_output=None), timeout=5)
+    assert res.exit_code == 130
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert any(b"__ot_exec__" in d for d in raws), "门禁放行时该正常注入"
+    assert not any(d in (b"\x03", b"\x19") for d in raws), \
+        "hook 不在位：\\x03/\\x19 都是落进裸壳的垃圾（P2-5）"
+
+
 async def test_runner_hook_gone_fast_fails_zero_bytes(monkeypatch):
     """P0-1 门禁（结构性不可集成）：快速失败回可读文案，PTY 输入流零字节。"""
     from openterminal.web.worker import (

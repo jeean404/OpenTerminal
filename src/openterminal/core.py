@@ -219,7 +219,9 @@ class InteractiveRunner:
                 try:
                     res = await asyncio.wait_for(asyncio.shield(fut), to)
                 except asyncio.TimeoutError:
-                    await w.session.send_raw(b"\x03")  # 中断工具命令
+                    if w._hook_ok():
+                        # hook 不在位时 \x03 也是落进裸壳的垃圾（P2-5）
+                        await w.session.send_raw(b"\x03")  # 中断工具命令
                     try:
                         res = await asyncio.wait_for(asyncio.shield(fut), 3.0)
                     except asyncio.TimeoutError:
