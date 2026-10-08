@@ -55,6 +55,11 @@ _PW_MODAL_DISMISS = 0.5   # 密码提示符被消费后陈旧模态的代关防�
 
 # 换壳探测（_probe_shell_kind）：等 __OTPROBE__ 输出的最长时限
 _PROBE_TIMEOUT = 1.5
+#: 工具执行通道不可用的退出码（hook 不在位 / 远端 shell 已退出）
+CHANNEL_DEAD_EC = 126
+#: 通道不可用时随 CommandResult 回给工具卡的可读文案
+CHANNEL_DEAD_MSG = ("远端 shell 已退出或无 AI 集成通道，命令未执行；"
+                    "请重新登录（或回到可集成的 shell）后重试")
 # 回车看门狗时限：健康路径补发 \r 后，集成壳必在 PROMPT_COMMAND 里回 OSC 标记
 # （133;D + 133;A/B）。到点只收到纯文本、一个标记都没有 = 承接这个回车的根本
 # 不是集成壳（嵌套 shell 被 TMOUT/exit 收走后落回的裸壳）——此时健康路径的裸
@@ -192,6 +197,14 @@ class InteractiveRunner:
                 return CommandResult(
                     output="[ot] 目标 shell 正忙（命令或 AI 执行中），请稍后重试",
                     exit_code=124, truncated=False, cwd=self.cwd)
+            if not await self._hook_channel_ready():
+                # hook 不在位（TMOUT 登出 / 换壳 / 陈旧）：盲注入会把
+                # __ot_exec__、\x03、__ot_pad 全落进裸壳——command not found
+                # 刷屏，命令本体还被裸壳拆段照常执行（真机截图）。重注入救不
+                # 回就快速失败，工具卡显示可读原因而不是注垃圾进终端后超时 130
+                return CommandResult(
+                    output=CHANNEL_DEAD_MSG, exit_code=CHANNEL_DEAD_EC,
+                    truncated=False, cwd=self.cwd)
             w._exec_buf = bytearray()
             w._exec_truncated = False
             fut = asyncio.get_running_loop().create_future()
@@ -225,6 +238,26 @@ class InteractiveRunner:
             if res.cwd:
                 self.cwd = res.cwd
             return res
+
+    async def _hook_channel_ready(self) -> bool:
+        """工具注入前的 hook 活性门禁：不在位先试一次重注入自愈。
+
+        须在 _runner_lock 内调用（run 已持有）——_ensure_integrated_locked
+        不取锁，避免与 run / _shell_pad 的注入序列重入死锁。
+        结构性不可集成（_hook_gone＝探测判定换了壳/旧版 shell）不空转注入，
+        保证该路径下 PTY 输入流一个字节都不发。
+        """
+        w = self.w
+        if w._hook_ok():
+            w._hook_seen = True
+            return True
+        if w._hook_gone:
+            return False
+        try:
+            await w._ensure_integrated_locked()
+        except Exception:  # noqa: BLE001 - 重注入失败即通道不可用
+            return False
+        return w._hook_ok()
 
 
 # --- 连接后命令集时序(模块级便于测试 monkeypatch 调小)---
@@ -653,7 +686,9 @@ class PipelineCore:
                 # 从未在位＝结构上不可集成（非掉线），不空转注入
                 self._pad_reinject_at = time.monotonic()
                 try:
-                    await self._ensure_integrated()
+                    # 已持 _runner_lock：走无锁实现（经 _ensure_integrated
+                    # 取锁会重入死锁）
+                    await self._ensure_integrated_locked()
                 except Exception:  # noqa: BLE001 - 补注入失败不碍降级
                     pass
                 if self._hook_ok():
@@ -1124,60 +1159,69 @@ class PipelineCore:
         if not self._interactive or self.session is None:
             return False
         async with self._runner_lock:
-            self._ev_prompt.clear()
-            self._suppress_live = True
-            try:
-                # 前置 \x15 收纳半行但不补 \x19 恢复：任务启动即丢弃该半行
-                #（若 yank 回 kill ring 里的旧文本，会在提示符行复活污染输入）。
-                # 探测行必须敲在干净提示符上——半行没清，探测行会拼在用户
-                # 已敲文本后面整行执行。
-                await self.session.send_raw(b"\x15")
-                if self._shell_kind != "powershell":
-                    # 静默窗口先行：hook 不在位（su - 换壳）时探测行/分片行
-                    # 靠前导空格 + ignorespace 原生跳过入史；hook 在位时本行
-                    # 被 widget 按内部行（__ot_hc= 前缀）静默处理
-                    await self.session.send_raw(history_quiet_line())
-                shell, flag = await self._probe_shell_kind()
-                if shell is None:
-                    self._hook_gone = True
-                    return False
-                self._hook_gone = False
-                self._hook_stale = False   # 重注入落地：陈旧判定作废
-                self._cancel_hook_watch()
-                if shell != self._shell_kind:
-                    self._shell_kind = shell
-                    self._b64flag = flag
-                for _ci, line in enumerate(
-                        injection_lines(self._shell_kind,
-                                        self._reinject_inst_base(),
-                                        self._b64flag)):
-                    self._ev_stream.clear()
-                    await self.session.send_raw(line)
-                    # 逐片等本片回显到达再发下一片：固定短间隔会让分片堆进
-                    # shell 执行间隙的 canonical 缓冲（4096 溢出丢块，真机实测
-                    # 0.03s 间隔 md5 不复现）。回显即 readline 已读入本片的凭据；
-                    # 回显绝迹（裸模式残影）时退回实测安全的 0.12s 间隔。
-                    # 嵌套 ssh 隧道（跳板机）里 ZLE 对赋值行不回显——回显等待
-                    # 总是超时、分片全速连发被 ssh 通道合并成大包，远端 pty
-                    # 输入队列溢出**静默丢字节**，恰好丢掉末行 eval → 注入整链
-                    # 无声失败。因此无条件再垫 0.04s 最小间隔，保证远端逐片
-                    # 消化、批次不合并。
-                    try:
-                        await asyncio.wait_for(self._ev_stream.wait(), 0.12)
-                    except asyncio.TimeoutError:
-                        pass
-                    await asyncio.sleep(0.04)
+            return await self._ensure_integrated_locked()
+
+    async def _ensure_integrated_locked(self) -> bool:
+        """重注入本体：调用方必须已持有 _runner_lock。
+
+        拆出来是因为 InteractiveRunner.run（P0-1 门禁）与 _shell_pad 的 60s
+        兜底补注入自己就持着这把锁，再经 _ensure_integrated 取一次就是重入
+        死锁（asyncio.Lock 不可重入）——旧代码 _shell_pad 那条路径正踩着。
+        """
+        self._ev_prompt.clear()
+        self._suppress_live = True
+        try:
+            # 前置 \x15 收纳半行但不补 \x19 恢复：任务启动即丢弃该半行
+            #（若 yank 回 kill ring 里的旧文本，会在提示符行复活污染输入）。
+            # 探测行必须敲在干净提示符上——半行没清，探测行会拼在用户
+            # 已敲文本后面整行执行。
+            await self.session.send_raw(b"\x15")
+            if self._shell_kind != "powershell":
+                # 静默窗口先行：hook 不在位（su - 换壳）时探测行/分片行
+                # 靠前导空格 + ignorespace 原生跳过入史；hook 在位时本行
+                # 被 widget 按内部行（__ot_hc= 前缀）静默处理
+                await self.session.send_raw(history_quiet_line())
+            shell, flag = await self._probe_shell_kind()
+            if shell is None:
+                self._hook_gone = True
+                return False
+            self._hook_gone = False
+            self._hook_stale = False   # 重注入落地：陈旧判定作废
+            self._cancel_hook_watch()
+            if shell != self._shell_kind:
+                self._shell_kind = shell
+                self._b64flag = flag
+            for _ci, line in enumerate(
+                    injection_lines(self._shell_kind,
+                                    self._reinject_inst_base(),
+                                    self._b64flag)):
+                self._ev_stream.clear()
+                await self.session.send_raw(line)
+                # 逐片等本片回显到达再发下一片：固定短间隔会让分片堆进
+                # shell 执行间隙的 canonical 缓冲（4096 溢出丢块，真机实测
+                # 0.03s 间隔 md5 不复现）。回显即 readline 已读入本片的凭据；
+                # 回显绝迹（裸模式残影）时退回实测安全的 0.12s 间隔。
+                # 嵌套 ssh 隧道（跳板机）里 ZLE 对赋值行不回显——回显等待
+                # 总是超时、分片全速连发被 ssh 通道合并成大包，远端 pty
+                # 输入队列溢出**静默丢字节**，恰好丢掉末行 eval → 注入整链
+                # 无声失败。因此无条件再垫 0.04s 最小间隔，保证远端逐片
+                # 消化、批次不合并。
                 try:
-                    await asyncio.wait_for(self._ev_prompt.wait(), 2.0)
-                    # zsh POSTEDIT 重绘可能落在 A 标记之后：抑制窗口多留 80ms
-                    # 把它一并吞掉，否则每任务注入的重绘行泄漏进主屏（§5.5）
-                    await asyncio.sleep(0.08)
-                    return True
+                    await asyncio.wait_for(self._ev_stream.wait(), 0.12)
                 except asyncio.TimeoutError:
-                    return False
-            finally:
-                self._suppress_live = False
-                self._suppressed_echo = False
+                    pass
+                await asyncio.sleep(0.04)
+            try:
+                await asyncio.wait_for(self._ev_prompt.wait(), 2.0)
+                # zsh POSTEDIT 重绘可能落在 A 标记之后：抑制窗口多留 80ms
+                # 把它一并吞掉，否则每任务注入的重绘行泄漏进主屏（§5.5）
+                await asyncio.sleep(0.08)
+                return True
+            except asyncio.TimeoutError:
+                return False
+        finally:
+            self._suppress_live = False
+            self._suppressed_echo = False
 
     async def _probe_shell_kind(self) -> tuple[str | None, str]:
         """在当前提示符敲一行能力探测，识别 su - / 嵌套 shell 后的真实 shell 族。

@@ -778,53 +778,47 @@ async def test_runner_timeout_force_returns_130(monkeypatch):
     w._interactive = True
     w._shell_kind = "bash"
     w._b64flag = "-d"
+    w._last_mark_at = 1.0          # P0-1 门禁：hook 在位才允许注入
     runner = InteractiveRunner(w)
     res = await asyncio.wait_for(
         runner.run("sleep 100", timeout=0.3, on_output=None), timeout=5)
     assert res.exit_code == 130
     assert w._exec_future is None
     assert w._suppress_live is False
-    # Ctrl+C 已发（\x15 收半行 + \x03 中断；不 yank 复活 kill ring 文本）
+    # Ctrl+C 已发（\x15 收半行 + \x03 中断）；hook 在位时收尾照常发
+    # \x19 接回半行——「不 yank」是 hook 不在位的口径，见 P2-5 用例
     raws = [d for k, d in w.session.calls if k == "raw"]
-    assert b"\x03" in raws and not any(d == b"\x19" for d in raws)
+    assert b"\x03" in raws and raws[-1] == b"\x19"
     assert await asyncio.wait_for(w._wait_exec_idle(0.1), timeout=2)
 
 
 async def test_runner_sends_yank_restore_when_hook_ok(monkeypatch):
     """hook 在位：命令注入 \x15 收纳半行、执行收尾发 \x19 接回（真机「任务
-    期打字只剩尾巴」根因修复）；hook 不在位（su - 重置）不发 \x19——原生 ^Y
-    会复活 kill ring 旧内容。"""
+    期打字只剩尾巴」根因修复）。hook 不在位的口径见 P0-1 门禁用例：根本不
+    注入，自然也没有 \x19（原生 ^Y 会复活 kill ring 旧内容）。"""
     from openterminal.web.worker import InteractiveRunner
 
-    async def _one(hook_ok: bool):
-        w, sink = await _make_worker(monkeypatch)
-        await asyncio.wait_for(w.connected.wait(), timeout=2)
-        w._interactive = True
-        w._shell_kind = "bash"
-        w._b64flag = "-d"
-        if hook_ok:
-            w._last_mark_at = 1.0
-        runner = InteractiveRunner(w)
-        t = asyncio.ensure_future(
-            runner.run("docker ps", timeout=5, on_output=None))
-        await _wait(lambda: any(d == b"\x15"
-                                for k, d in w.session.calls if k == "raw"))
-        await asyncio.sleep(0.05)
-        # 直接 resolve：喂 exec_start 流事件会刷新 _last_mark_at，让 hook
-        # 「不在位」用例自相矛盾（C 帧标记本身就是 hook 在位的凭据）
-        from openterminal.web.worker import CommandResult
-        w._exec_future.set_result(CommandResult(
-            output="CONTAINER ID\n", exit_code=0, truncated=False, cwd="/tmp"))
-        await asyncio.wait_for(t, timeout=5)
-        return [d for k, d in w.session.calls if k == "raw"]
-
-    raws = await _one(True)
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._shell_kind = "bash"
+    w._b64flag = "-d"
+    w._last_mark_at = 1.0
+    runner = InteractiveRunner(w)
+    t = asyncio.ensure_future(
+        runner.run("docker ps", timeout=5, on_output=None))
+    await _wait(lambda: any(d == b"\x15"
+                            for k, d in w.session.calls if k == "raw"))
+    await asyncio.sleep(0.05)
+    # 直接 resolve：喂 exec_start 流事件会刷新 _last_mark_at（C 帧标记本身
+    # 就是 hook 在位的凭据），这里保持门禁口径干净
+    from openterminal.web.worker import CommandResult
+    w._exec_future.set_result(CommandResult(
+        output="CONTAINER ID\n", exit_code=0, truncated=False, cwd="/tmp"))
+    await asyncio.wait_for(t, timeout=5)
+    raws = [d for k, d in w.session.calls if k == "raw"]
     assert raws[0] == b"\x15"
     assert raws[-1] == b"\x19", "hook 在位：注入收尾必须发 \\x19 接回半行"
-    raws = await _one(False)
-    assert raws[0] == b"\x15"
-    assert not any(d == b"\x19" for d in raws), \
-        "hook 不在位：不得发 \\x19（原生 yank 会复活 kill ring 旧内容）"
 
 
 async def test_runner_busy_target_returns_124(monkeypatch):
@@ -843,6 +837,27 @@ async def test_runner_busy_target_returns_124(monkeypatch):
     assert w._exec_future is None
     assert not any(d == b"\x19" for k, d in w.session.calls if k == "raw")
 
+
+async def test_runner_hook_gone_fast_fails_zero_bytes(monkeypatch):
+    """P0-1 门禁（结构性不可集成）：快速失败回可读文案，PTY 输入流零字节。"""
+    from openterminal.web.worker import (
+        CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG, InteractiveRunner)
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._shell_kind = "bash"
+    w._b64flag = "-d"
+    w._hook_gone = True            # su - 换壳 / 旧版 shell：不可集成
+
+    runner = InteractiveRunner(w)
+    res = await asyncio.wait_for(
+        runner.run("df -h", timeout=1, on_output=None), timeout=5)
+    assert res.exit_code == CHANNEL_DEAD_EC
+    assert res.output == CHANNEL_DEAD_MSG and "重新登录" in res.output
+    assert w._exec_future is None
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert raws == [], "结构性不可集成：不空转注入，PTY 输入流一字节不发"
 
 # --- 泵与关闭 ---
 

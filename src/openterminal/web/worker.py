@@ -24,6 +24,7 @@ from ..core import (  # noqa: F401 —— 再导出：测试 monkeypatch 命名�
 # _WebPresenter 为 CorePresenter 的旧名别名（core 内已按 plan Step 2 更名）。
 from ..core import (  # noqa: F401
     CorePresenter as _WebPresenter, InteractiveRunner, CommandResult,
+    CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG,
 )
 from .protocol import encode_server
 
