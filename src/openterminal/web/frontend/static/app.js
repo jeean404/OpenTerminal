@@ -347,16 +347,8 @@ class Session {
         if (this._remeasurePending) this._remeasureCards();
       });
     }
-    // 复制/粘贴快捷键（xterm keydown 前的最后一道口）：
-    // - 复制：mac=Cmd+C，Win/Linux=Ctrl+C（有选中时）与 Ctrl+Shift+C；无选中
-    //   时不拦，Ctrl+C 照发 ^C 中断
-    // - 粘贴：Win/Linux 的 Ctrl+V 必须在此返回 false 放行浏览器原生 paste
-    //   事件——xterm 的 keydown 会把 Ctrl+V 译成 \x16（quoted-insert）发进
-    //   PTY 并 preventDefault，paste 事件根本不发生（真机 Windows 粘贴无效）；
-    //   返回 false 只跳过 xterm 处理，默认行为照常，粘贴由 xterm 的 paste
-    //   监听接管（http 局域网下也走得通，不依赖 clipboard.readText 权限）
+    // Cmd/Ctrl+Shift+C 有选中时复制（无选中时 Ctrl+C 照常发 ^C 中断）。
     // attachCustomKeyEventHandler 只有一个槽位，多个逻辑必须合并在一个 handler 里
-    const _isApple = /Mac|iPhone|iPad/.test(navigator.userAgent);
     term.attachCustomKeyEventHandler(ev => {
       // 卡片 island 的 DOM 选区优先原生复制：返回 false 让 xterm 不吞键
       // （否则 Cmd/Ctrl+C 会变成 ^C 发进 PTY，中断正在跑的命令）
@@ -365,15 +357,9 @@ class Session {
         const sel = window.getSelection ? window.getSelection() : null;
         if (sel && !sel.isCollapsed) return false;
       }
-      if (ev.type === "keydown" &&
-          (ev.metaKey || (ev.ctrlKey && ev.shiftKey) ||
-           (ev.ctrlKey && !_isApple)) &&
+      if (ev.type === "keydown" && (ev.metaKey || (ev.ctrlKey && ev.shiftKey)) &&
           ev.key.toLowerCase() === "c" && term.hasSelection()) {
         this._copyText(term.getSelection());
-        return false;
-      }
-      if (ev.type === "keydown" && !_isApple && ev.ctrlKey && !ev.shiftKey &&
-          !ev.altKey && !ev.metaKey && ev.key.toLowerCase() === "v") {
         return false;
       }
       // 审批快捷键必须在 xterm 的这个唯一钩子里路由：终端持有焦点时
