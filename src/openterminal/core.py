@@ -60,6 +60,33 @@ CHANNEL_DEAD_EC = 126
 #: 通道不可用时随 CommandResult 回给工具卡的可读文案
 CHANNEL_DEAD_MSG = ("远端 shell 已退出或无 AI 集成通道，命令未执行；"
                     "请重新登录（或回到可集成的 shell）后重试")
+# shell 自行退出的文字特征（bash TMOUT 自动登出 / ssh 客户端断链）。
+# 认「视觉行」而不是字节行：真机告别语紧跟提示符重画落进流里，前缀是
+# ESC[?2004l + CR + BEL，字节行首锚点跨不过那个 CR，一律漏检（真机审批期
+# TMOUT 后 __ot_pad 连环 command not found 的根因）。故先按 CR/LF 切出视觉
+# 行、剥掉转义与控制符，再整行全文匹配——告别语前只允许一段提示符宽度的
+# 普通字符（bash 是紧贴已打出的提示符写的），后面只许空白；命令输出里恰好
+# 含这些词的长行（grep 日志、带时间戳的行）撑不进这个宽度或后面还拖着正文，
+# 不误判。裸 logout 只在挂起窗口认（见 _shell_exit_window）。
+# （模块后段另有一个喂 str 的 _ANSI_RE，字节流这里必须另起名字，否则被覆盖）
+_EXIT_ANSI_RE = re.compile(
+    rb"\x1b\[[0-9;?]*[ -/]*[@-~]"               # CSI：颜色/光标/模式
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC：标题 / 133 标记
+    rb"|\x1b[@-_]"                               # 其余单字符转义
+)
+_EXIT_CTRL_RE = re.compile(rb"[\x00-\x1f\x7f]")
+#: 强特征：任意提示符位置都认（空闲提示符上的 TMOUT 最常见），但整行须是
+#: 「≤48 字符前缀 + 告别语 + 行尾空白」这一形状
+_SHELL_EXIT_RULES = (
+    (re.compile(rb".{0,48}timed out waiting for input: auto-logout\s*",
+                re.IGNORECASE), "timed out waiting for input: auto-logout"),
+    (re.compile(rb"Connection to .*?\b(?:closed|dropped)\b.*",
+                re.IGNORECASE), "Connection closed"),
+)
+#: 弱特征：整行就是一个裸 logout——仅审批挂起窗口认
+_SHELL_EXIT_WEAK_RULES = (
+    (re.compile(rb"logout\s*", re.IGNORECASE), "logout"),
+)
 # 回车看门狗时限：健康路径补发 \r 后，集成壳必在 PROMPT_COMMAND 里回 OSC 标记
 # （133;D + 133;A/B）。到点只收到纯文本、一个标记都没有 = 承接这个回车的根本
 # 不是集成壳（嵌套 shell 被 TMOUT/exit 收走后落回的裸壳）——此时健康路径的裸
@@ -382,6 +409,7 @@ class PipelineCore:
         # 透传回车（密码被误判成自然语言 = 登录被 ^C 掉）；②可弹模态收
         # 密码并按目标主机写入凭据库，下次自动填充
         self._pw_tail = bytearray()     # 输出滚动尾窗（提示符匹配）
+        self._exit_tail = bytearray()   # 登出特征滚动窗（_detect_shell_exit）
         self._pw_prompt_seen = False    # 尾窗以密码提示符结尾（已触发应答）
         self._nested_pw_attempts = 0    # 当前嵌套命令已应答次数（0 允许自动填充）
         self._nested_pw_ctx: tuple[str | None, str | None, int | None] | None = None
@@ -2326,6 +2354,7 @@ class PipelineCore:
                     _dbg("intr swallow: 整块被 ^C 回显吞除")
                     continue
             self._detect_password_prompt(data)
+            await self._detect_shell_exit(data)
             if not self._interactive or self._display == "ssh":
                 self._pump_phase = "passthru"
                 await self.emit_bytes(data)   # 回退模型 / Shell 模式：纯透传
@@ -2754,6 +2783,82 @@ class PipelineCore:
             return
         _dbg("hook stale: 回车后只有文本没有标记 → 转降级")
         self._hook_stale = True
+
+    # --- shell 自行退出感知（TMOUT 自动登出 / logout / 断链）--------------
+
+    async def _detect_shell_exit(self, data: bytes) -> None:
+        """在输出字节流里认 shell 自行退出的文字特征。
+
+        bash 退出不发任何 OSC 标记，_hook_gone 的两个入口与回车看门狗都够
+        不着（见 _hook_ok 注释的「第三类」）；而 TMOUT 最常命中在**审批等待
+        期**——那段 core 对 PTY 零字节发送，看门狗根本无从武装。故只能在字节
+        流里认文字，匹配口径见 _match_shell_exit。
+        """
+        self._exit_tail.extend(data)
+        if len(self._exit_tail) > 4096:
+            del self._exit_tail[:-2048]
+        why = self._match_shell_exit(bytes(self._exit_tail))
+        if why is None:
+            return
+        self._exit_tail.clear()
+        await self._note_shell_dead(why)
+
+    def _match_shell_exit(self, tail: bytes) -> str | None:
+        """在滚动窗里认 shell 告别语，回命中片段；没命中回 None。
+
+        视觉行＝按 CR / LF 断开（CR 重画、提示符转义都并进同一行），剥掉转义
+        与控制符后**整行**全文匹配。两重收敛防误判：告别语前只允许一段提示符
+        宽度的普通字符、后面只许空白；裸 logout 只在审批挂起窗口认。只翻窗尾
+        几行：命中即清窗处置，再往前翻只会翻出早已处置过（或与本次无关）的
+        旧行。
+        """
+        lines = [x for x in re.split(rb"[\r\n]", tail) if x.strip()]
+        for line in lines[-8:]:
+            plain = _EXIT_CTRL_RE.sub(b"", _EXIT_ANSI_RE.sub(b"", line))
+            for pat, label in _SHELL_EXIT_RULES:
+                if pat.fullmatch(plain):
+                    return plain.decode("utf-8", "replace")[:80] or label
+            if self._shell_exit_window():
+                for pat, label in _SHELL_EXIT_WEAK_RULES:
+                    if pat.fullmatch(plain):
+                        return label
+        return None
+
+    def _shell_exit_window(self) -> bool:
+        """退出特征的弱匹配窗口：审批挂起。
+
+        审批等待期 core 对 PTY 零字节发送、没有命令输出在途，行首 logout
+        只可能是 shell 自己的告别；窗口外认了会把 history/ps/grep 输出里
+        恰好成行的 logout 误判成壳死了。强特征（TMOUT 告别语 / ssh 断链）
+        贴行首且专用，不受此窗口限制——空闲提示符上的 TMOUT 最常见，而那段
+        既不在审批挂起也不在执行等待。"""
+        return self._pending_approval is not None
+
+    async def _note_shell_dead(self, why: str) -> None:
+        """壳已死：作废 hook 活凭据，立刻解阻塞在途工具执行。
+
+        后续提交与工具注入经 _hook_ok 转假走门禁/降级（P0-1、P1-4），不再把
+        工具注入行、Ctrl+C、__ot_pad 注进落回来的裸壳。任一 OSC 标记到达即由
+        _note_hook_mark 撤销陈旧判定（外层集成壳重画提示符＝自愈）。
+        """
+        if not self._interactive:
+            return
+        first = not self._hook_stale
+        self._hook_stale = True       # _hook_ok 转假：注入/健康路径全降级
+        self._last_mark_at = 0.0      # 死壳留下的旧时间戳不得再当活凭据
+        self._cancel_hook_watch()
+        fut = self._exec_future
+        if fut is not None and not fut.done():
+            # 明确错误立即收束，不等超时打 ^C（那也是落进裸壳的垃圾）
+            fut.set_result(CommandResult(
+                output=f"[ot] 远端 shell 已退出（{why}），命令未执行；"
+                       f"请重新登录后重试",
+                exit_code=CHANNEL_DEAD_EC, truncated=False, cwd=""))
+        if first:
+            await self.emit_msg(ServerMsg(
+                type="status",
+                text=f"远端 shell 已退出（{why}）：AI 工具执行不可用，"
+                     f"请重新登录后重试"))
 
     async def _submit_fallback(self, t: str) -> None:
         """健康路径兜底：补发 \\r 后 hook AI 上报迟迟未到（重置误判/路由丢报）

@@ -888,6 +888,185 @@ async def test_runner_hook_gone_fast_fails_zero_bytes(monkeypatch):
     raws = [d for k, d in w.session.calls if k == "raw"]
     assert raws == [], "结构性不可集成：不空转注入，PTY 输入流一字节不发"
 
+
+async def test_shell_exit_during_approval_blocks_later_inject(monkeypatch):
+    """P1-3 + P0-1 + P1-4 联动（真机根因链）：审批等待期 TMOUT 自动登出
+    → 挂起的工具执行立即以明确错误收束（不等超时打 ^C），stale 置位、死壳
+    留下的活凭据作废；审批「同意」到达后工具注入一个字节都不发，工具卡显示
+    可读原因而不是注垃圾进裸壳。"""
+    from openterminal.web.worker import (
+        CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG, CommandResult, InteractiveRunner,
+        ServerMsg)
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._shell_kind = "bash"
+    w._b64flag = "-d"
+    w._last_mark_at = 1.0
+    fut = asyncio.get_running_loop().create_future()
+    w._exec_future = fut
+    w._pending_approval = ServerMsg(type="status", text="审批卡")
+    w._exit_tail.clear()
+
+    await w._detect_shell_exit(b"timed out waiting for input: auto-logout\r\n")
+
+    assert w._hook_stale is True, "stale 置位：_hook_ok 转假，注入/健康全降级"
+    assert w._last_mark_at == 0.0, "死壳留下的旧时间戳不得再当活凭据"
+    assert fut.done(), "挂起 exec 立即收束，不等超时打 ^C"
+    res = fut.result()
+    assert res.exit_code == CHANNEL_DEAD_EC
+    assert "远端 shell 已退出" in res.output and "重新登录" in res.output
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "status" and "远端 shell 已退出" in x.get("text", "")
+        for x in m))
+    w._pending_approval = None
+    w._exec_future = None
+
+    # 决策到达：工具注入走门禁快速失败，PTY 里不得出现任何注入垃圾
+    async def _fail_locked():
+        return False
+    monkeypatch.setattr(w, "_ensure_integrated_locked", _fail_locked)
+    runner = InteractiveRunner(w)
+    res = await asyncio.wait_for(
+        runner.run("head -2 /var/log/app.log; echo ====", timeout=1,
+                   on_output=None), timeout=5)
+    assert isinstance(res, CommandResult)
+    assert res.exit_code == CHANNEL_DEAD_EC and res.output == CHANNEL_DEAD_MSG
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert not any(b"__ot_exec__" in d or b"__ot_pad" in d or d == b"\x03"
+                   for d in raws), "注入垃圾不得落进落回来的裸壳"
+    assert not any(b"head -2" in d for d in raws), "命令本体不得进裸壳"
+
+
+async def test_shell_exit_resolves_pending_exec_without_approval(monkeypatch):
+    """P1-3 另一半窗口：工具执行等待期壳死同样立即收束（不挂超时/130）。"""
+    from openterminal.web.worker import CHANNEL_DEAD_EC
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    fut = asyncio.get_running_loop().create_future()
+    w._exec_future = fut
+    w._exit_tail.clear()
+
+    await w._detect_shell_exit(
+        b"Connection to 10.0.0.20 closed by remote host.\r\n")
+    assert w._hook_stale is True and fut.done()
+    assert fut.result().exit_code == CHANNEL_DEAD_EC
+    assert "远端 shell 已退出" in fut.result().output
+
+
+async def test_shell_exit_not_fired_on_buried_log_line(monkeypatch):
+    """误判防护：命令输出里带时间戳的长日志行含告别语（grep 日志），不得
+    判壳死了——告别语须紧贴行首（允许一段提示符前缀）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._exit_tail.clear()
+    await w._detect_shell_exit(
+        b"2026-10-08T10:00:00+08:00 web01 app[12345]: WARN history says: "
+        b"timed out waiting for input: auto-logout\r\n")
+    assert w._hook_stale is False and w._last_mark_at == 1.0
+
+
+async def test_shell_exit_prompt_prefixed_tmout_is_detected(monkeypatch):
+    """真机形态：bash 超时消息紧贴已打出的提示符（同一行）也要认出来。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._exit_tail.clear()
+    await w._detect_shell_exit(
+        b"[root@web01 ~]# timed out waiting for input: auto-logout\r\n")
+    assert w._hook_stale is True and w._last_mark_at == 0.0
+
+
+async def test_shell_exit_real_prompt_redraw_bytes_are_detected(monkeypatch):
+    """真机原始字节形态（漏检根因）：告别语紧跟提示符重画落进流里，前缀是
+    ESC[?2004l + CR + BEL。字节行首锚点跨不过那个 CR，旧口径一律漏检；新口径
+    按 CR/LF 切视觉行 + 剥转义后再整行匹配。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._exit_tail.clear()
+    await w._detect_shell_exit(
+        b"\x1b[?2004l\r\x07timed out waiting for input: auto-logout\r\n")
+    assert w._hook_stale is True and w._last_mark_at == 0.0
+
+
+async def test_shell_exit_trailing_junk_log_line_not_fired(monkeypatch):
+    """误判防护：告别语后面还拖着正文（日志行把它当消息内容）不得判壳死了。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    w._exit_tail.clear()
+    await w._detect_shell_exit(
+        b"[root@web01 ~]# grep -R 'timed out waiting for input: auto-logout' "
+        b"/var/log | head\r\n")
+    assert w._hook_stale is False and w._last_mark_at == 1.0
+
+
+async def test_shell_exit_bare_logout_approval_window_only(monkeypatch):
+    """弱特征裸 logout：审批挂起窗口认（没有命令输出在途），窗口外不认
+    （history/ps 输出里恰好成行的 logout 不得误判）。"""
+    from openterminal.web.worker import ServerMsg
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+
+    w._pending_approval = ServerMsg(type="status", text="审批卡")
+    w._exit_tail.clear()
+    await w._detect_shell_exit(b"logout\r\n")
+    assert w._hook_stale is True, "审批窗口内行首 logout 只可能是壳在告别"
+
+    w._hook_stale = False
+    w._last_mark_at = 1.0
+    w._pending_approval = None
+    w._exit_tail.clear()
+    await w._detect_shell_exit(b"logout\r\n")
+    assert w._hook_stale is False, "窗口外不得认裸 logout"
+
+
+async def test_dead_shell_first_submit_never_hits_bare_shell(monkeypatch):
+    """P1-4：TMOUT 登出落回裸壳后，第一次自然语言提交不得把整行 + 裸 \r
+    打进裸壳（那正是「整行被执行」的根因）。"""
+    from openterminal.web.worker import ServerMsg
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+    await _install_fake_runner(monkeypatch)
+    _wire_presenter(w)
+
+    w._pending_approval = ServerMsg(type="status", text="审批卡")
+    await w._detect_shell_exit(b"timed out waiting for input: auto-logout\r\n")
+    w._pending_approval = None
+    assert w._hook_stale is True and not w._hook_ok()
+
+    async def _fail():
+        return False
+    monkeypatch.setattr(w, "_ensure_integrated", _fail)
+
+    n = len([c for c in w.session.calls if c[0] == "raw"])
+    await w.handle_client(ClientMsg(type="submit", text="帮我看看磁盘占用"))
+    raws = [d for k, d in w.session.calls if k == "raw"][n:]
+    assert not any("帮我看看磁盘占用".encode() in d for d in raws), \
+        "整行自然语言不得进裸壳"
+    assert not any(d == b"\r" or d.endswith(b"\r") for d in raws), \
+        "不得有裸回车把整行交给裸壳执行"
+    await _wait(lambda: w._ai_task is None)
+    await _wait_json(sink, lambda m: any(
+        x.get("event", {}).get("kind") == "task_start"
+        and x["event"]["text"] == "帮我看看磁盘占用" for x in m))
+
 # --- 泵与关闭 ---
 
 async def test_worker_close_exits_tasks(monkeypatch):
