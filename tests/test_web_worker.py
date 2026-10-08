@@ -1067,6 +1067,34 @@ async def test_dead_shell_first_submit_never_hits_bare_shell(monkeypatch):
         x.get("event", {}).get("kind") == "task_start"
         and x["event"]["text"] == "帮我看看磁盘占用" for x in m))
 
+
+async def test_probe_failure_reports_status_once(monkeypatch):
+    """P2-6：重注入探测判定不可集成时回一条中文状态告知前端（同一 shell
+    只报一次），不让后续任务静默失败。"""
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "_PROBE_TIMEOUT", 0.05)
+
+    def _count_unusable():
+        return len([x for x in sink.json()
+                    if x.get("type") == "status"
+                    and "无法集成" in x.get("text", "")])
+
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+
+    assert await w._ensure_integrated() is False
+    assert w._hook_gone is True
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "status" and "无法集成" in x.get("text", "")
+        for x in m))
+    before = _count_unusable()
+
+    assert await w._ensure_integrated() is False
+    await asyncio.sleep(0.05)
+    assert _count_unusable() == before, "同一 shell 不重复播报"
+
 # --- 泵与关闭 ---
 
 async def test_worker_close_exits_tasks(monkeypatch):

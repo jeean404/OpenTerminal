@@ -1213,6 +1213,15 @@ class PipelineCore:
                 await self.session.send_raw(history_quiet_line())
             shell, flag = await self._probe_shell_kind()
             if shell is None:
+                if not self._hook_gone and not self._hook_stale:
+                    # 首次判定不可集成：明确告知前端，别让每个任务静默失败。
+                    # _hook_stale（壳已自行退出）时不发：根因已由
+                    # _note_shell_dead 报过，再发一句「bash 3.2 / 前台占用」
+                    # 是互相打架的误导
+                    await self.emit_msg(ServerMsg(
+                        type="status",
+                        text="当前 shell 无法集成（bash 3.2 等旧壳 / 前台占用），"
+                             "AI 工具执行不可用；请换可集成的 shell 后重试"))
                 self._hook_gone = True
                 return False
             self._hook_gone = False
