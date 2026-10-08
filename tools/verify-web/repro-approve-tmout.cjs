@@ -21,6 +21,7 @@ const lib = require("./lib");
 
 const PORT = Number(process.argv[2] || 8243);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const NL = "\n";
 const HOME = path.join(lib.OUT, "approvetmout-home");
 const SSH_PORT = Number(process.env.OT_REPRO_SSH_PORT || 2222);
 const TARGET = "jump";
@@ -30,8 +31,8 @@ const PW = { ubuntu: "ub123456", xiaojian: "xj123456", root: "root123456" };
 // 修复后注入行是单引号包住的一条命令 + 一个字面参数，任何一段都不得执行。
 const SEG1 = "/tmp/ot-seg1";
 const SEG2 = "/tmp/ot-seg2";
-const NL_APPROVE = `请用一条命令执行 touch ${SEG1}; touch ${SEG2}（不要拆成两条），` +
-  "执行完把结果告诉我";
+const NL_APPROVE = `请用一条命令执行 echo A>${SEG1}; echo B>${SEG2}` +
+  "（一条命令、分号连两段，不要拆成两次调用），执行完把结果告诉我";
 const NL_AFTER = "执行 echo MARK-AFTER 并把输出原样告诉我";
 
 const results = [];
@@ -203,6 +204,64 @@ async function waitTail(page, re, timeout, n = 300) {
   return { ok: false, waited: Date.now() - t0, text: tail };
 }
 
+// 审批挂起期 root 空闲自动登出的判据。屏幕文本不可靠：欢迎横幅/卡片临界区
+// 会把 PTY 字节先扣进 _holdBuf（app.js _ingestBytes），登出那一行
+// `timed out waiting for input: auto-logout` 可能还没落屏；落屏后又会被
+// 重注入的提示符重绘挤出视口。所以两条通道一起看：屏幕文本，以及服务端
+// 字节流日志（OT_WEB_DEBUG=1 下泵的 raw 行原样记 PTY 字节——P1-3 认的就
+// 是这段字节，这也是最贴近真值的一条）。
+async function logSize(p) {
+  try { return fs.statSync(p).size; } catch (e) { return 0; }
+}
+
+async function logTailHit(p, from, re) {
+  try {
+    const st = fs.statSync(p);
+    if (st.size <= from) return null;
+    const len = Math.min(st.size - from, 65536);
+    const fd = fs.openSync(p, "r");
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, from);
+    fs.closeSync(fd);
+    const m = buf.toString("utf8").match(re);
+    return m ? m[0] : null;
+  } catch (e) { return null; }
+}
+
+// 工具卡标题带的是真要跑的那条命令：D2 的原子性断言只有在它**确实分段**时
+// 才有意义。模型可能把两段折成一条不带分段的等价命令（例如 touch a b，
+// 一个 touch 带两个参数），那时 seg1/seg2 同真同假只是空断言，验不到
+// 「裸壳拆段照跑」那条旧症状。拿不到分段就报「场景无效」，不静默放过。
+function cmdOf(p) {
+  const all = (p.cards || []).join(String.fromCharCode(10));
+  const m = all.match(/调用工具：execute\s+([^\n]+)/) ||
+            all.match(/命令：\s+([^\n]+)/);
+  return m ? m[1].trim() : "";
+}
+
+async function waitShellLogout(page, logPath, timeout) {
+  const t0 = Date.now();
+  const RE = /timed out waiting for input|auto-logout/i;
+  const logAt0 = await logSize(logPath);
+  let txt = "";
+  while (Date.now() - t0 < timeout) {
+    txt = await lib.snapshot(page);
+    const m = txt.match(RE);
+    if (m) {
+      return { ok: true, waited: Date.now() - t0, via: "screen",
+               hit: m[0], text: txt };
+    }
+    const h = await logTailHit(logPath, logAt0, RE);
+    if (h) {
+      return { ok: true, waited: Date.now() - t0, via: "bytes",
+               hit: h, text: txt };
+    }
+    await sleep(250);
+  }
+  return { ok: false, waited: Date.now() - t0, text: txt,
+           tail: txt.replace(/\s+$/, "").slice(-300) };
+}
+
 const countOf = (text, tok) => String(text || "").split(tok).length - 1;
 
 async function waitApproval(page, timeout = 45000) {
@@ -222,9 +281,13 @@ async function waitApproval(page, timeout = 45000) {
   return { ok: false, waited: Date.now() - t0, probe: await probe(page) };
 }
 
-// 点审批的「同意/确认执行」——只在本脚本显式调用时才点
+// 点审批的「同意/确认执行」——只在本脚本显式调用时才点。
+// 高危卡是**两段**确认：点「执行」只是露出「高危命令，确认执行？」确认条
+// （ui.js 里 risk === "high" 的分支只 toggle 那条），真正放行要点「确认
+// 执行」。只点一次会让 core 的 ask_approval 一直等决策：任务假死，之后的
+// 自然语言全被 _ai_queue 排队，屏幕上只剩思考徽标（真机同款观感）。
 async function clickApprove(page) {
-  return page.evaluate(() => {
+  const pick = () => page.evaluate(() => {
     const root = document.querySelector("#modal-root");
     const modal = root && root.querySelector(".modal");
     // 工具宣告卡也挂 .aphead：只在带「是否同意」问句的那张里找按钮
@@ -233,18 +296,30 @@ async function clickApprove(page) {
     const btns = apHead
       ? Array.from(apHead.querySelectorAll("button"))
       : (modal ? Array.from(root.querySelectorAll(".modal-btns button")) : []);
-    // 精确点「执行」：「始终允许」会把命令写进策略白名单，绕过真正的
-    // 同意执行路径（断言就验不到「同意」这条链了）
     const txt = x => (x.innerText || "").replace(/\s+/g, "");
-    const b = btns.find(x => /^(执行|确认执行|保存并执行|同意)$/.test(txt(x)))
-            || btns.find(x => /执行|同意|批准/.test(txt(x)) && !/始终|永久/.test(txt(x)));
+    // 确认条开着就直接点「确认执行」；否则点「执行/批准」把它露出来。
+    // 「始终允许」会把命令写进策略白名单，绕过真正的同意执行路径
+    // （断言就验不到「同意」这条链了）
+    const b = btns.find(x => /^确认执行$/.test(txt(x)))
+            || btns.find(x => /^(执行|保存并执行|同意|批准)$/.test(txt(x)))
+            || btns.find(x => /执行|同意|批准/.test(txt(x))
+                          && !/始终|永久|取消/.test(txt(x)));
     if (!b) {
       return "no-btn:" + (apHead ? (apHead.innerText || "").slice(0, 60)
                                  : (modal ? "modal" : "no-approval-card"));
     }
     b.click();
-    return "approve:" + (b.innerText || "").trim().slice(0, 20);
+    return "click:" + txt(b);
   });
+  const s1 = await pick();
+  if (s1.indexOf("click:") !== 0) return s1;
+  await sleep(300);      // React 重渲染后「确认执行」才进 DOM
+  const s2 = await pick();
+  // 非高危卡（「是否同意执行以下命令…」）点「执行」当场放行，第二趟已无卡可点；
+  // 高危卡（「…高危命令…」）第二趟才点得到「确认执行」。两种都记下来。
+  const last = s2.indexOf("click:") === 0
+    ? s1.slice(6) + "→" + s2.slice(6) : s1.slice(6);
+  return "approve:" + last;
 }
 
 async function waitTaskEnd(page, timeout = 90000) {
@@ -368,14 +443,17 @@ async function main() {
       apr.ok ? `${apr.waited}ms：${apr.title} | ${apr.body}`
              : "45s 内没弹审批卡；probe=" + JSON.stringify(apr.probe));
     if (!apr.ok) { butlerStop = true; return finish(logPath); }
+    const approveCmd = cmdOf(await probe(page));
 
     console.log("\n########## 阶段 C：挂审批不点，等 root TMOUT 自动登出 ##########");
-    const loggedOut = await waitTail(
-      page, /timed out waiting for input|auto-logout/, 30000);
-    dump("at-after-tmout.txt", loggedOut.text);
+    const loggedOut = await waitShellLogout(page, logPath, 60000);
+    dump("at-after-tmout.txt", (loggedOut.text || "") +
+      NL + "via=" + loggedOut.via + " hit=" + (loggedOut.hit || ""));
     record("C1 审批挂起期 root 空闲自动登出", loggedOut.ok,
-      loggedOut.ok ? `${loggedOut.waited}ms 命中 ${JSON.stringify(loggedOut.hit.slice(0, 60))}`
-                   : "30s 内没掉回；屏幕尾=" + JSON.stringify(loggedOut.text.slice(-300)));
+      loggedOut.ok
+        ? `${loggedOut.waited}ms 命中 ${JSON.stringify((loggedOut.hit || "").slice(0, 60))}` +
+          `（${loggedOut.via === "bytes" ? "PTY 字节流" : "屏幕"}）`
+        : "60s 内没掉回；屏幕尾=" + JSON.stringify((loggedOut.tail || "").slice(-300)));
     resetSegs();
 
     console.log("\n########## 阶段 D：点「同意」——旧症状：垃圾刷屏 + 后半段照跑 ##########");
@@ -383,9 +461,17 @@ async function main() {
     dump("at-before-approve.txt", beforeApprove);
     const clicked = await clickApprove(page);
     record("D0 已点审批「同意」", clicked.indexOf("approve:") === 0, clicked);
+    const pClick = await probe(page);
+    dump("at-after-click.txt", ["clicked=" + clicked,
+      "apr=" + pClick.approvalCard, "modal=" + pClick.modalTitle,
+      "cards=" + JSON.stringify(pClick.cards)].join(String.fromCharCode(10)));
     await sleep(4000);          // 给快速失败/重集成留时间
     await waitTaskEnd(page, 60000);
     await sleep(1500);
+    const pWait = await probe(page);
+    dump("at-after-wait.txt", ["apr=" + pWait.approvalCard,
+      "modal=" + pWait.modalTitle, "cards=" + JSON.stringify(pWait.cards),
+      "think=" + pWait.think].join(String.fromCharCode(10)));
     const after = await lib.snapshot(page);
     dump("at-after-approve.txt", after);
     const delta = after.length > beforeApprove.length
@@ -400,11 +486,15 @@ async function main() {
 
     const segs = segFiles();
     const partial = segs.seg1 !== segs.seg2;
-    record("D2 命令本体没有任何一段被执行（原子性）", !partial,
-      partial
-        ? `★ 部分执行：seg1=${segs.seg1} seg2=${segs.seg2}（裸壳把 ; 后那段照跑了）`
-        : `seg1=${segs.seg1} seg2=${segs.seg2}
-（同无=快速失败未执行；同有=重集成后完整执行）`);
+    const segmented = /;|&&|\|\||`|\$\(/.test(approveCmd);
+    record("D2 命令本体没有任何一段被执行（原子性）", segmented && !partial,
+      !segmented
+        ? `★ 场景无效：实际命令没分段 ${JSON.stringify(approveCmd)}，原子性断言空转`
+        : partial
+          ? `★ 部分执行：seg1=${segs.seg1} seg2=${segs.seg2}（裸壳把 ; 后那段照跑了）`
+          : `命令 ${JSON.stringify(approveCmd)}` + String.fromCharCode(10) +
+            `seg1=${segs.seg1} seg2=${segs.seg2}（同无=快速失败未执行；` +
+            `同有=重集成后完整执行）`);
 
     // 可读原因落在状态栏 / 工具卡，不在终端字节流里——两处都要看
     const pAfter = await probe(page);
@@ -446,6 +536,7 @@ async function main() {
       trace.push(Math.round((Date.now() - t0) / 1000) + "s n=" + n
         + " think=" + p.think + " apr=" + (p.approvalCard ? "Y" : "n")
         + " cards=" + (p.cards || []).length
+        + " modal=" + JSON.stringify(p.modalTitle || "")
         + " status=" + JSON.stringify(String(p.status || "").slice(0, 40)));
       if (n >= 2) { mark = { ok: true, n, text: txt }; break; }
       mark = { ok: false, n, text: txt };
@@ -459,6 +550,7 @@ async function main() {
     const pE = await probe(page);
     const sep = String.fromCharCode(10);
     dump("at-e-cards.txt", ["status=" + pE.status,
+      "modal=" + pE.modalTitle, "modalText=" + pE.modal,
       "approval=" + pE.approvalCard, "think=" + pE.think]
       .concat(pE.cards || []).join(sep));
     const hungOnApproval = !mark.ok && !!pE.approvalCard;
