@@ -51,6 +51,12 @@ _PW_VERIFY_TIMEOUT = 3.0
 # hold 释放防抖：auth 结果输出后稍等再放——隧道合包可能把 deny 与重讨提示符
 # 拆成两块，即放会让抢跑命令打进新密码位
 _PW_HOLD_RELEASE = 0.25
+# AI 僵尸任务静默上限：_ai_task 存活但长时间零产出（无 ai_token/think/tool、
+# 无非遇抑 echo）→ 按僵尸回收。触发场景：任务卡在某个等不住的 await 上一直
+# 不归 None，使提示符幕帘在每次 prompt_start 重新关帘（见 _curtain_close），
+# shell 重绘的新提示符永被扣住 → 底行目录冻结「像写死」。回收后 finally 自动
+# 清 _ai_task 并开帘，提示符即刻恢复。取长值防空转思考被误杀。
+_AI_ZOMBIE_T = 180.0
 _PW_MODAL_DISMISS = 0.5   # 密码提示符被消费后陈旧模态的代关防抖
 
 # 换壳探测（_probe_shell_kind）：等 __OTPROBE__ 输出的最长时限
@@ -452,6 +458,7 @@ class PipelineCore:
         self._tool_card_seq = 0
         self._tool_idx_map: dict[int, int] = {}   # runner 局部 index → 全局卡 id
         self._ai_task: asyncio.Task | None = None
+        self._ai_ping_at = 0.0  # AI 任务最近一次有产出（_live）的时间戳，僵尸判据
         self._ai_queue: list = []           # AI 忙时排队 (line, hooked)
         # --- 外部触发链的 hook 存活判定（Workbench 蓝色回显路径）---
         # hook 的 OSC 标记由 PROMPT_COMMAND/PS1 产生：su - 等 login shell 重置
@@ -564,6 +571,28 @@ class PipelineCore:
             if self._closed:
                 break
             self._emit_nowait(ServerMsg(type="ping"))
+            await self._reap_zombie_ai()
+
+    async def _reap_zombie_ai(self) -> None:
+        """僵尸任务自愈：``_ai_task`` 存活却长时间零产出且 shell 空闲 → 回收。
+
+        兜底缓解「底行提示符冻结」一类：任务卡在某个等不住的 await 上一直不
+        归 None，``_curtain_close`` 便会在每次 prompt_start 重新关帘，shell 重绘的新
+        提示符（cd 后就该变目录）永被幕帘扣住。回收走
+        ``_maybe_cancel_ai`` → ``_ai_flow`` 的 finally 自动清 ``_ai_task``
+        并开帘，提示符即刻恢复；同时放 status 知会前端/用户。"""
+        t = self._ai_task
+        if t is None or t.done():
+            return
+        if t.get_coro() is asyncio.current_task():
+            return    # 自己不能收自己
+        if time.monotonic() - self._ai_ping_at < _AI_ZOMBIE_T:
+            return
+        _dbg("ai zombie reap: ai_task 静默 >", _AI_ZOMBIE_T, "s")
+        await self._maybe_cancel_ai()
+        await self.emit_msg(ServerMsg(
+            type="status",
+            text="AI 任务长时间无响应，已自动停止；提示符已恢复。如需继续请重发。"))
 
     def _flush_offline(self) -> None:
         """补发断线期攒下的控制帧：插到 outbox 队头，保证先于重挂后新帧。
@@ -2110,6 +2139,7 @@ class PipelineCore:
         self.backend.on_boundary = self._boundary_gate
 
         def _live(ev) -> None:
+            self._ai_ping_at = time.monotonic()   # 事件产出 = 任务在世，僵尸判据刷新
             if ev.kind == "token":
                 self._emit_nowait(ServerMsg(
                     type="event",
@@ -2887,6 +2917,7 @@ class PipelineCore:
         await self._on_ai_line(t)
 
     def _start_ai(self, line: str, hooked: bool = False) -> None:
+        self._ai_ping_at = time.monotonic()   # 僵尸回收基准：任务起点即有锚
         self._ai_task = asyncio.create_task(self._ai_flow(line, hooked))
 
     async def _ai_flow(self, line: str, hooked: bool = False) -> None:
