@@ -197,10 +197,9 @@ class InteractiveRunner:
             fut = asyncio.get_running_loop().create_future()
             w._exec_future = fut
             try:
-                # 不吞回显：注入行的 tty 回显（明文时即青色命令本身）必须
-                # 原样进 xterm——Windows ConPTY 按自己的缓冲区模型发绝对
-                # 光标定位重绘，吞字节会让 xterm 光标与 ConPTY 失步（实测
-                # 提示符叠印/内容覆盖的根因）
+                # 不吞回显：注入行的 tty 回显必须原样进 xterm——Windows ConPTY
+                # 按自己的缓冲区模型发绝对光标定位重绘，吞字节会让 xterm 光标
+                # 与 ConPTY 失步（实测提示符叠印/内容覆盖的根因）
                 await w.session.send_raw(b"\x15")     # 收纳用户半行输入
                 await w.session.send_raw(
                     agent_exec_line(w._shell_kind, command, w._b64flag))

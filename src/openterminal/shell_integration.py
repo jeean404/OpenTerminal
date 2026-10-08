@@ -251,6 +251,10 @@ __ot_submit() {
       return 0 ;;
     '__ot_exec__ '*)
       t="${line:12}"
+      # 注入行原子性：体恒为单引号包裹（裸壳下整行只剩一条不存在的命令，
+      # 分号段/命令替换一律不得执行）。这里解一层引号还原原命令再执行。
+      # 含单引号的命令走 base64 包装分支，不进到这里，故不须处理引号转义
+      case "$t" in "'"*"'" ) t="${t#?}"; t="${t%?}" ;; esac
       printf '\033]6337;%s;%s;%s\007' "$__ot_i" EXEC "$t"
       READLINE_LINE=""; READLINE_POINT=0
       __ot_exec_run "$t"
@@ -482,6 +486,8 @@ __ot_submit() {
       return ;;
     '__ot_exec__ '*)
       t="${line:12}"; kind=EXEC
+      # 注入行原子性（同 bash 侧注释）：解一层单引号还原原命令
+      case "$t" in "'"*"'" ) t="${t#?}"; t="${t%?}" ;; esac
       # 显示用还原：base64 包装解码回原命令（青色回显不出现包装语法）
       show="$t"
       if [[ "$t" == 'eval "$(echo '* ]]; then
@@ -761,6 +767,11 @@ Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
   }
   if ($line.StartsWith('__ot_exec__ ')) {
     $inj = $line.Substring(12)
+    # 注入行原子性（同 bash/zsh 侧注释）：解一层单引号还原原命令。
+    # 含单引号的命令走 iex base64 包装分支，不进到这里
+    if ($inj.Length -ge 2 -and $inj.StartsWith("'") -and $inj.EndsWith("'")) {
+      $inj = $inj.Substring(1, $inj.Length - 2)
+    }
     __ot_osc("6337;$($global:__ot_i);EXEC;$inj")
     # AI 工具命令入史：↑/↓ 召回历史命令。base64 包装体解码回可读原文再记；
     # 多行/解码失败跳过（单行召回装不下换行、包装语法进史是垃圾）
@@ -966,17 +977,30 @@ def is_internal_line(line: str) -> bool:
     return s.startswith(_INTERNAL_LINE_PREFIXES) or s.startswith(_INTERNAL_LINE_EVAL)
 
 
-def agent_exec_line(shell: str, command: str, b64flag: str = "-d") -> bytes:
-    """AI 工具命令的注入行：``__ot_exec__ `` 前缀 + 命令本体。
+#: 可明文注入的命令体字符集：单引号包裹后整行恒为「一条命令 + 一个字面
+#: 参数」，裸壳（``__ot_exec__`` 不在位）解析时不得产生任何副作用。
+_QUOTABLE_RE = re.compile(r"^[\x20-\x26\x28-\x7e]+$")
 
-    优先明文注入：tty 回显即命令本身（青色，§5.6 观感），且不吞回显——
-    Windows ConPTY 按自己的缓冲区模型发绝对光标定位重绘，任何被 worker 吞掉
-    的字节都会让 xterm 与 ConPTY 光标失步（实测提示符叠印/内容覆盖的根因）。
-    仅含换行或非打印字符时回落 base64 包装（任意引号安全）。
+
+def agent_exec_line(shell: str, command: str, b64flag: str = "-d") -> bytes:
+    """AI 工具命令的注入行：``__ot_exec__ `` 前缀 + **单引号包裹**的命令本体。
+
+    原子性（真机 TMOUT 登出后部分执行的根因）：注入行会被落回的裸壳按普通
+    命令行解析——裸 ``__ot_exec__ <命令>`` 遇到 ``;``/``&&``/``|`` 时整行被
+    拆段，第一段报 command not found，**其余段照常执行**（本次是只读命令
+    运气好，破坏性命令会实际生效）。故本体一律单引号包成一个字面参数：
+    裸壳下只剩一条不存在的命令，任何一段都不得执行；hook 在位时由
+    ``__ot_exec__`` 分支解一层引号还原原命令执行（见 build_script）。
+    命令含单引号/换行/非 ASCII 时回落 base64 包装（同样恒为单条命令）。
+
+    不吞回显——Windows ConPTY 按自己的缓冲区模型发绝对光标定位重绘，任何被
+    worker 吞掉的字节都会让 xterm 与 ConPTY 光标失步（实测提示符叠印/内容
+    覆盖的根因）；青色命令回显由 hook 的 ``__ot_repaint``/POSTEDIT 重绘，两种
+    包装形态观感一致（§5.6）。
     """
-    if "\n" not in command and "\r" not in command \
-            and all(0x20 <= ord(c) <= 0x7e for c in command):
-        return (EXEC_PREFIX + command).encode() + b"\r"
+    if "\n" not in command and "\r" not in command and command \
+            and _QUOTABLE_RE.match(command):
+        return (EXEC_PREFIX + "'" + command + "'").encode() + b"\r"
     b64 = base64.b64encode(command.encode("utf-8")).decode()
     if shell == "powershell":
         body = ("iex ([Text.Encoding]::UTF8.GetString("

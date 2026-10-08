@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """shell_integration 单测：StreamRouter 分块解析、探测、注入行构造。"""
 import base64
+import shlex
+import shutil
+import subprocess
 
 import pytest
 
@@ -19,6 +22,8 @@ from openterminal.shell_integration import (
     strip_ansi,
     toggle_line,
 )
+
+NL = chr(10)      # 生成 shell 探针脚本用的换行
 
 A = b"\x1b]133;A;1\x07"
 B = b"\x1b]133;B;1\x07"
@@ -537,3 +542,106 @@ def test_zsh_widget_suppresses_internal_line_history():
     assert '[[ "$BUFFER" == \' \'* ]] || BUFFER=" $BUFFER"' in sup
     assert "__ot_sup=1" in sup
 
+# --- P0-2 注入行原子性：裸壳（__ot_exec__ 不在位）不得执行命令体任何一段 ---
+
+def _usable_bash() -> str | None:
+    """可模拟裸壳的 bash 绝对路径。
+
+    Windows 上 subprocess 里的裸名 ``bash`` 会命中 System32 的 WSL 存根
+    （不走 PATH 顺序），它丢弃 ``-c`` 脚本之后的实参、stderr 还喷 wsl: 翻译
+    告警——一律用 which 解析出的绝对路径，并实测实参可达才认。
+    """
+    exe = shutil.which("bash")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run(
+            [exe, "-c", 'printf %s "$1"', "sh", "OT"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return exe if r.returncode == 0 and r.stdout == "OT" else None
+
+
+_BASH = _usable_bash()
+_BASH_SKIP = pytest.mark.skipif(
+    _BASH is None, reason="需要可用的 bash 模拟裸壳")
+
+
+def _bare_bash(line: str):
+    """在 __ot_exec__ 不在位的裸 bash 里跑一行（真机落回来的跳板机 pe 壳）。"""
+    return subprocess.run(
+        [_BASH, "--noprofile", "--norc", "-c", line],
+        capture_output=True, text=True, timeout=15)
+
+
+def test_agent_exec_line_quoted_body_is_single_word():
+    """shlex 模拟 POSIX 分词：整行恒为「一条命令 + 一个字面参数」——
+    ;/&&/|/反引号/$() 全是参数内字面量，不是操作符。"""
+    for cmd in ("head -2 x.log; echo ====",
+                "a && b || c",
+                "echo `id`",
+                "echo $(whoami) | grep r",
+                "for f in a b; do echo $f; done",
+                "cd /tmp; rm -rf x; echo done"):
+        line = agent_exec_line("bash", cmd, "-d").decode().rstrip("\r")
+        assert shlex.split(line) == [EXEC_PREFIX.strip(), cmd], cmd
+
+
+def test_agent_exec_line_falls_back_to_base64_on_quote_or_newline():
+    """含单引号/换行/非 ASCII 的命令回落 base64 包装：本体锁在码里（裸壳解析
+    看不到任何操作符），整行仍是单条命令 + 一个 eval 参数。"""
+    for cmd in ("echo 'q'; touch /tmp/x", "a\nb", "echo 中文"):
+        line = agent_exec_line("bash", cmd, "-d").decode().rstrip("\r")
+        assert line.startswith(EXEC_PREFIX)
+        words = shlex.split(line)
+        assert words[:2] == [EXEC_PREFIX.strip(), "eval"] and len(words) == 3, line
+        assert cmd not in line, "命令本体不得以明文出现（会被裸壳解析）"
+        b64 = line[len(EXEC_PREFIX):].split("echo ")[1].split(" |")[0]
+        assert base64.b64decode(b64).decode() == cmd
+
+
+@_BASH_SKIP
+def test_agent_exec_line_bare_shell_no_side_effect(tmp_path):
+    r"""注入行落进 ``__ot_exec__`` 不在位的裸壳：命令体任何一段都不得执行。
+
+    真机症状正是 ``;`` 分段——第一段报 command not found，**其余段照常执行**
+    （本次是只读命令运气好，破坏性命令会实际生效）。
+    """
+    m1, m2 = tmp_path / "seg1", tmp_path / "seg2"
+    cmd = (f"touch {m1}; echo PWNED; echo `id` && echo ALSO"
+           f"; echo $(touch {m2})")
+    line = agent_exec_line("bash", cmd, "-d").decode().rstrip("\r")
+    r = _bare_bash(line)
+    assert not m1.exists() and not m2.exists(), "touch 段不得执行"
+    assert "PWNED" not in r.stdout and "ALSO" not in r.stdout, \
+        "echo 段不得执行"
+    assert r.returncode != 0, "裸壳里整行只剩一条不存在的命令"
+
+
+@_BASH_SKIP
+def test_agent_exec_line_base64_form_bare_shell_atomic(tmp_path):
+    """base64 包装的对偶用例：命令体（含反引号/$()）锁在码里不得执行，
+    裸壳至多跑包装器自己的 echo|base64 -d 子进程。"""
+    m = tmp_path / "seg"
+    cmd = f"echo 'q'; touch {m}; echo `id`"
+    line = agent_exec_line("bash", cmd, "-d").decode().rstrip("\r")
+    r = _bare_bash(line)
+    assert not m.exists(), "命令体不得执行"
+    assert r.returncode != 0
+
+
+@_BASH_SKIP
+def test_hook_unwraps_quoted_exec_body():
+    r"""hook 的 ``__ot_exec__`` 分支解一层单引号还原原命令（注入行原子化的
+    对偶）。直接跑 build_script 里的真实语句，不复制一份样例。"""
+    script = build_script("bash", 1)
+    unwrap = next((ln.strip() for ln in script.splitlines()
+                   if 'case "$t" in' in ln and "#?" in ln), None)
+    assert unwrap, "build_script 缺 __ot_exec__ 解包语句"
+    probe = "echo hi; echo `id`"
+    body = 't="$1"' + NL + unwrap + NL + 'printf %s "$t"'
+    r = subprocess.run(
+        [_BASH, "--noprofile", "--norc", "-c", body, "sh", f"'{probe}'"],
+        capture_output=True, text=True, timeout=15)
+    assert r.stdout == probe, r.stdout + r.stderr
