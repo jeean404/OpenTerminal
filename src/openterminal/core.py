@@ -27,6 +27,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 
 _OT_DBG = bool(os.environ.get("OT_WEB_DEBUG"))
+_OT_T0 = time.monotonic()   # _dbg 相对时间戳基准（轨迹排障用时差分析）
 
 _OFFLINE_CAP = 500   # 断线期缓存的 JSON 控制帧上限（防长期断线涨内存）
 
@@ -34,7 +35,7 @@ _OFFLINE_CAP = 500   # 断线期缓存的 JSON 控制帧上限（防长期断线
 def _dbg(*a) -> None:
     """OT_WEB_DEBUG=1 时打印交互式状态机轨迹（排障用，默认静默）。"""
     if _OT_DBG:
-        print("[otdbg]", *a, flush=True)
+        print(f"[otdbg +{time.monotonic() - _OT_T0:7.3f}s]", *a, flush=True)
 
 from . import cmdset
 from . import history_db
@@ -696,18 +697,28 @@ class PipelineCore:
             # 挂链式任务而**不 inline await**：泵还要收 boundary_settled（门闩
             # ack），堵在 pad 上会让门闩永远等不到 ack 走超时兜底；且超时后
             # 注入不排在 pad 之后 = 回显抢进未打完的空白区（真机 cover 根因）
-            if self._interactive and self.session is not None:
-                prev = self._pad_task
+            if self.session is None:
+                return
+            if not self._interactive:
+                # 直通模式（hook 注入失败/不可集成）没有 __ot_pad 通道：立即
+                # ack（宁藏不盖，卡由显隐/夹紧逻辑兜底）。旧实现静默丢弃 →
+                # 前端 _padWait 烧满 8s 超时才放行挂卡（直通下分析卡迟到
+                # 8s 的根因）
+                await self.emit_msg(ServerMsg(
+                    type="event", event={"kind": "padded",
+                                         "rows": max(1, msg.pad)}))
+                return
+            prev = self._pad_task
 
-                async def _run_pad(p=prev, n=max(1, msg.pad), mr=msg.mirror):
-                    if p is not None:
-                        try:
-                            await p
-                        except Exception:
-                            pass
-                    await self._shell_pad(n, mr)
+            async def _run_pad(p=prev, n=max(1, msg.pad), mr=msg.mirror):
+                if p is not None:
+                    try:
+                        await p
+                    except Exception:
+                        pass
+                await self._shell_pad(n, mr)
 
-                self._pad_task = asyncio.create_task(_run_pad())
+            self._pad_task = asyncio.create_task(_run_pad())
         elif msg.type == "boundary_settled":
             # 前端流底卡结账垫满：放行等待中的命令注入（见 _boundary_gate）
             self._boundary_ack.set()
@@ -763,7 +774,9 @@ class PipelineCore:
         提示符敲 ``__ot_pad N`` 只会连环 command not found + 提示符连排，
         前置 \x15 还连环吞用户输入（真机「打字不显示」根因之一）。宁藏不盖：
         不垫空行，卡由显隐/夹紧逻辑兜底。"""
+        _dbg("shell_pad enter rows=", rows, "interactive=", self._interactive)
         async with self._runner_lock:
+            _dbg("shell_pad locked")
             if self._hook_ok():
                 self._hook_seen = True
             elif (self._hook_seen and
@@ -783,6 +796,7 @@ class PipelineCore:
                 if self._hook_ok():
                     self._hook_seen = True
             if not self._hook_ok():
+                _dbg("shell_pad no-hook ack")
                 await self.emit_msg(ServerMsg(
                     type="event", event={"kind": "padded", "rows": rows}))
                 return
@@ -2221,10 +2235,15 @@ class PipelineCore:
         # task_start 先于 AI 栈导入/重注入：首任务 deepagents/langchain 秒级
         # 导入与换壳重注入不得挡在分析卡出场前（真机「输完自然语言等几秒
         # 才出卡」根因）；构建失败照发 error 事件，卡片原地定格为已中止
+        _dbg("task_start emit", repr(text[:40]))
         await self.emit_msg(ServerMsg(
             type="event", event={"kind": "task_start", "text": text}))
         try:
-            self._ensure_agent()   # 首个 AI 任务才构建（惰性导入 AI 栈）
+            # 首任务 AI 栈导入（deepagents/langchain 秒级）是**同步阻塞**——
+            # 事件循环整个冻住：实测 sleep(0.12) 被拖成 8.9s，task_start 虽已
+            # emit 却同样迟到 9s 才达前端（分析卡/思考徽标一起迟到）。放线程
+            # 池跑构建，循环不被挡：task_start 毫秒级达前端，卡即出
+            await asyncio.to_thread(self._ensure_agent)
         except Exception as e:  # noqa: BLE001 - 构建失败发 error 事件让前端收尾
             await self.emit_msg(ServerMsg(
                 type="event", event={"kind": "error",
@@ -2839,6 +2858,25 @@ class PipelineCore:
                 self._hook_report_pending = t
                 self._fallback_task = asyncio.create_task(self._submit_fallback(t))
             return
+        if not self._interactive:
+            # 纯终端直通（hook 注入失败/不可集成）：清缓冲与起任务并行。
+            # 旧序先 \x15+^C+0.52s 再起任务——用户已回显的整行当场被擦掉，
+            # 文字只能等分析卡渲染 task_start 的 text 才重现，净空白 1-2s
+            # （真机「Enter 后空白然后才显示文字」根因）。task_start→分析卡
+            # 不依赖终端状态，先起；^C 引发的提示符重绘由幕帘扣住（_ai_task
+            # 已同步置位，prompt_start 关帘），任务收尾才放行，不会写进卡的
+            # 预留空白区。清缓冲只须赶在首个工具命令注入（模型思考秒级）
+            # 之前——直通工具走哨兵批（_agent_session 返回裸 session），
+            # 残留半行会拼进注入命令。
+            if typed:
+                if self._ai_task is not None:
+                    # 前一任务在跑：清缓冲须同步完成再排队（后台跑会与
+                    # 在跑任务的下一发工具注入赛跑）
+                    await self._passthrough_reset()
+                else:
+                    asyncio.create_task(self._passthrough_reset())
+            await self._on_ai_line(t)
+            return
         # 降级路径：先**可见地**擦掉已回显半行，再 Ctrl+C 把 shell 从可能的
         # 前台命令里要回提示符（su - 重置是主因），然后尝试重注入——成功则
         # 把整行重发进 hook：蓝色回显 + 6337
@@ -2883,6 +2921,26 @@ class PipelineCore:
         # 镜像 dirty：残尾巴重发会被当整行画屏并送 AI（真机截图根因）；
         # 重注入失败亦静默外部启动
         await self._on_ai_line(t)
+
+    async def _passthrough_reset(self) -> None:
+        """直通模式的行缓冲后台清理：\x15 收掉已回显/残存半行 + ^C 把 shell
+        从可能的前台命令里要回提示符，语义与降级路径的清场相同但不挡任务
+        起跑。镜像 dirty 也照发 \x15——直通不重发整行，不存在「保留残行等
+        重发」的语义，宁可多擦（残半行会拼进工具命令）；擦掉的画面由分析卡
+        的 text 承接（卡先于清理完成出现）。"""
+        if self.session is None:
+            return
+        try:
+            _dbg("pt-reset: send \\x15")
+            await self.session.send_raw(b"\x15")
+            await asyncio.sleep(0.12)
+            self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
+            _dbg("pt-reset: send \\x03")
+            await self.session.send_raw(b"\x03")
+            await asyncio.sleep(0.4)   # settle 躲开 SIGINT 恢复窗口（同降级路径）
+            _dbg("pt-reset: done")
+        except Exception as e:  # noqa: BLE001 - 清理失败不追责：任务已起跑
+            _dbg("pt-reset: exc", repr(e))
 
     def _hook_ok(self) -> bool:
         """hook 在位判定：本会话见过 OSC 标记，且探测未判定「换了壳」。
