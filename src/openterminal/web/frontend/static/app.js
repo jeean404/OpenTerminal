@@ -15,6 +15,8 @@ function esc(s) {
 
 const sessions = {};   // tabId -> Session
 let activeTabId = null;
+// mac 用 Cmd+C/Cmd+V 原生路径；Windows/Linux 的裸 Ctrl+C/Ctrl+V 需特殊路由
+const IS_APPLE = /Mac|iPhone|iPad/.test(navigator.userAgent);
 let targetsData = null;         // /api/targets 最近一次返回，供搜索重渲染
 let searchQuery = "";
 // --- 装饰卡落网格用的 ANSI 片段 ---
@@ -356,9 +358,27 @@ class Session {
         const sel = window.getSelection ? window.getSelection() : null;
         if (sel && !sel.isCollapsed) return false;
       }
-      if (ev.type === "keydown" && (ev.metaKey || (ev.ctrlKey && ev.shiftKey)) &&
-          ev.key.toLowerCase() === "c" && term.hasSelection()) {
+      // 复制：mac=Cmd+C（原样）；Win/Linux=Ctrl+C 终端有选区时复制（无选中
+      // 不拦，照发 ^C 中断）与 Ctrl+Shift+C。Windows 习惯选区后 Ctrl+C 复制，
+      // 旧行为把 Ctrl+C 一律译成 ^C——选区被中断、复制永不发生，粘贴自然
+      // 无物可粘（真机「复制后 Ctrl+V 无效」的复制半边根因）
+      if (ev.type === "keydown" &&
+          (ev.metaKey || (ev.ctrlKey && ev.shiftKey) ||
+           (ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey && !IS_APPLE)) &&
+          (ev.key === "c" || ev.key === "C" || ev.keyCode === 67) &&
+          term.hasSelection()) {
         this._copyText(term.getSelection());
+        return false;
+      }
+      // Windows/Linux 裸 Ctrl+V 粘贴：xterm 会把 Ctrl+V 译成 \x16（quoted-insert）
+      // 发进 PTY 并 cancel 事件，浏览器原生 paste 永不发生（真机 Windows 粘贴
+      // 无效根因）。返回 false 让 xterm 跳过该键且不 cancel，默认动作产生的
+      // paste 事件由 xterm 挂在 textarea/element 上的监听接管送进 PTY——
+      // http 局域网下也走得通，不依赖 clipboard.readText 权限。keyCode 86 兜底
+      // 中文 IME 下 key 报 "Process" 的机型。mac 的 Cmd+V 原生路径不受影响。
+      if (ev.type === "keydown" && !IS_APPLE && ev.ctrlKey && !ev.shiftKey &&
+          !ev.altKey && !ev.metaKey && !ev.isComposing &&
+          (ev.key === "v" || ev.key === "V" || ev.keyCode === 86)) {
         return false;
       }
       // 审批快捷键必须在 xterm 的这个唯一钩子里路由：终端持有焦点时
@@ -789,6 +809,9 @@ class Session {
     } else {
       this._execCopy();
     }
+    // 右键菜单复制后菜单按钮已 remove、焦点落 body——拉回终端让用户直接
+    // 继续打字（Cmd/Ctrl+Shift+C 路径焦点本就在终端，此处为无害 no-op）
+    this.focusCursor();
   }
 
   _execCopy() {
@@ -796,7 +819,12 @@ class Session {
   }
 
   _pasteText() {
-    const done = t => { if (t) { try { this.term.paste(t); } catch (e) {} } };
+    const done = t => {
+      if (t) { try { this.term.paste(t); } catch (e) {} }
+      // 粘贴后焦点仍在（已 remove 的）菜单按钮上落回 body，键盘输入失效
+      // （真机「粘贴后要再点一下才能打字」）——还焦点给终端，可直接继续输入
+      this.focusCursor();
+    };
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.readText().then(done, () => done(this._clip));
     } else {
@@ -2968,6 +2996,22 @@ window.addEventListener("focus", () => {
 });
 
 loadTargets();
+
+// Windows/Linux Ctrl+V 焦点抢救：焦点不在 xterm textarea 时（右键菜单点过后
+// 焦点落 body、点过边距/状态栏等），keydown 到不了 xterm，原生 paste 也无从
+// 发生——单靠 xterm 钩子放行救不了这种场景。这里把当前 tab 的终端同步拉回
+// 焦点，随后的默认 paste 动作即落进 xterm 的 textarea 走其粘贴监听。焦点本
+// 就在某个输入框（xterm 的 textarea、弹窗/审批编辑器等 UI 输入框）时不抢，
+// 各自保留原生粘贴语义。
+document.addEventListener("keydown", ev => {
+  if (IS_APPLE || !ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey ||
+      (ev.key !== "v" && ev.key !== "V" && ev.keyCode !== 86)) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" ||
+             ae.isContentEditable)) return;
+  const s = sessions[activeTabId];
+  if (s && !s._dead) { try { s.term.focus(); } catch (e) {} }
+});
 
 // 全局快捷键：Ctrl+Shift+I 切换 seg（后端 hook 开关）；审批卡快捷键路由
 document.addEventListener("keydown", ev => {
