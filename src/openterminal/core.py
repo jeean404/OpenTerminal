@@ -340,6 +340,10 @@ _ANSI_RE = re.compile(
 
 
 class PipelineCore:
+    # pad 指纹扫描窗开关：类级默认 False——测试可直接构造实例不跑 __init__，
+    # live 分支读它时属性必须存在
+    _pad_inflight = False
+
     def __init__(self, cfg: Config, target_name: str, *,
                  policy: Policy | None = None) -> None:
         self.cfg = cfg
@@ -390,6 +394,7 @@ class PipelineCore:
         self._offline: list = []
         self._boundary_ack = asyncio.Event()  # 前端阶段结账完成（ai_boundary 门闩）
         self._pad_task: asyncio.Task | None = None  # 在途 pad 打字任务（门闩排序用）
+        self._pad_inflight = False   # pad 行已敲进 PTY、回显未消化（指纹扫描窗）
         self._task: asyncio.Task | None = None
         self._target: TargetConfig | None = None   # _connect 时持有(命令集等读取)
         self._cs_tail: bytearray | None = None     # 命令集监听的输出滚动缓冲
@@ -804,38 +809,55 @@ class PipelineCore:
                     pass
                 if self._hook_ok():
                     self._hook_seen = True
-            if not self._hook_ok():
-                _dbg("shell_pad no-hook ack")
+            if not self._hook_ok() or self._reinject_pending:
+                # 两类都不往壳里敲 pad：①hook 不在位（判死/探测失败）——敲
+                # 进去必撞裸壳；②任务起跑的重注入在途（外部触发链必有，至
+                # _run_task 重注入落地才清位）——窗口内壳还没痊愈，敲进去
+                # 就是真机残迹「__ot_pad: command not found + 提示符粘连」。
+                # deferred 告诉前端这次「空白没长」是窗口内暂时现象，不计
+                # 熔断连败（慢链路重注入 1-4s，连续 ack 不增长会误熔断）；
+                # 痊愈后下一轮 pad 自会补齐。①不带 deferred：永久死通道，
+                # 前端照常计数熔断，停掉空转的重试循环
+                _dbg("shell_pad ack-only pending=", self._reinject_pending)
                 await self.emit_msg(ServerMsg(
-                    type="event", event={"kind": "padded", "rows": rows}))
+                    type="event", event={"kind": "padded", "rows": rows,
+                                         "deferred": self._reinject_pending}))
                 return
             remaining = max(1, rows)
             first = True
             hook = self._hook_ok()
-            while remaining > 0:
-                n = min(50, remaining)
-                remaining -= n
-                self._ev_prompt.clear()
-                if hook or mirror is None or (first and mirror):
-                    await self.session.send_raw(b"\x15")   # 收纳用户半行输入
-                # mirror == ""（hook 不在位）：半行为空，不收纳（\x15 会误杀
-                # 历史召回等残影）
-                await self.session.send_raw(f"__ot_pad {n}\r".encode())
-                if hook:
-                    # 接回存档半行：shell 侧 ^Y 原语（存档非空才接回）
-                    await self.session.send_raw(b"\x19")
-                first = False
-                # hook 不在位时不补 \x19（原生 yank 会把 kill ring 里刚提交
-                # 的自然语言行复活回提示符行，此后每块 pad 再 kill 再 yank，
-                # 死循环挂在输入行上——降级走 mirror 原样重打）
-                try:
-                    await asyncio.wait_for(self._ev_prompt.wait(),
-                                           self._pad_prompt_timeout)
-                except asyncio.TimeoutError:
-                    pass
-            if not hook and mirror:
-                # 复原收纳的半行：等价用户原样敲入（不发 \r，不触发执行）
-                await self.session.send_raw(mirror.encode())
+            # 指纹扫描窗：pad 行已敲进 PTY，回显若带「__ot_pad: command not
+            # found」即壳里没有 hook 函数（_hook_ok 标记流假阳性，su - 换壳
+            # 主因），泵侧当场置 _hook_gone——本循环下一轮条件即断，不再把
+            # 后续块敲进裸壳连环刷 command not found + 新提示符（提示符墙）
+            self._pad_inflight = True
+            try:
+                while remaining > 0 and not self._hook_gone:
+                    n = min(50, remaining)
+                    remaining -= n
+                    self._ev_prompt.clear()
+                    if hook or mirror is None or (first and mirror):
+                        await self.session.send_raw(b"\x15")   # 收纳用户半行输入
+                    # mirror == ""（hook 不在位）：半行为空，不收纳（\x15 会误杀
+                    # 历史召回等残影）
+                    await self.session.send_raw(f"__ot_pad {n}\r".encode())
+                    if hook:
+                        # 接回存档半行：shell 侧 ^Y 原语（存档非空才接回）
+                        await self.session.send_raw(b"\x19")
+                    first = False
+                    # hook 不在位时不补 \x19（原生 yank 会把 kill ring 里刚提交
+                    # 的自然语言行复活回提示符行，此后每块 pad 再 kill 再 yank，
+                    # 死循环挂在输入行上——降级走 mirror 原样重打）
+                    try:
+                        await asyncio.wait_for(self._ev_prompt.wait(),
+                                               self._pad_prompt_timeout)
+                    except asyncio.TimeoutError:
+                        pass
+                if not hook and mirror:
+                    # 复原收纳的半行：等价用户原样敲入（不发 \r，不触发执行）
+                    await self.session.send_raw(mirror.encode())
+            finally:
+                self._pad_inflight = False
         await self.emit_msg(ServerMsg(
             type="event", event={"kind": "padded", "rows": rows}))
 
@@ -2584,6 +2606,16 @@ class PipelineCore:
         if kind == "live":
             self._ev_stream.set()   # 回显到达：重注入分片的逐片应答凭据
             self._note_hook_text()
+            if self._pad_inflight and "__ot_pad: command not found" in ev[1]:
+                # pad 行敲进了没有 hook 函数的壳：su - 换壳后嵌套壳的 PS1/
+                # PROMPT_COMMAND 照发 OSC 标记，_hook_ok 靠标记流假阳性，
+                # pad 循环于是把 __ot_pad 连环敲进裸壳 = 连环 command not
+                # found + 新提示符（抑制窗吞掉回显与 \r\n，新提示符块在窗
+                # 外迟到，落在上一条提示符的光标列上）= 横排提示符墙（真机
+                # 101.33 su - 后截图）。当场判死：后续 pad 走 ack-only，健康
+                # 路径转降级；重注入成功/嵌套壳退出照既有语义复位
+                self._hook_gone = True
+                _dbg("pad fingerprint: hook 函数不在位，判死转 ack-only")
             if self._probe_buf is not None:
                 # live 的 ev[1] 是 str（本分支末尾 emit 前也要 .encode），
                 # bytearray.extend(str) 抛 TypeError 当场打死泵任务；而任务

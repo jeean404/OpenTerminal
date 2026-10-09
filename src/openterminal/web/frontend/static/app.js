@@ -1788,11 +1788,13 @@ class Session {
       this._padQ = this._padQ.then(async () => {
         if (this._dead || !slot.marker) return;
         this._padSlot = slot;
+        slot.ackDeferred = false;   // _onPadded 按 ack 事件的 deferred 置位
         slot.padOut = (slot.padOut || 0) + gap;
         // mirror：可信的半行镜像交给 worker 收纳/复原——pad 注入不再吞掉
         // 用户正在敲的输入（dirty 时省略，worker 走旧的丢弃路径）
         this.sendJson({type: "pad", pad: gap,
                        mirror: this._lineDirty ? undefined : this._lineBuf});
+        const blankBefore = this._blankSpan(slot);
         let timedOut = true;
         await new Promise(r => {
           const done = () => { timedOut = false; r(); };
@@ -1804,8 +1806,23 @@ class Session {
           slot.padOut = Math.max(0, (slot.padOut || 0) - gap);
           this._padFailStreak++;
           if (this._padFailStreak >= 2) this._fusePads();
-        } else {
-          this._padFailStreak = 0;
+        } else if (!slot.marker) {
+          // 等待期间卡已散场：无从对账，也不冤枉通道
+        } else if (!slot.ackDeferred && slot.marker) {
+          // ack 不作凭据只唤醒（_onPadded），这里对账：空白一行没长 =
+          // 通道谎报——su - 换壳后嵌套壳标记流还在、hook 函数已空，后端
+          // 把 pad 行敲进裸壳只换来 command not found + 新提示符而 ack 照
+          // 发，超时熔断永远够不着，pad 请求循环把提示符敲成横排墙（真机
+          // 101.33 su - 后截图）。与超时同账：先灌在途字节再数，连败 2 次
+          // 熔断，宁截断不空转。deferred（重注入在途窗口）不计：痊愈后
+          // 下一轮 pad 自会补齐
+          await this._drainHeld();
+          if (this._blankSpan(slot) <= blankBefore) {
+            this._padFailStreak++;
+            if (this._padFailStreak >= 2) this._fusePads();
+          } else {
+            this._padFailStreak = 0;
+          }
         }
         this._padSlot = null;
       }).catch(() => {});
@@ -1834,7 +1851,9 @@ class Session {
     });
   }
 
-  _onPadded() {
+  _onPadded(ev) {
+    // deferred：重注入在途窗口的 ack——空白没长是暂时现象，不计熔断连败
+    if (this._padSlot) this._padSlot.ackDeferred = !!(ev && ev.deferred);
     if (this._padWait) {
       const r = this._padWait;
       this._padWait = null;
@@ -2752,7 +2771,7 @@ class Session {
         this._clearCards();
         break;
       case "padded":
-        this._onPadded();
+        this._onPadded(ev);
         break;
       default:
         break;   // 未知事件静默忽略（此前 JSON.stringify 进终端是调试残留）

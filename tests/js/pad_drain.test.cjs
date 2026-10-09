@@ -215,3 +215,86 @@ test("自愈：盖帽但钉死的卡仍要重锚（下层卡占位落地后解�
   assert.deepStrictEqual(healed, [1],
     "钉死的盖帽卡要重锚解钉（否则永久停在半截高度）；未钉死的跳过");
 });
+
+test("谎报型死通道：ack 到了但空白没长——连败 2 次熔断，不再发 pad（提示符墙根因）", async () => {
+  // su - 换壳后嵌套壳标记照发、hook 函数全空：后端把 __ot_pad 敲进裸壳只换来
+  // command not found + 新提示符而 padded 照发——超时熔断永远够不着，pad 请求
+  // 循环把提示符敲成横排墙（真机 101.33 su - 后截图）。修法：ack 后对账空白，
+  // 一行没长同计入连败，2 次熔断走既有的宁截断不空转。
+  const {s} = makePadSession(["[root@h ~]#", "", "", "", "", ""], 6);
+  s.sendJson = msg => {          // 谎报壳：应答照发、空行永不落地
+    s.sent.push(msg);
+    // 微任务里应答：真 ack 与 _padWait 武装（new Promise 执行器同步赋值）
+    // 的先后即此序；同步应答会在武装前到达、被错过（真机 ack 不会）
+    if (msg.type === "pad") queueMicrotask(() => s._onPadded());
+  };
+  s.setStatus = () => {};
+  const slot = {
+    id: 1, marker: {line: 1, onDispose() {}}, host: null,
+    reserved: 0, need: 8, rows: 7, clamped: false, pinnedRows: null,
+  };
+  s._slots.set(1, slot);
+  s._holdBytes("card-settle");
+  try {
+    await s._ensurePad(slot);    // 第 1 轮：缺口 3，ack 了但空白没长 → 连败 1
+  } finally {
+    s._releaseBytes();
+  }
+  assert.strictEqual(s._padFused, false, "单次对不上账不成局");
+  assert.strictEqual(slot.clamped, true, "空白没长，落账仍按缺口夹紧");
+  slot.need = 10;                // 卡长高再结账：连败 2 → 熔断
+  s._holdBytes("card-settle");
+  try {
+    await s._ensurePad(slot);
+  } finally {
+    s._releaseBytes();
+  }
+  assert.strictEqual(s._padFused, true, "连续两轮空白没长：熔断");
+  assert.deepStrictEqual(s.sent.map(m => m.pad), [3, 5], "熔断前只发两轮");
+  s.sent.length = 0;
+  s._holdBytes("card-settle");
+  try { await s._ensurePad(slot); } finally { s._releaseBytes(); }
+  assert.deepStrictEqual(s.sent, [], "熔断后 _ensurePad 直接返回，不再发请求");
+});
+
+test("deferred ack（重注入在途窗口）：空白没长不计熔断连败，不误熔断", async () => {
+  // 慢链路重注入 1-4s，窗口内连续 pad 都 ack 了但空白没长——deferred 标记
+  // 让前端不计连败；通道痊愈后下一轮 pad 自会补齐
+  const {s} = makePadSession(["[root@h ~]#", "", "", "", "", ""], 6);
+  s.sendJson = msg => {
+    s.sent.push(msg);
+    if (msg.type === "pad") queueMicrotask(() => s._onPadded({deferred: true}));
+  };
+  s.setStatus = () => {};
+  const slot = {
+    id: 1, marker: {line: 1, onDispose() {}}, host: null,
+    reserved: 0, need: 8, rows: 7, clamped: false, pinnedRows: null,
+  };
+  s._slots.set(1, slot);
+  s._holdBytes("card-settle");
+  try {
+    await s._ensurePad(slot);
+    await s._ensurePad(slot);    // 两轮都 deferred：不得熔断
+  } finally {
+    s._releaseBytes();
+  }
+  assert.strictEqual(s._padFused, false, "deferred ack 不计连败");
+  assert.deepStrictEqual(s.sent.map(m => m.pad), [3, 3], "窗口内仍照常请求");
+  // 窗口后通道痊愈：真垫行落地（healthy 路径）→ 连败清零、缺口补满
+  s.sendJson = msg => {
+    s.sent.push(msg);
+    if (msg.type === "pad") {
+      s._ingestBytes(new TextEncoder().encode("\n".repeat(msg.pad)));
+      queueMicrotask(() => s._onPadded({deferred: false}));
+    }
+  };
+  s._holdBytes("card-settle");
+  try {
+    await s._ensurePad(slot);
+  } finally {
+    s._releaseBytes();
+  }
+  assert.strictEqual(slot.reserved, 8, "痊愈后垫满：reserved 达到 need");
+  // clamped 的解除归 _reanchor（reserved ≥ rows 即解钉重贴，见 _reanchor
+  // 的解夹紧分支；「自愈」用例已覆盖该契约）——_ensurePad 只管垫满
+});

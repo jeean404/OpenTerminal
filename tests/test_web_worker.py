@@ -1891,6 +1891,82 @@ async def test_shell_pad_hook_gone_sends_nothing_acks(monkeypatch):
     assert await _padded_rows(sink) == [5]
 
 
+def _wire_pad_lying_shell(w):
+    """谎报型替身 send_raw：__ot_pad 敲进「标记照发、函数全空」的壳——
+    su - 换壳后嵌套壳的 PS1/PROMPT_COMMAND 仍发 OSC 标记（_hook_ok 据此
+    假阳性），但 __ot_pad 函数不存在：回显 live 带 command not found 指纹，
+    随后提示符标记照常到达。"""
+    sess = w.session
+    base = sess.send_raw
+
+    async def _raw(data):
+        await base(data)
+        if b"__ot_pad" in data:
+            # 真实泵序：报错文本先到，嵌套壳的提示符标记后到
+            await w._on_stream_event(
+                ("live", "bash: __ot_pad: command not found"))
+            await w._on_stream_event(("prompt_start", (1,)))
+    sess.send_raw = _raw
+
+
+async def test_shell_pad_fingerprint_dead_channel_stops_typing(monkeypatch):
+    r"""谎报型死通道熔断（真机 su - 后横排提示符墙根因）：pad 回显带
+    __ot_pad: command not found 指纹 → 当场判死 hook——本轮后续块不再敲、
+    后续 pad 走 ack-only 零写入；padded 照常应答（显示由前端熔断/夹紧兜底），
+    重注入成功/嵌套壳退出照既有语义复位。"""
+    import time as _time
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0        # 标记流在 → _hook_ok 假阳性（谎报壳前提）
+    _wire_pad_lying_shell(w)
+
+    await w.handle_client(ClientMsg(type="pad", pad=120))   # 须 3 块：指纹后必须断
+    if w._pad_task is not None:
+        await asyncio.wait_for(w._pad_task, timeout=2)
+    pad_lines = [d for k, d in w.session.calls
+                 if k == "raw" and b"__ot_pad" in d]
+    assert pad_lines == [b"__ot_pad 50\r"], "指纹判死后后续块不得再敲进裸壳"
+    assert w._hook_gone is True, "当场判死：后续 pad / 健康路径都转降级"
+
+    # 后续 pad：节流阀挡住 60s 兜底重注入，走 ack-only 零 PTY 写入
+    w._pad_reinject_at = _time.monotonic() + 60
+    n = len([c for c in w.session.calls if c[0] == "raw"])
+    await w.handle_client(ClientMsg(type="pad", pad=3))
+    if w._pad_task is not None:
+        await asyncio.wait_for(w._pad_task, timeout=2)
+    assert [d for k, d in w.session.calls if k == "raw"][n:] == [], \
+        "判死后 pad 走 ack-only：零 PTY 写入"
+    msgs = await _wait_json(sink, lambda m: len([
+        x for x in m if x.get("type") == "event"
+        and x.get("event", {}).get("kind") == "padded"]) >= 2)
+    rows = [x["event"]["rows"] for x in msgs
+            if x.get("type") == "event"
+            and x.get("event", {}).get("kind") == "padded"]
+    assert rows == [120, 3], "判死仍应答 padded（前端按缓冲实测夹紧）"
+
+
+async def test_shell_pad_reinject_pending_acks_deferred_no_typing(monkeypatch):
+    r"""任务起跑的重注入在途（外部触发链至 _run_task 落地才清位）：pad 不往
+    壳里敲（窗口内壳未痊愈，敲进去必撞裸壳 = 真机残迹「__ot_pad: command
+    not found + 提示符粘连」）；ack 带 deferred——前端不把「空白没长」计入
+    熔断连败（慢链路重注入 1-4s，连续不增长会误熔断整 tab 停摆）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0        # _hook_ok 假阳性也照挡：pending 优先
+    w._reinject_pending = True
+
+    await w.handle_client(ClientMsg(type="pad", pad=5))
+    if w._pad_task is not None:
+        await asyncio.wait_for(w._pad_task, timeout=2)
+    assert [d for k, d in w.session.calls if k == "raw"] == [], \
+        "重注入在途：零 PTY 写入（不敲 \\x15/__ot_pad）"
+    await _wait_json(sink, lambda m: any(
+        x.get("type") == "event" and x.get("event", {}).get("kind") == "padded"
+        and x["event"].get("deferred") is True for x in m))
+
+
 async def test_shell_pad_hook_ok_uses_saved_yank_primitive(monkeypatch):
     r"""hook 在位：pad 半行保护走 shell 侧存档/接回原语（^U 存档、^Y 接回，
     空行零副作用、任务期打字与注入交错也能接回）——每块 \x15 配一 \x19，
