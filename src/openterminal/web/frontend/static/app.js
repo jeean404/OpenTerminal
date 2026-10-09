@@ -3029,6 +3029,20 @@ document.addEventListener("keydown", ev => {
   if (s && !s._dead) { try { s.term.focus(); } catch (e) {} }
 });
 
+// 卡片 island 内的浏览器原生复制（选区在卡内按 Cmd/Ctrl+C / 右键复制）：同样弹
+// 「已复制」。仅当选区锚点落在 .ot-card-host 里才弹——终端复制路径走 _copyText
+// 已有自己的提示，这里不会重复弹（xterm 选区不是 DOM 选区，卡外 copy 事件不命中）
+document.addEventListener("copy", ev => {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+  const node = sel.anchorNode;
+  const el = node && (node.nodeType === 1 ? node : node.parentElement);
+  if (el && el.closest && el.closest(".ot-card-host")) {
+    const s = sessions[activeTabId];
+    if (s) s._toastCopied();
+  }
+}, true);
+
 // 全局快捷键：Ctrl+Shift+I 切换 seg（后端 hook 开关）；审批卡快捷键路由
 document.addEventListener("keydown", ev => {
   const s = sessions[activeTabId];

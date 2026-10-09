@@ -219,8 +219,54 @@ async function main() {
     `剪贴板="${clip9.slice(0, 50)}"`);
   check("S9 复制后焦点仍在终端", ae9 === "xterm", `焦点=${ae9}`);
   await checkCopyToast(page, "S9");
+  // 先点终端清掉三击选区（否则下一条 Control+C 会再复制一次、toast 复亮），
+  // 等上一条 toast 完全淡出后再清行，S10 反例才干净
+  await page.locator(".term").click({ force: true });
+  await sleep(1100);
   await page.keyboard.press("Control+c");
-  await sleep(200);
+  await sleep(300);
+
+  // ---- S10: 卡片 island 内原生复制也弹提示；卡外选区不弹 ----
+  // CDP 注入按键不触发 copy 默认动作（同 Ctrl+V 的工具限制），用合成
+  // ClipboardEvent 验证监听逻辑（真机 Cmd/Ctrl+C 走的是同一监听）
+  const neg = await page.evaluate(() => {
+    const pane = document.querySelector(".pane.active");
+    const d = document.createElement("div");
+    d.id = "s10-outside";
+    d.textContent = "OUTSIDE_MARK_10";
+    pane.appendChild(d);
+    const sel = window.getSelection();
+    const rng = document.createRange();
+    rng.selectNodeContents(d);
+    sel.removeAllRanges();
+    sel.addRange(rng);
+    document.dispatchEvent(new ClipboardEvent("copy"));
+    const el = document.querySelector(".copy-toast");
+    const fired = !!(el && el.classList.contains("show"));
+    d.remove();
+    sel.removeAllRanges();
+    return fired;
+  });
+  check("S10 卡外选区复制不弹提示", !neg);
+  const pos = await page.evaluate(() => {
+    const pane = document.querySelector(".pane.active");
+    const d = document.createElement("div");
+    d.className = "ot-card-host";
+    d.innerHTML = "<span>CARD_COPY_MARK_10</span>";
+    pane.appendChild(d);
+    const sel = window.getSelection();
+    const rng = document.createRange();
+    rng.selectNodeContents(d.querySelector("span"));
+    sel.removeAllRanges();
+    sel.addRange(rng);
+    document.dispatchEvent(new ClipboardEvent("copy"));
+    const el = document.querySelector(".copy-toast");
+    const fired = !!(el && el.classList.contains("show"));
+    d.remove();
+    return fired;
+  });
+  check("S10 卡内选区复制弹「已复制」", pos);
+  await checkCopyToast(page, "S10");
 
   // ---- 汇总 ----
   const bad = results.filter(r => !r.ok);
