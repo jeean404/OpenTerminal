@@ -1556,6 +1556,110 @@ async def test_worker_submit_hook_dead_task_first(monkeypatch):
     assert raws.index(b"\x15") < raws.index(b"\x03"), "清行先于 ^C：^C 后是新提示符行"
     await _drain_fallback(w)
 
+# --- 重注入抑制窗：横排提示符墙 + 降级路径 NL 蓝行补画（真机 su - 后截图）---
+
+
+class _BareHookShell(FakeSession):
+    """标记照发（PS1 里有 OSC 133）、但 __ot_submit/__ot_pad 不在位的壳：
+    注入分片被当普通赋值执行——只有回显 + 提示符重绘，没有 C/D 帧。"""
+
+    PROMPT = "[root@x /tmp]# "
+
+    def __init__(self, w=None):
+        super().__init__()
+        self.w = w
+
+    async def send_raw(self, data):
+        await super().send_raw(data)
+        if data in (b"\x15", b"\x19", b"\x03"):
+            return
+        line = data.decode("utf-8", "replace").rstrip("\r")
+        await self.w._on_stream_event(("live", line + "\r\n"))
+        await self.w._on_stream_event(("prompt_start", 1))
+        await self.w._on_stream_event(("live", self.PROMPT))
+
+
+async def test_reinject_into_bare_shell_no_prompt_wall(monkeypatch):
+    r"""重注入分片打进「标记照发、函数不在位」的壳（su - 换壳真机截图）：
+    分片回显与提示符重绘全在抑制窗内吞掉，窗末只重画**一个**提示符。
+
+    旧实现两处漏：① live 分支先判 _curtain 后判 _suppress_live，窗内提示符
+    根本没被吞；② prompt_start 关帘后提示符段进 _curtain_parts，下一次
+    send_raw（幕帘闸）成排放行——提示符串一个接一个落在同一光标列上。
+    """
+    sess = _BareHookShell()
+    w, sink = await _make_worker(monkeypatch, session=sess)
+    sess.w = w
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._shell_kind = "bash"
+    w._last_mark_at = time.monotonic()      # 标记流在 → _hook_ok 假阳性
+
+    async def _probe():
+        return ("bash", "-d")
+
+    monkeypatch.setattr(w, "_probe_shell_kind", _probe)
+    w._ai_task = _fake_ai_task(w)   # 任务在跑：prompt_start 会关帘
+
+    assert await w._ensure_integrated()
+    await asyncio.sleep(0.1)
+    await w._curtain_open()
+    await asyncio.sleep(0.1)
+
+    text = _sink_bytes(sink).decode("utf-8", "replace")
+    assert text.count("[root@x /tmp]#") == 1, "提示符墙：%r" % text[:200]
+    assert "__ot_inj" not in text, "注入分片回显漏到前端：%r" % text[:200]
+    w._ai_task.cancel()
+
+
+async def test_degraded_submit_repaints_nl_line_blue(monkeypatch):
+    r"""降级提交（hook 标记绝迹 = su - 重置）：清场 \x15+\x03 之后由 worker
+    补画 hook 的 __ot_repaint "$t" 33 观感——「提示符 + 蓝 38;5;33 原文 + 换行」。
+
+    旧实现只发 \x15+\x03：已回显的自然语言被擦掉且永不再画（hook 的
+    __ot_repaint 不会跑），屏上文字完全消失，只能等分析卡的 text 才重现。
+    """
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
+    sess = FakeSession()
+    w, sink = await _make_worker(monkeypatch, session=sess)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 0.0                   # 本会话没见过标记 = hook 不在位
+    await _install_fake_runner(monkeypatch)
+    _wire_presenter(w)
+    _skip_reintegrate(w, monkeypatch)
+
+    # 用户已把自然语言敲在提示符上（shell 自己回显的）
+    await w._on_stream_event(("live", "[root@x /tmp]# 查看正在运行的容器"))
+    await w.handle_client(ClientMsg(type="submit", text="查看正在运行的容器"))
+    await asyncio.sleep(0.8)                # 后台清场（0.12+0.4s）落地
+
+    raw = _sink_bytes(sink).decode("utf-8", "replace")
+    assert "\x1b[38;5;33m查看正在运行的容器\x1b[0m" in raw, \
+        "自然语言没被补画成蓝 38;5;33：%r" % raw
+    assert raw.index("\x1b[38;5;33m") >= 0
+    await _drain_fallback(w)
+
+
+async def test_curtain_gate_holds_during_inject_window(monkeypatch):
+    r"""抑制窗内幕帘闸不得开帘：窗内吞掉的提示符段一旦被下一次 send_raw
+    放行，就会成排落在上一提示符的光标列上（横排提示符墙的直接成因）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    t = _fake_ai_task(w)
+    w._suppress_live = True
+    await w._on_stream_event(("prompt_start", 1))
+    await w._on_stream_event(("live", "[root@x ~]# "))
+    await w.session.send_raw(b"__ot_inj='xx'\r")
+    await asyncio.sleep(0.05)
+    assert w._curtain, "注入窗内开帘 = 提示符段成排泄漏"
+    assert not w._curtain_parts, "窗内提示符是被吞（记进 _suppressed_tail），不进帘"
+    assert w._suppressed_tail == "[root@x ~]# ", "窗末重画提示符靠它"
+    assert b"root@x" not in _sink_bytes(sink), "窗内提示符不得外发"
+    w._suppress_live = False
+    t.cancel()
+
 
 async def test_worker_submit_open_user_cmd_takes_degraded_path(monkeypatch):
     """用户命令执行帧开着（前台占用，典型 sudo su - 整段会话——其 C 帧不闭合

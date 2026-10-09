@@ -47,6 +47,17 @@ from .policy import Policy
 
 # 健康路径兜底：补发 \r 后等 hook AI 上报的最长时限（超时改走外部启动）
 SUBMIT_FALLBACK_DELAY = 1.2
+
+# 抑制窗捕获提示符段时剥掉转义序列（擦行/光标/SGR/OSC）：
+# _suppressed_tail 要的是提示符纯文本，\r\x1b[2K 之类的擦行序列混进去
+# 就会在重画时被原样打回屏幕。
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b.")
+
+
+def _ansi_free(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
+
 # 嵌套密码验证窗口：密码打进 PTY 后 hold 前端输入的时长上限（auth 结果输出
 # 到达即提前结束）；超时视为已resolved，防输入被永久 hold
 _PW_VERIFY_TIMEOUT = 3.0
@@ -478,6 +489,8 @@ class PipelineCore:
         self._exec_truncated = False
         self._suppress_live = False  # 注入窗口吞 live 字节（注入行回显不外显）
         self._suppressed_echo = False  # 窗口内吞过回显：exec 开始时补 \r\n 收束行
+        self._suppressed_tail = ""     # 窗内吞掉的末尾残段（= shell 新画的提示符）
+        self._repaint_text: str | None = None  # 窗口收束后补画的 NL 行（蓝 33）
         self._pending_agent_cmds: "deque[str]" = deque()  # 已登记未执行的 AI 工具命令
         self._agent_open_cmd: str | None = None  # 已开 ai_collapse、尚未收束的命令
         self._task_cmd_started = False  # 本任务是否已发 ai_collapse（首个工具命令）
@@ -538,7 +551,10 @@ class PipelineCore:
         raw_send = self.session.send_raw
 
         async def _gated(data: bytes, _raw=raw_send):
-            if self._curtain:
+            # 注入抑制窗内绝不开帘：帘一开就把窗内吞掉的提示符段成排漏
+            # 出去，一片接一片落在上一提示符的光标列上（横排提示符墙，
+            # 真机截图）。窗末由 _resync_after_suppress 统一对齐。
+            if self._curtain and not self._suppress_live:
                 await self._curtain_open()
             await _raw(data)
 
@@ -1304,6 +1320,7 @@ class PipelineCore:
         """
         self._ev_prompt.clear()
         self._suppress_live = True
+        self._suppressed_tail = ""
         try:
             # 前置 \x15 收纳半行但不补 \x19 恢复：任务启动即丢弃该半行
             #（若 yank 回 kill ring 里的旧文本，会在提示符行复活污染输入）。
@@ -1364,7 +1381,7 @@ class PipelineCore:
                 return False
         finally:
             self._suppress_live = False
-            self._suppressed_echo = False
+            await self._resync_after_suppress()
 
     async def _probe_shell_kind(self) -> tuple[str | None, str]:
         """在当前提示符敲一行能力探测，识别 su - / 嵌套 shell 后的真实 shell 族。
@@ -2624,14 +2641,23 @@ class PipelineCore:
                 # 触发条件恰是裸壳：探测行的回显是纯文本 → 走 live（集成壳
                 # 里走 silent exec 帧，所以这条路径平时无声无息）。
                 self._probe_buf.extend(ev[1].encode("utf-8", "replace"))
-            if self._curtain:
+            if self._suppress_live:
+                # 注入窗内一律吞（§5.5）：注入行回显与 shell 提示符重绘都
+                # 不外显。判定顺序必须先于 _curtain——窗内 prompt_start 会
+                # 关帘，提示符段若进帘，下一次 send_raw（闸）就把它成排放
+                # 行 = 横排提示符墙。提示符文本另记在 _suppressed_tail：窗
+                # 末按 shell 真实状态重画（有没有 OSC 标记都成立）。
+                self._suppressed_echo = True
+                _seg = _ansi_free(ev[1])
+                _nl = max(_seg.rfind('\n'), _seg.rfind('\r'))
+                self._suppressed_tail = _seg[_nl + 1:] if _nl >= 0 \
+                    else self._suppressed_tail + _seg
+            elif self._curtain:
                 # 幕帘扣留：live 文本（提示符段及后续杂散回显）按序暂存，
                 # 下一次注入（闸）或任务收尾才放行
                 self._curtain_parts.append(ev[1])
                 if time.monotonic() - self._curtain_at > 600.0:
                     await self._curtain_open()   # 防呆：扣满 10 分钟强制放行
-            elif self._suppress_live:
-                self._suppressed_echo = True   # 注入行回显：吞（§5.5）
             else:
                 self._last_live_at = time.monotonic()
                 await self.emit_bytes(ev[1].encode("utf-8", "replace"))
@@ -2736,6 +2762,66 @@ class PipelineCore:
                     type="event",
                     event={"kind": "ai_collapse", "command": cmd}))
 
+    @staticmethod
+    def _disp_width(s: str) -> int:
+        """终端显示列宽：CJK/全角按 2 列（与 hook __ot_repaint 同式：
+        字符数 + UTF-8 额外字节/2）。"""
+        by = len(s.encode("utf-8", "replace"))
+        return len(s) + (by - len(s)) // 2
+
+    async def _repaint_line(self, text: str | None, echoed: bool = True) -> None:
+        """降级/直通路径补画 hook 的 __ot_repaint "$t" 33 观感。
+
+        hook 不在位时重绘不会自己发生（函数已随 su - 丢掉），由 worker 侧
+        画同样的三段：提示符原样保留 + 蓝 38;5;33 原文 + 换行。提示符不必
+        在 worker 侧重建 [u@h cwd]#——光标退回半行行首（提示符右侧 N 显示
+        列处）再清到行尾即可，屏幕上那个提示符就是 shell 自己画的。
+
+        两种落笔法，按手头有没有提示符原文分：
+        - 有（抑制窗里捕获到 shell 刚画的提示符段）：整行重建，与
+          __ot_repaint 逐字同形，长行折行也对；
+        - 没有：光标退回已回显原文的行首，**只清到行尾**（\x1b[K，不是
+          \x1b[2K——后者会把提示符一并擦掉），屏幕上 shell 自己画的提示
+          符原样保留。echoed=False（typed=False 回放 / 兜底 ^C 后的新提示
+          符行）时该行本就只有提示符，直接在行尾接上原文。
+        """
+        tail, self._suppressed_tail = self._suppressed_tail, ''
+        self._suppressed_echo = False
+        if not text:
+            return
+        body = "\x1b[38;5;33m" + text + "\x1b[0m\n"
+        if tail:
+            seq = "\r\x1b[2K" + tail + body
+        elif echoed:
+            back = self._disp_width(text)
+            seq = (f"\x1b[{back}D" if back else "") + "\x1b[K" + body
+        else:
+            seq = "\x1b[K" + body
+        await self.emit_bytes(seq.encode("utf-8", "replace"))
+
+    async def _resync_after_suppress(self) -> None:
+        """注入抑制窗收束：把 xterm 的光标与行内容对齐回 shell 真实状态。
+
+        窗内吞掉的字节（注入行回显 + 换行 + shell 新画的提示符）在 xterm
+        上等于什么都没发生，光标还停在开窗前那行的行尾——后续字节直接放
+        行会落在那个列上叠成横排提示符墙。窗末 \r+清行回到行首，重画被
+        吞掉的提示符段；幕帘关着就并进扣留（任务期不冒空提示符，收尾才
+        放行），与 hook 在位时「重绘行 + 空提示符被幕帘扣住」的观感一致。
+        """
+        tail, self._suppressed_tail = self._suppressed_tail, ''
+        repaint, self._repaint_text = self._repaint_text, None
+        swallowed, self._suppressed_echo = self._suppressed_echo, False
+        if repaint is not None:
+            await self._repaint_line(repaint, echoed=True)
+            return
+        if not swallowed:
+            return
+        chunk = "\r\x1b[2K" + (tail or self._cur_prompt)
+        if self._curtain:
+            self._curtain_parts.append(chunk)
+        else:
+            await self.emit_bytes(chunk.encode("utf-8", "replace"))
+
     async def _close_suppressed_line(self) -> None:
         """注入窗口吞过回显时补一个换行收束提示符行（§5.5）：前端看不到
         被吞的注入行，不补换行的话命令输出会接在提示符同一行。"""
@@ -2816,6 +2902,7 @@ class PipelineCore:
             # 立即恢复 live：D 之后的提示符重画字节不能被抑制窗口吞掉
             self._suppress_live = False
             self._suppressed_echo = False
+            self._suppressed_tail = ""
             if frame["ctx"] == "agent" and self._agent_open_cmd is not None:
                 self._agent_open_cmd = None   # 输出块已自然收束于主 xterm
 
@@ -2950,9 +3037,12 @@ class PipelineCore:
                 if self._ai_task is not None:
                     # 前一任务在跑：清缓冲须同步完成再排队（后台跑会与
                     # 在跑任务的下一发工具注入赛跑）
-                    await self._passthrough_reset()
+                    await self._passthrough_reset(t)
                 else:
-                    asyncio.create_task(self._passthrough_reset())
+                    asyncio.create_task(self._passthrough_reset(t))
+            else:
+                # 回放行（验证窗口 hold 过）：没有半行可擦，但蓝行仍要补画
+                await self._repaint_line(t, echoed=False)
             await self._on_ai_line(t)
             return
         # 降级路径（hook 标记绝迹 = su - 重置等）：任务先行——task_start→分析卡
@@ -2970,10 +3060,13 @@ class PipelineCore:
             await self._on_ai_line(t)
             return
         if typed:
-            asyncio.create_task(self._degraded_reset())
+            asyncio.create_task(self._degraded_reset(t))
+        else:
+            # 回放行（验证窗口 hold 过）：没有半行可擦，但蓝行仍要补画
+            await self._repaint_line(t, echoed=False)
         await self._on_ai_line(t)
 
-    async def _degraded_reset(self) -> None:
+    async def _degraded_reset(self, text: str | None = None) -> None:
         """降级提交的后台清场：\x15 收掉已回显半行 + ^C 把 shell 从可能的
         前台命令里要回提示符（su - 重置是主因）。持 _runner_lock：与任务内
         _ensure_integrated（探测行须敲在干净提示符上）和工具命令注入互斥。
@@ -2984,22 +3077,31 @@ class PipelineCore:
             return
         try:
             async with self._runner_lock:
-                _dbg("dg-reset: send \\x15")
-                await self.session.send_raw(b"\x15")
-                await asyncio.sleep(0.12)
-                self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
-                _dbg("dg-reset: send \\x03")
-                await self.session.send_raw(b"\x03")
-                # readline 的 SIGINT 恢复窗口（^C 回显 + 退格重画）会丢弃期间
-                # 到达的输入：紧贴 ^C 写分片会丢 chunk0 头部（真机实测：解码
-                # 脚本缺字节、注释行断成命令报 "对策: …: command not found"；
-                # settle 0.4s 后消失）。^C 回显由 _strip_intr_echo 精确吞除
-                await asyncio.sleep(0.4)   # settle 躲开 SIGINT 恢复窗口
-                _dbg("dg-reset: done")
+                # 清场全程开抑制窗：\x15 的擦行回显、^C 回显、bash 补画的
+                # 新提示符全吞（否则 ^C 与提示符先到、NL 原文后补画就叠在
+                # 它们上面 = 又一层错位）。窗末统一按 hook 观感补画蓝行。
+                self._suppress_live = True
+                self._suppressed_tail = ""
+                try:
+                    _dbg("dg-reset: send \\x15")
+                    await self.session.send_raw(b"\x15")
+                    await asyncio.sleep(0.12)
+                    self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
+                    _dbg("dg-reset: send \\x03")
+                    await self.session.send_raw(b"\x03")
+                    # readline 的 SIGINT 恢复窗口（^C 回显 + 退格重画）会丢弃期间
+                    # 到达的输入：紧贴 ^C 写分片会丢 chunk0 头部（真机实测：解码
+                    # 脚本缺字节、注释行断成命令报 "对策: …: command not found"；
+                    # settle 0.4s 后消失）。^C 回显由 _strip_intr_echo 精确吞除
+                    await asyncio.sleep(0.4)   # settle 躲开 SIGINT 恢复窗口
+                    _dbg("dg-reset: done")
+                finally:
+                    self._suppress_live = False
+                    await self._repaint_line(text)
         except Exception as e:  # noqa: BLE001 - 清理失败不追责：任务已起跑
             _dbg("dg-reset: exc", repr(e))
 
-    async def _passthrough_reset(self) -> None:
+    async def _passthrough_reset(self, text: str | None = None) -> None:
         """直通模式的行缓冲后台清理：\x15 收掉已回显/残存半行 + ^C 把 shell
         从可能的前台命令里要回提示符，语义与降级路径的清场相同但不挡任务
         起跑。镜像 dirty 也照发 \x15——直通不重发整行，不存在「保留残行等
@@ -3008,14 +3110,22 @@ class PipelineCore:
         if self.session is None:
             return
         try:
-            _dbg("pt-reset: send \\x15")
-            await self.session.send_raw(b"\x15")
-            await asyncio.sleep(0.12)
-            self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
-            _dbg("pt-reset: send \\x03")
-            await self.session.send_raw(b"\x03")
-            await asyncio.sleep(0.4)   # settle 躲开 SIGINT 恢复窗口（同降级路径）
-            _dbg("pt-reset: done")
+            # 与降级路径同形：清场全程抑制，窗末补画蓝行（否则半行被擦掉后
+            # 用户自然语言在屏上完全不可见，只能等分析卡的 text 才重现）
+            self._suppress_live = True
+            self._suppressed_tail = ""
+            try:
+                _dbg("pt-reset: send \\x15")
+                await self.session.send_raw(b"\x15")
+                await asyncio.sleep(0.12)
+                self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
+                _dbg("pt-reset: send \\x03")
+                await self.session.send_raw(b"\x03")
+                await asyncio.sleep(0.4)   # settle 躲开 SIGINT 恢复窗口（同降级路径）
+                _dbg("pt-reset: done")
+            finally:
+                self._suppress_live = False
+                await self._repaint_line(text)
         except Exception as e:  # noqa: BLE001 - 清理失败不追责：任务已起跑
             _dbg("pt-reset: exc", repr(e))
 
@@ -3189,6 +3299,9 @@ class PipelineCore:
             # 同降级路径：settle 躲开 SIGINT 恢复窗口的输入丢弃；不吞 ^C 回显
             # （吞掉会使前端光标失步，重发回显拼在旧行后）
             await asyncio.sleep(0.4)
+            # ^C 已可见地收掉残行并补画了新提示符：行上只剩提示符，按
+            # echoed=False 接上蓝行即可（与 hook 的 __ot_repaint 同观感）
+            await self._repaint_line(t, echoed=False)
         await self._on_ai_line(t)
 
     def _start_ai(self, line: str, hooked: bool = False) -> None:
@@ -3269,6 +3382,7 @@ class PipelineCore:
             finally:
                 self._suppress_live = False
                 self._suppressed_echo = False
+                self._suppressed_tail = ""
             self._display = "ssh"
             await self.session.send_raw(b"\x0c")   # 清屏重画，纯透传从干净屏开始
         else:
@@ -3291,6 +3405,7 @@ class PipelineCore:
             finally:
                 self._suppress_live = False
                 self._suppressed_echo = False
+                self._suppressed_tail = ""
             await self.session.send_raw(b"\x0c")   # hook 已回 agent：清屏重画
 
 
