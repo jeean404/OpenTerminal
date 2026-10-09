@@ -1597,6 +1597,54 @@ async def test_worker_degraded_settles_after_intr(monkeypatch):
     await _drain_fallback(w)
 
 
+async def test_worker_degraded_erases_echo_before_retype(monkeypatch):
+    """降级整行重发不得把输入画两遍（真机截图：白色孤儿行 + 蓝色重绘行各一份）。
+
+    根因：已回显半行的擦除由 _ensure_integrated 前置的 \\x15 完成，但那次重画
+    落在 _suppress_live 窗口里被吞掉——前端看不见擦除，旧回显留在屏上；窗口后
+    整行重发又回显一遍，hook 再把第二份重绘成蓝色 = 屏上两份输入。
+
+    契约：①清行必须发在抑制窗口之外（前端看得见这次擦除）；②^C 在已擦净的行上
+    会另开一行空提示符，重发前要把它删掉，否则蓝行上方多一行；③重发在两者之后。
+    """
+    import openterminal.web.worker as wmod
+    monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 2.0
+    w._open_cmds[1] = "sudo su -"
+    await _install_fake_runner(monkeypatch)
+    _wire_presenter(w)
+    _skip_reintegrate(w, monkeypatch)
+
+    # DL 走 emit_bytes -> outbox（异步送达），挂进 send_raw 同一条时间线
+    # 才能断言「删行先于重发」
+    _orig_emit = w.emit_bytes
+    async def _emit(data):
+        w.session.calls.append(("dl", data))
+        await _orig_emit(data)
+    w.emit_bytes = _emit
+
+    n = len([c for c in w.session.calls if c[0] == "raw"])
+    await w.handle_client(ClientMsg(type="submit", text="帮我查看 docker容器"))
+    raws = [d for k, d in w.session.calls if k == "raw"][n:]
+    body = "帮我查看 docker容器\r".encode()
+    dls = [d for k, d in w.session.calls if k == "dl"]
+
+    assert b"\x15" in raws, "清行须发在 _suppress_live 窗口外，前端才看得见擦除"
+    assert b"\x03" in raws
+    assert raws.index(b"\x15") < raws.index(b"\x03"), "清行先于 ^C：^C 后是新提示符行"
+    assert body in raws
+    assert raws.index(b"\x03") < raws.index(body), "重发在 ^C 之后"
+    assert any(b"\x1b[1M" in d for d in dls), "重发前删掉 ^C 另开的空提示符行，否则蓝行上方多一行"
+    dl = next(d for d in dls if b"\x1b[1M" in d)
+    i_dl = w.session.calls.index(("dl", dl))
+    i_body = w.session.calls.index(("raw", body))
+    assert i_dl < i_body, "删行必须先于重发"
+    await _drain_fallback(w)
+
+
 async def test_worker_exec_text_swallowed_in_injection_window(monkeypatch):
     """su - 后重注入落在 EXEC 相位（C 帧未闭）：分片回显/eval 杂行走 exec 事件
     直通主屏 = base64 墙。抑制窗口内用户帧 exec 字节一并吞掉。"""

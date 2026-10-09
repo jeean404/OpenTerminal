@@ -2791,9 +2791,9 @@ class PipelineCore:
         su - 整段会话——其 C 帧不闭合还会让 _hook_ok 的时间戳比较永久误判在位）
         时 readline 不在读行，补发的 \r 只落进命令 stdin，hook 永不重绘/上报。
 
-        降级路径（hook 标记绝迹 = su - 重置）：先发 Ctrl+C 丢弃已回显半行（不能
-        用 \x15/^U：kill 进 kill ring 的文本会被后续注入序列收尾的 \x19/^Y yank
-        回提示符行），再重注入分片脚本——成功且镜像可信时把整行重发进 hook
+        降级路径（hook 标记绝迹 = su - 重置）：先**可见地**丢弃已回显半行（\x15 发在
+        _suppress_live 窗口外），再 Ctrl+C 把 shell 从可能的前台命令里要回提示符，
+        然后重注入分片脚本——成功且镜像可信时把整行重发进 hook
         （蓝色回显 + 上报触发，su - 后用户同样看得见自己的输入）；镜像 dirty 时
         不重发（残尾巴会被当整行画屏并送 AI），静默走 AI 流；重注入失败才静默
         走 AI 流。工具命令执行中不动终端，只透传回车。
@@ -2839,12 +2839,26 @@ class PipelineCore:
                 self._hook_report_pending = t
                 self._fallback_task = asyncio.create_task(self._submit_fallback(t))
             return
-        # 降级路径：先 Ctrl+C 丢弃已回显半行（不能用 \x15/^U：kill 进 kill
-        # ring 的文本会被后续注入序列收尾的 \x19/^Y yank 回提示符行），再尝试
-        # 重注入（su - 重置是主因）——成功则把整行重发进 hook：蓝色回显 + 6337
+        # 降级路径：先**可见地**擦掉已回显半行，再 Ctrl+C 把 shell 从可能的
+        # 前台命令里要回提示符（su - 重置是主因），然后尝试重注入——成功则
+        # 把整行重发进 hook：蓝色回显 + 6337
         # 上报触发，与健康路径同一条 proven 链路，用户看得见自己的输入；重注入
         # 失败才回退外部启动（静默不回显）。工具命令执行中不动终端，只透传回车。
         if typed:
+            if not dirty:
+                # 丢弃已回显半行——必须**前端看得见**：\x15 发在
+                # _suppress_live 窗口之外。（真机「自然语言输入重复两遍」根因：
+                # _ensure_integrated 前置的 \x15 重画落在窗口里被吞掉，旧回显
+                # 留屏不动；窗口后整行重发又回显一遍，hook 再把第二份重绘成蓝 =
+                # 白孤儿行 + 蓝重绘行两份输入。）\x03/^C 只丢 readline 缓冲，
+                # 已敲的字仍留在屏上，故不能只靠它。镜像 dirty 不重发，保留残行。
+                # \x15/^U 在 hook 在位时是 __ot_kill_line（存 __ot_saved，
+                # 不经 kill ring），不在位是原生 unix-line-discard；其后不会有原生 \x19
+                # 把 kill ring 副本 yank 回提示符行——_ensure_integrated 只 \x15
+                # 不 \x19，工具注入的 \x19 恒由 _hook_ok 门控、彼时 ^Y 已
+                # 重绑为 __ot_yank_line。
+                await self.session.send_raw(b"\x15")
+                await asyncio.sleep(0.12)
             self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
             await self.session.send_raw(b"\x03")
             # readline 的 SIGINT 恢复窗口（^C 回显 + 退格重画）会丢弃期间到达的
@@ -2855,6 +2869,13 @@ class PipelineCore:
             # 分片回显的吞窗口由 _ensure_integrated 自管（自带 try/finally 复位）
             await asyncio.sleep(0.4)
         if self._interactive and await self._ensure_integrated() and not dirty:
+            if typed:
+                # ^C 在已擦净的行上会另开一行空提示符：删掉它，蓝行才与健康路径
+                # 同形（否则蓝行上方多一行空提示符，每问一次累一行）。只发前端
+                # ——PTY 无屏，xterm.js 就是那块屏——不动 readline 的行模型：重发
+                # 回显与 hook 重绘都是相对位移，落点仍正确。DECSC/DECRC 包住 DL：
+                # DL 的光标列语义各实现不一，存/取保证光标仍落在提示符尾。
+                await self.emit_bytes(b"\x1b[1A\x1b7\x1b[1M\x1b8")
             await self.session.send_raw((t + "\r").encode())
             self._hook_report_pending = t
             self._fallback_task = asyncio.create_task(self._submit_fallback(t))
