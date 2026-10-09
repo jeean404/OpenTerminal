@@ -89,6 +89,9 @@ body.sidebar-collapsed #sidebar { display: none; }
 .dot.connecting { background: var(--warn); animation: blink 1s infinite; }
 .dot.connected { background: var(--ok); }
 .dot.closed { background: var(--danger); }
+.dot.error { background: var(--danger); }
+/* tab 标签页上的连接状态点：略小，垂直居中于单行标签 */
+.tab .dot { width: 7px; height: 7px; }
 @keyframes blink { 50% { opacity: 0.35; } }
 
 /* --- 主区 --- */

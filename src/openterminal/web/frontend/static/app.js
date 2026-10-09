@@ -15,7 +15,6 @@ function esc(s) {
 
 const sessions = {};   // tabId -> Session
 let activeTabId = null;
-const closedTargets = new Set();   // 最近关闭过（曾 connected/connecting）的目标名 → 状态点转红 closed
 let targetsData = null;         // /api/targets 最近一次返回，供搜索重渲染
 let searchQuery = "";
 // --- 装饰卡落网格用的 ANSI 片段 ---
@@ -212,7 +211,7 @@ class Session {
     const tabBtn = document.createElement("button");
     tabBtn.className = "tab";
     tabBtn.id = `tabbtn-${this.tabId}`;
-    tabBtn.innerHTML = `<span class="tab-name">${esc(this.name)}</span><span class="tab-x" title="关闭">×</span>`;
+    tabBtn.innerHTML = `<span class="dot tab-dot connecting" title="连接状态"></span><span class="tab-name">${esc(this.name)}</span><span class="tab-x" title="关闭">×</span>`;
     tabBtn.querySelector(".tab-name").onclick = () => activateTab(this.tabId);
     tabBtn.querySelector(".tab-x").onclick = ev => { ev.stopPropagation(); closeTab(this.tabId); };
     document.getElementById("tabs").appendChild(tabBtn);
@@ -2389,7 +2388,9 @@ class Session {
     if (conn) conn.hidden = state !== "connecting";
     const ov = document.getElementById(`connov-${this.tabId}`);
     if (ov) ov.hidden = state !== "connecting";
-    refreshSidebarStatus();
+    // tab 标签页上的状态点（每 tab 独立）：绿=已连接、红=断开、黄闪=连接中
+    const td = this.tabEl && this.tabEl.querySelector(".tab-dot");
+    if (td) td.className = "dot tab-dot " + state;
   }
 
   // 浮层两阶段文案：stage 事件来自 worker（open_session 完成 → agent 初始化）
@@ -2728,11 +2729,7 @@ class Session {
     try { this.term.dispose(); } catch (e) {}
     this.tabEl.remove();
     this.paneEl.remove();
-    if (this.status === "connected" || this.status === "connecting") {
-      closedTargets.add(this.name);
-    }
     delete sessions[this.tabId];
-    refreshSidebarStatus();
   }
 }
 
@@ -2782,24 +2779,6 @@ function loadTargets() {
     .catch(() => {});
 }
 
-function targetStatus(name) {
-  let has = false;
-  for (const s of Object.values(sessions)) {
-    if (s.name !== name) continue;
-    has = true;
-    if (s.status === "connected") return "connected";
-    if (s.status === "connecting") return "connecting";
-  }
-  return (has || closedTargets.has(name)) ? "closed" : "idle";
-}
-
-function refreshSidebarStatus() {
-  document.querySelectorAll("#targets .target").forEach(btn => {
-    const dot = btn.querySelector(".dot");
-    if (dot) dot.className = "dot " + targetStatus(btn.dataset.name);
-  });
-}
-
 function matchesQuery(t) {
   if (!searchQuery) return true;
   const q = searchQuery.toLowerCase();
@@ -2837,7 +2816,6 @@ function entry(t) {
   const sub = `${t.user || ""}@${t.host || ""}${t.port ? ":" + t.port : ":22"}`;
   const label = t.name;
   b.innerHTML =
-    '<span class="dot idle"></span>' +
     `<span class="t-main"><span class="t-label">${esc(label)}</span>` +
     (sub.replace(/[@:]/g, "") ? `<span class="t-sub">${esc(sub)}</span>` : "") +
     "</span>" +
@@ -2865,7 +2843,7 @@ function localEntry() {
   const b = document.createElement("button");
   b.className = "target";
   b.dataset.name = "local";
-  b.innerHTML = '<span class="dot idle"></span>' +
+  b.innerHTML =
     '<span class="t-main"><span class="t-label">local</span>' +
     '<span class="t-sub">本机终端</span></span>';
   b.onclick = () => openTab("local");
