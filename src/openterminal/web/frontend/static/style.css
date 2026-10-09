@@ -555,3 +555,13 @@ body.sidebar-collapsed #sidebar { display: none; }
 }
 .ctxmenu button:hover:not(:disabled) { background: var(--border); }
 .ctxmenu button:disabled { opacity: .4; cursor: default; }
+
+/* --- 复制成功小提示：出现 1s 后淡出（复用同一节点，连按不叠影）--- */
+.copy-toast {
+  position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%);
+  z-index: 900; padding: 5px 14px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); font-size: 12px; pointer-events: none;
+  opacity: 0; transition: opacity .3s ease;
+}
+.copy-toast.show { opacity: .92; }

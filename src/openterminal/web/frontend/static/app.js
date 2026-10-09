@@ -809,6 +809,7 @@ class Session {
     } else {
       this._execCopy();
     }
+    this._toastCopied();
     // 右键菜单复制后菜单按钮已 remove、焦点落 body——拉回终端让用户直接
     // 继续打字（Cmd/Ctrl+Shift+C 路径焦点本就在终端，此处为无害 no-op）
     this.focusCursor();
@@ -816,6 +817,21 @@ class Session {
 
   _execCopy() {
     try { document.execCommand("copy"); } catch (e) {}
+  }
+
+  // 「已复制」小提示：常显 1s 后淡出（.copy-toast 样式，opacity 过渡）。
+  // 复用同一节点并重置计时，连按复制不叠影、不缩短上一条寿命。
+  _toastCopied() {
+    let el = this.paneEl.querySelector(".copy-toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "copy-toast";
+      el.textContent = "已复制";
+      this.paneEl.appendChild(el);
+    }
+    clearTimeout(this._toastTimer);
+    el.classList.add("show");
+    this._toastTimer = setTimeout(() => el.classList.remove("show"), 1000);
   }
 
   _pasteText() {

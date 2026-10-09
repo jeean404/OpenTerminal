@@ -41,8 +41,7 @@ function lastRow(s) {
 }
 
 // 三击选中最后一个非空行（xterm 原生三击整行选中；拖选在注入事件下不稳定）
-async function selectLastLine(page) {
-  const r = await page.evaluate(() => {
+async function selectLastLine(page) {  const r = await page.evaluate(() => {
     const rows = document.querySelectorAll(".xterm-rows > div");
     for (let i = rows.length - 1; i >= 0; i--) {
       if ((rows[i].textContent || "").trim()) {
@@ -55,6 +54,23 @@ async function selectLastLine(page) {
   if (!r) throw new Error("找不到可选中行");
   await page.mouse.click(r.x, r.y, { clickCount: 3 });
   await sleep(200);
+}
+
+// 「已复制」toast：出现且 1.3s 后淡出（opacity 回落）
+async function checkCopyToast(page, tag) {
+  const st0 = await page.evaluate(() => {
+    const el = document.querySelector(".copy-toast");
+    return el ? { exists: true, show: el.classList.contains("show") } : { exists: false };
+  });
+  check(`${tag} 复制后弹「已复制」提示`, st0.exists && st0.show,
+    JSON.stringify(st0));
+  await sleep(1400);
+  const st1 = await page.evaluate(() => {
+    const el = document.querySelector(".copy-toast");
+    return el ? { show: el.classList.contains("show"),
+                  op: getComputedStyle(el).opacity } : { show: false };
+  });
+  check(`${tag} 提示 1s 后淡出`, !st1.show, JSON.stringify(st1));
 }
 
 async function main() {
@@ -202,6 +218,7 @@ async function main() {
   check("S9 右键复制进剪贴板", clip9.includes("CTX_COPY_MARK_9"),
     `剪贴板="${clip9.slice(0, 50)}"`);
   check("S9 复制后焦点仍在终端", ae9 === "xterm", `焦点=${ae9}`);
+  await checkCopyToast(page, "S9");
   await page.keyboard.press("Control+c");
   await sleep(200);
 
