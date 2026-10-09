@@ -175,11 +175,12 @@ def _pw_core(session) -> PipelineCore:
         _display="agent")
 
 
-def test_password_reprompt_retriggers_modal():
-    """输错后 ssh 重讨（deny+prompt 常被隧道合包成一块）：上升沿必须复现模态。
+def test_password_reprompt_retriggers_rising_edge():
+    """输错后 ssh 重讨（deny+prompt 常被隧道合包成一块）：上升沿必须复现。
 
-    旧实现 search 取首匹配——首次应答后旧提示符永躺尾窗，at_end 恒 False →
-    重讨永不触发、模态不再弹（真机根因）。第二次起一律弹窗（不自动填充）。"""
+    无凭据时不再弹模态（真实终端语义：提示符已在终端里，用户手输）——
+    但上升沿仍要每次重讨都走到 _on_nested_password_prompt（at_end 判定取
+    最后一个匹配），否则凭据库后来存了密码也不会再自动填充。"""
     sent: list[bytes] = []
     msgs: list = []
 
@@ -198,14 +199,16 @@ def test_password_reprompt_retriggers_modal():
     async def main():
         c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
-        assert sum(m.type == "ask_password" for m in msgs) == 1
+        assert c._nested_pw_attempts == 1
+        assert not any(m.type == "ask_password" for m in msgs)
         await c._on_nested_password("wrongpw", False)
         assert c._pw_verifying and not c._pw_prompt_seen
         c._detect_password_prompt(
             b"\r\nPermission denied, please try again.\r\n"
             b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
-        assert sum(m.type == "ask_password" for m in msgs) == 2
+        assert c._nested_pw_attempts == 2, "重讨上升沿必须复现"
+        assert not any(m.type == "ask_password" for m in msgs)
         assert c._pw_verifying   # 重讨在场：验证窗口继续 hold 输入
     try:
         asyncio.run(main())
@@ -248,10 +251,10 @@ def test_autofill_hits_default_port_alias_key():
     assert seen[:2] == [("1.2.3.4", "wujian", None), ("1.2.3.4", "wujian", 22)]
 
 
-def test_modal_dismissed_when_prompt_consumed():
-    """密码提示符被终端手输消费（登录横幅冲出尾窗结尾）：陈旧模态防抖代关；
-    防抖窗内重讨（at_end 回 True）取消代关、模态继续等应答（真机：ssh 早已
-    成功、模态仍悬在 root 提示符上讨密码）。"""
+def test_no_modal_on_prompt_cycle():
+    """无凭据的密码提示符全程不弹模态、不代关（真实终端语义：提示符已在
+    终端里，用户手输）。旧实现弹窗代答、手输消费提示符后再防抖代关——
+    表现为弹框一闪而过（真机 2026-10-08）。"""
     msgs: list = []
 
     class _Session:
@@ -270,19 +273,16 @@ def test_modal_dismissed_when_prompt_consumed():
     async def main():
         c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
-        assert sum(m.type == "ask_password" for m in msgs) == 1
-        assert c._pw_modal_open
-        # 防抖窗内重讨：代关取消，模态保住
+        # 防抖窗内重讨
         c._detect_password_prompt(b"denied\r\n")
         c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(wait)
-        assert not any(m.type == "ask_password_dismiss" for m in msgs)
-        assert c._pw_modal_open
-        # 终端手输消费提示符：登录横幅后防抖代关
+        # 终端手输消费提示符：登录横幅
         c._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
                                   b"[wujian@host ~]$ ")
         await asyncio.sleep(wait)
-        assert sum(m.type == "ask_password_dismiss" for m in msgs) == 1
+        assert not any(m.type == "ask_password" for m in msgs)
+        assert not any(m.type == "ask_password_dismiss" for m in msgs)
         assert not c._pw_modal_open
     try:
         asyncio.run(main())
@@ -608,3 +608,41 @@ def test_probe_buf_collects_live_text_without_killing_pump():
         assert got == ("bash", "-d"), "探测输出没被收全：%r" % (got,)
 
     asyncio.run(main())
+
+
+
+
+# --- 命令集门禁：壳身份基线 -------------------------------------------------
+
+def test_cs_prompt_identity_falls_back_to_router_prompt():
+    """尾窗全空时退回路由捕获的提示符——否则基线永远种不下。
+
+    真机 2026-10-08：命令集第一条命令时尾窗还是空的（连接后没有任何泵输出
+    进尾窗），只认尾窗 → ident None → 基线不记账；第二条命令时 base is None
+    → 换壳判定被短路（changed=False）→ sudo su - 打进裸壳，回显白色不青。
+    """
+    c = _bare_core(_cs_tail=None, _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
+    assert c._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu"
+    c2 = _bare_core(_cs_tail=bytearray(), _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
+    assert c2._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu", "空尾窗同样要退回"
+
+
+def test_cs_prompt_identity_prefers_tail_over_router_prompt():
+    """尾窗有内容就以末个非空行为准（比 _cur_prompt 新鲜）。"""
+    tail = ("[xiaojian@VM-0-11-centos ~]$ " + chr(13) + chr(10)).encode()
+    c = _bare_core(_cs_tail=bytearray(tail),
+                   _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
+    assert c._cs_prompt_identity() == "xiaojian@VM-0-11-centos"
+
+
+def test_cs_prompt_identity_no_fallback_when_tail_has_output():
+    """末个非空行是输出文本（Last login）时返回 None，不退回 _cur_prompt。
+
+    _cur_prompt 只在装了 hook 的壳里更新：刚跳进裸壳时它还是外层壳的身份，
+    拿它记账会把换壳判成同壳。None 不改基线，下一次门禁仍判得出换壳。
+    """
+    tail = ("[ubuntu@VM-0-5-ubuntu ~]$ " + chr(13) + chr(10)
+            + "Last login: Thu Oct  8 23:12:52 2026" + chr(13) + chr(10)).encode()
+    c = _bare_core(_cs_tail=bytearray(tail),
+                   _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
+    assert c._cs_prompt_identity() is None

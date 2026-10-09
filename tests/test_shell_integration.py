@@ -645,3 +645,125 @@ def test_hook_unwraps_quoted_exec_body():
         [_BASH, "--noprofile", "--norc", "-c", body, "sh", f"'{probe}'"],
         capture_output=True, text=True, timeout=15)
     assert r.stdout == probe, r.stdout + r.stderr
+
+
+
+
+def test_bash_repaint_same_row_erase_on_bash5():
+    """bash 5.x 重绘必须「k-1 次上移擦折行段 + 同行擦」，不得整段上移。
+
+    bash 5.x 的 readline 进 bind -x 回调前自己发 CR+EL 把回显行擦净、光标停在
+    回显行行首（真机 2026-10-08 字节级实测 CentOS bash 5.1.8：回车后先到
+    raw 4 字节 CR+EL，且早于 6337 上报标记）。此时重绘再 CUU k 次就上到回显行的
+    上一行、连真实输出一起吃掉——每命令吃一行（真机：sudo su - 的 Last login
+    行、上一条命令的青色行逐条消失，屏幕逐命令上塌）。bash 4 及更早按旧实测
+    （C-m 已画换行、光标在回显行下一行行首）保留 k 次上移擦，未在真机复核。
+    """
+    from openterminal.shell_integration import _BASH_SCRIPT
+    repaint = _BASH_SCRIPT.split("__ot_repaint() {", 1)[1].split("__ot_run() {", 1)[0]
+    assert "BASH_VERSINFO" in repaint, "重绘未按 bash 大版本分流擦行几何"
+    v5, v4 = repaint.split("BASH_VERSINFO", 1)[1].split("else", 1)
+    assert "for ((i=1; i<k; i++))" in v5, "bash 5.x 分支须只上移 k-1 次擦折行段"
+    assert chr(92) + "r" + chr(92) + "033[2K" in v5, "bash 5.x 分支缺同行擦除"
+    assert "for ((i=0; i<k; i++))" in v4, "bash 4 分支须保留旧的 k 次上移擦"
+
+
+# --- 宏式 Enter（bind -x hook + accept-line）------------------------------
+# 只 bind -x '"\C-m"' 吞 Enter 时 readline() 永不返回、PS1 不重展开：换目录后
+# 空闲提示符的目录冻结（真机 2026-10-09：cd /etc 后仍显示 ~）。改为双段宏
+# （\e[44~ 跑 hook、\e[45~ accept 空行）后 bash 每命令重跑 PROMPT_COMMAND 并重
+# 展开 PS1，代价是回调返回时 readline 必先拿陈旧 rl_prompt 重画一次提示符——
+# 由 __ot_prompt_cmd 的收尾擦行收拾。以下测试锁住这套几何。
+
+BS = chr(92)
+
+
+def _bash_prompt_cmd() -> str:
+    from openterminal.shell_integration import _BASH_SCRIPT
+    return _BASH_SCRIPT.split("__ot_prompt_cmd() {", 1)[1].split("\n}", 1)[0]
+
+
+def test_bash_enter_is_two_stage_macro():
+    """Enter 必须是「bind -x hook + accept-line」双段宏，不得回到直接吞。"""
+    s = build_script("bash", 1)
+    assert "bind -x '\"" + BS + "e[44~\": __ot_submit'" in s
+    assert "bind '\"" + BS + "e[45~\": accept-line'" in s
+    assert "bind '\"" + BS + "C-m\": \"" + BS + "e[44~" + BS + "e[45~\"'" in s
+    assert "bind '\"" + BS + "C-j\": \"" + BS + "e[44~" + BS + "e[45~\"'" in s
+    # 旧形态（bind -x 直接吃 Enter）不得复活：那等于 readline() 永不返回
+    assert "bind -x '\"" + BS + "C-m\"" not in s
+    assert "bind -x '\"" + BS + "C-j\"" not in s
+
+
+def test_bash_prompt_cmd_erases_stale_readline_redraw():
+    """宏尾 accept 前 readline 必用陈旧 rl_prompt 重画一次提示符（真机字节级
+    实测），PROMPT_COMMAND 须按缓存宽度算折行数擦净，否则每命令留一行重复
+    提示符——换目录后那行还挂着旧目录。"""
+    pc = _bash_prompt_cmd()
+    assert '"${__ot_clr:-}"' in pc, "擦行须由 __ot_clr 门控（裸周期不擦）"
+    assert BS + "033[%dA" + BS + "r" in pc and BS + "033[2K" in pc
+    assert "for ((i=1; i<k; i++))" in pc, "多折行提示符须逐段擦"
+    assert "(( k > 1 ))" in pc, "CSI 0A 按 1 处理：k=1 时不得再上移"
+    assert "__ot_clr=" in pc, "旗标用后即清，不得连擦两轮"
+
+
+def test_bash_stale_erase_is_fork_free():
+    """擦行块内不得有命令替换：陈旧重绘与擦行之间一次 fork（wc/id）就可能把擦行
+    拖出 core 的重注入抑制窗（_ev_prompt 后仅留 80ms）——陈旧行被吞、擦行却放行，
+    前端白擦掉一行真实输出。宽度改为建 __ot_p0 时算好缓存进 __ot_w0。"""
+    pc = _bash_prompt_cmd()
+    erase = pc.split('if [ -n "${__ot_clr:-}" ]; then', 1)[1].split("\n  fi", 1)[0]
+    # 只禁命令替换 $(…) 与反引号；算术展开 $((…)) 是内建，不 fork
+    assert "$(" not in erase.replace("$((", "") and "`" not in erase, "擦行块须零 fork"
+    assert "__ot_w0" in erase
+    build = pc.split('if [ "$p0" != "${__ot_p0:-}" ]; then', 1)
+    assert len(build) == 2, "宽度须缓存复用（提示符串没变就不重算）"
+    assert "wc -c" in build[1]
+
+
+def test_bash_p0_mirrors_ps1_shape():
+    """__ot_p0 必须与 PS1 展开同形，否则擦行按错宽度算折行数 k（多擦吃真实
+    输出、少擦留残行）。"""
+    from openterminal.shell_integration import _BASH_SCRIPT
+    assert "[" + BS + "u@" + BS + "H " + BS + "w]" + BS + "$ " in _BASH_SCRIPT
+    pc = _bash_prompt_cmd()
+    assert 'p0="[${USER:-$(id -un)}@$HOSTNAME $d]$c "' in pc
+    assert 'd="${PWD/#$HOME/' + BS + '~}"' in pc and "c='#'" in pc
+    assert '[ "$EUID" != 0 ] && c=' in pc
+
+
+def test_bash_run_pads_partial_line_after_d_marker():
+    """输出不以换行收尾时须补 COLUMNS 空格 + CR（zsh PROMPT_SP 同法）把陈旧重绘
+    推到纯空白行：否则提示符接在输出尾巴后画（真机 printf abc → "abc[root@… ~]# "），
+    收尾擦行就连真实输出一起擦。补白必须在 D 标记之后——否则空格进 exec 缓冲，
+    污染 run() 返回值与转录。"""
+    from openterminal.shell_integration import _BASH_SCRIPT
+    run = _BASH_SCRIPT.split("__ot_run() {", 1)[1].split("__ot_exec_run() {", 1)[0]
+    fill = "printf '%*s" + BS + "r' \"${COLUMNS:-80}\" ''"
+    assert fill in run, "缺半行补白"
+    assert run.index(BS + "033]133;D") < run.index(fill) < run.index("return 0")
+
+
+def test_bash_empty_branch_clears_buffer_for_macro_accept():
+    """宏尾 accept-line 收的必须是空行：纯空白行留着会被 bash 当命令收下并进史
+    （HISTCONTROL=ignorespace 不保证处处开着，且前导空格行仍会执行）。"""
+    from openterminal.shell_integration import _BASH_SCRIPT
+    empty = _BASH_SCRIPT.split('if [ -z "$t" ]; then', 1)[1].split("return 0", 1)[0]
+    assert 'READLINE_LINE=""; READLINE_POINT=0' in empty
+
+
+def test_bash_clr_flag_survives_reinjection():
+    """重注入是 eval 新脚本，而 __ot_clr 由本轮提交回调先置位——init 用普通赋值
+    就把这轮收尾擦行清了，注入链每片净多占一行（抑制窗内前端看不见，PTY 与前端
+    就此错行）。故三个收尾状态只能「未定义时兜底赋空」。"""
+    from openterminal.shell_integration import _BASH_SCRIPT
+    head = _BASH_SCRIPT.split("__ot_prompt_cmd() {", 1)[0]
+    for v in ("__ot_clr", "__ot_p0", "__ot_w0"):
+        assert ': "${%s:=}"' % v in head, "%s 须用 := 兜底初始化" % v
+        assert ("\n%s=" % v) not in head, "%s 不得用普通赋值初始化" % v
+    # 收尾状态是提示符周期内的化妆量，不导出：子 shell 里取空即「不擦」，
+    # 天然安全（${__ot_clr:-} 形式在 nounset 下也不炸）
+    for ln in _BASH_SCRIPT.splitlines():
+        if ln.startswith("export"):
+            for v in ("__ot_clr", "__ot_p0", "__ot_w0"):
+                assert v not in ln, "%s 不该出现在导出名单" % v

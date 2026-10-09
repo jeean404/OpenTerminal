@@ -397,8 +397,69 @@ class Session {
     }
   }
 
+  // --- 密码内联捕获（真实终端 ssh 讨密码语义）---
+  // 提示符落屏前光标不在行首才补换行（空终端首次讨密码不甩首行空白）
+  _pwNewline() {
+    try {
+      const b = this.term.buffer.active;
+      if (b.type === "normal" && b.cursorX > 0) this._writeTerm("\r\n");
+    } catch (e) {}
+  }
+
+  // 无回显收集：退格删末字符（无回显、无 ^H，远端 echo 已关），回车提交
+  // （空密码照发——与真实终端一致，远端失败后重讨），Ctrl+C 取消整个连接
+  // 尝试（password_cancel → 后端中止认证等待）。方向键等转义序列整体跳过
+  // （只滤 ESC 本体会把 CSI 的参数字符当口令收进去），其余控制键忽略。
+  _pwFeed(d) {
+    const cap = this._pwCapture;
+    const sc = Array.from(d);
+    for (let i = 0; i < sc.length; ) {
+      const ch = sc[i];
+      if (ch === "\r") {
+        const text = cap.buf;
+        cap.buf = "";
+        cap.submitted = true;
+        // 留档待问：ready 后凭它弹「是否记住密码」（错密会在重讨时被覆盖）
+        this._pwEntered = text;
+        this._writeTerm("\r\n");
+        this.sendJson({type: "auth", auth_kind: cap.kind, text, remember: false});
+        return;
+      }
+      if (ch === "\x1b") {
+        // CSI：参数字节 0x20–0x3F 后接终字节 0x40–0x7E；SS3：ESC O + 一字节
+        if (sc[i + 1] === "[" || sc[i + 1] === "O") {
+          i += 2;
+          while (i < sc.length && (sc[i] < "@" || sc[i] > "~")) i++;
+          i++;   // 跳过终字节
+        } else {
+          i += 2;   // 两字节转义（ESC x）
+        }
+        continue;
+      }
+      if (ch === "\x7f" || ch === "\x08") {
+        if (cap.buf) cap.buf = cap.buf.slice(0, -1);
+        i++;
+        continue;
+      }
+      if (ch === "\x03") {
+        this._writeTerm("^C\r\n");
+        this._pwCapture = null;
+        this._pwEntered = null;
+        this.sendJson({type: "auth", auth_kind: "password_cancel", text: ""});
+        return;
+      }
+      if (ch >= " ") cap.buf += ch;
+      i++;
+    }
+  }
+
   // onData 主体（WS 就绪后走这里）：submit 拦截链 + 按键透传
   _feedData(d) {
+    // 密码内联捕获（初始连接讨密码）：按键不进 submit 拦截链、不发 PTY
+    if (this._pwCapture && !this._pwCapture.submitted) {
+      this._pwFeed(d);
+      return;
+    }
     if (typeof localStorage !== "undefined" && localStorage.getItem("otdbg"))
       console.log("[ot onData]", d.length, JSON.stringify(d.slice(0, 60)));
     // 占位提示追踪:任何非控制字节=有输入痕迹,立即藏——可打印键之外,
@@ -466,6 +527,8 @@ class Session {
       } else this.handleMsg(JSON.parse(ev.data));
     };
     ws.onclose = ev => {
+      this._pwCapture = null;   // 断线终结登录期密码捕获，重连后不残留
+      this._pwEntered = null;
       this.setStatus("closed", "连接已关闭");
       this._failPads();
       // 断线自动重连（指数退避）；4401/4404（鉴权失败/worker 已回收）重试无意义
@@ -2476,6 +2539,7 @@ class Session {
       case "ping":
         break;   // 心跳：存活基线已在 onmessage 记 _lastMsgAt，这里无需动作
       case "ready": {
+        this._pwCapture = null;   // 登录成功：退出密码内联捕获
         this.setStatus("connected",
           `已连接 ${msg.host}${msg.distro ? "（" + msg.distro + "）" : ""}`);
         this.interactive = !!msg.interactive;
@@ -2495,6 +2559,19 @@ class Session {
         if (this.interactive && this.mode !== "agent") this.setMode("agent");
         this.fit();
         this.focusCursor();
+        // 本次是手输密码登录成功 → 询问是否记住（错密不会走到 ready，
+        // 凭据库只进验证过的密码；记住后下次连接自动填充、免提示直进）
+        if (this._pwEntered) {
+          this._pwEntered = null;
+          modalConfirm("记住密码",
+            "已成功登录。记住该主机的密码？下次连接将自动登录" +
+            "（写入系统凭据库，不落数据库）",
+            ok => {
+              if (ok) this.sendJson({type: "auth",
+                                     auth_kind: "password_remember",
+                                     text: ""});
+            }, "记住", "不记住");
+        }
         break;
       }
       case "status":
@@ -2521,6 +2598,20 @@ class Session {
         this.showApproval(msg.command, msg.reasons, msg.host, msg.risk);
         break;
       case "ask_password":
+        if (!msg.auth_kind || msg.auth_kind === "password") {
+          // 初始连接讨密码：与真实终端一致——提示符直接落进终端，无回显
+          // 收集输入（不弹模态）；错密后端重讨时补 OpenSSH 的 denied 行。
+          // 取消=Ctrl+C（发 password_cancel，中止整个连接尝试）
+          if (this._pwCapture && this._pwCapture.submitted)
+            this._writeTerm("\r\nPermission denied, please try again.");
+          this._pwNewline();
+          this._writeTerm(msg.label || "密码: ");
+          // 撤连接浮层让提示符可见（ready/closed 自会撤，无需恢复）
+          const ov = document.getElementById(`connov-${this.tabId}`);
+          if (ov) ov.hidden = true;
+          this._pwCapture = {kind: "password", buf: "", submitted: false};
+          break;
+        }
         modalAsk("密码", msg.label, (value, remember) => {
           this.sendJson({type: "auth", auth_kind: msg.auth_kind || "password",
                          text: value, remember});
@@ -2556,6 +2647,8 @@ class Session {
       case "auth":
         break;   // 应答确认，无 UI
       case "closed":
+        this._pwCapture = null;   // 连接终结：退出密码内联捕获
+        this._pwEntered = null;   // 失败的连接不弹「记住密码」
         this.setStatus("closed", msg.text || "连接已关闭");
         break;
       case "reconnected":

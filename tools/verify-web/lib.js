@@ -78,7 +78,12 @@ async function pickTarget(page, nameOrHost) {
 // 会把行粘成一串，行首/行尾正则全部失效——顺序断言需要真实换行）
 function snapshot(page) {
   return page.evaluate(() => {
-    const rows = document.querySelectorAll(".xterm-rows .xterm-row");
+    let rows = document.querySelectorAll(".xterm-rows .xterm-row");
+    if (!rows.length) {
+      // xterm v5 的行节点没有 .xterm-row 类：直接取 .xterm-rows 的子 div，
+      // 否则整屏文本会粘成一行（行级断言与「尾 N 行」全部失真）
+      rows = document.querySelectorAll(".xterm-rows > div");
+    }
     if (!rows.length) {
       const t = document.querySelector(".xterm-rows");
       return t ? (t.textContent || "") : "";

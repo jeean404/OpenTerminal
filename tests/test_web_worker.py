@@ -247,6 +247,34 @@ async def test_worker_auth_remember_stores_password(monkeypatch):
     assert stored == [("10.0.0.20", "root", None, "sekret")]
 
 
+async def test_worker_inline_password_remember_after_ready(monkeypatch):
+    # 内联手输密码：登录成功后前端确认「记住」（password_remember，不携明文）
+    # → 用登录时留档的密码写 keyring；无留档（凭据库自动登录）时为 no-op
+    import openterminal.web.worker as wmod
+
+    stored = []
+    monkeypatch.setattr(wmod, "store_password",
+                        lambda host, user, port, pw: stored.append((host, user, port, pw)))
+    w, sink = await _make_worker(monkeypatch, target="web01")
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+
+    # 内联提交（remember=False，内联一律不即时记住）
+    await w.handle_client(ClientMsg(type="auth", auth_kind="password",
+                                    text="sekret", remember=False))
+    assert stored == []
+    # ready 后前端确认记住 → 落库的是登录时留档的密码
+    await w.handle_client(ClientMsg(type="auth", auth_kind="password_remember",
+                                    text=""))
+    assert stored == [("10.0.0.20", "root", None, "sekret")]
+
+    # 未手输过密码（无留档）：password_remember no-op
+    w2, _ = await _make_worker(monkeypatch, target="web01")
+    await asyncio.wait_for(w2.connected.wait(), timeout=2)
+    await w2.handle_client(ClientMsg(type="auth", auth_kind="password_remember",
+                                     text=""))
+    assert stored == [("10.0.0.20", "root", None, "sekret")]
+
+
 # --- 键盘 / resize / 模式（单管线：字节直发，无输入路由）---
 
 async def test_worker_keys_and_resize_forwarded(monkeypatch):
@@ -2541,3 +2569,36 @@ async def test_task_stall_not_triggered_while_tool_pending(monkeypatch):
         await task
     except asyncio.CancelledError:
         pass
+
+
+
+
+async def test_worker_exec_end_cross_instance_collapses_injection_frame(monkeypatch):
+    """注入 eval 行的 C 带旧实例号、它自己的 D 带新实例号（eval 刚把 __ot_i
+    推进新号段）：这个 D 必须跨实例收束那个 silent 帧。
+
+    按「旧实例的 D 一律忽略」的话帧永不闭合，此后每条 exec 字节都被当静默帧
+    输出吞掉——真机 2026-10-08：命令集换壳后密码提示、Last login、嵌套壳提示
+    符全不上屏，只剩 live 回显；缺了 exec 里的换行，后续重绘把历史逐条砸在同
+    一行上（屏幕塌成两三行）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._exec_stack.append({"ctx": "silent", "inst": 1, "inj": True,
+                          "line": 'eval "$(echo "$__ot_inj" | base64 -d)"'})
+    await w._on_exec_end(100000, 0, "/root")
+    assert w._exec_stack == [], "注入帧未跨实例收束（此后 exec 字节全被吞）"
+    await w._on_exec_text("Last login: Thu Oct  8 23:12:52 CST 2026 on pts/2")
+    await asyncio.sleep(0.02)
+    assert any(m[0] == "bytes" and b"Last login" in m[1] for m in sink.messages),         "收束后 exec 字节仍被吞（真机整屏只剩回显的根因）"
+
+
+async def test_worker_exec_end_mismatch_keeps_non_injection_frame(monkeypatch):
+    """非注入帧的实例号不匹配仍按「旧实例的 D」忽略：外层 ssh 帧不能被别的
+    实例号收束掉，否则嵌套壳的输出会漏进主屏。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._exec_stack.append({"ctx": "silent", "inst": 7, "line": "ssh x@h"})
+    await w._on_exec_end(9, 0, None)
+    assert [f["inst"] for f in w._exec_stack] == [7], "非注入帧被跨实例弹出"

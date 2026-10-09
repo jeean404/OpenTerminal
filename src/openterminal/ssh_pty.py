@@ -138,24 +138,26 @@ class SshPtySession(BasePtySession):
         # 加密私钥口令：保持 getpass（Web 端为已知限制：走服务进程控制台）
         kwargs["passphrase"] = lambda: getpass.getpass(f"密钥口令 ({host}): ")
 
-        async def _open(tofu_allowed: bool, tried_password: bool):
+        # 密码重试上限：对齐 OpenSSH 默认 NumberOfPasswordPrompts=3——错密后
+        # 前端重讨提示符（Permission denied 行 + 新提示符），三次全错才判失败
+        async def _open(tofu_allowed: bool, tries: int):
             try:
                 return await asyncssh.connect(host, **kwargs)
             except asyncssh.PermissionDenied:
-                if tried_password:
+                if tries >= 3:
                     raise
                 label = f"{(username + '@') if username else ''}{host} 密码: "
                 pw = await self._maybe_await(self._ask_password, label)
                 kwargs["password"] = pw
                 if record_last is not None:
                     record_last(pw)
-                return await _open(tofu_allowed=True, tried_password=True)
+                return await _open(tofu_allowed=True, tries=tries + 1)
             except asyncssh.HostKeyNotVerifiable:
                 if not tofu_allowed:
                     raise
                 return await self._trust_unknown_host(host, port, kwargs, _open)
 
-        return await _open(tofu_allowed=True, tried_password=False)
+        return await _open(tofu_allowed=True, tries=0)
 
     def _set_target_password(self, pw: str) -> None:
         self.last_password = pw
@@ -200,7 +202,7 @@ class SshPtySession(BasePtySession):
         # _open 闭包按引用读取 kwargs，因此原地改写即可。
         saved = dict(kwargs)
         kwargs.update(known_hosts=None)
-        conn = await open_conn(tofu_allowed=False, tried_password=False)
+        conn = await open_conn(tofu_allowed=False, tries=0)
         key = conn.get_server_host_key()
         algorithm = (
             key.algorithm.decode() if isinstance(key.algorithm, bytes) else key.algorithm

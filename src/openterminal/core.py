@@ -59,6 +59,11 @@ _PW_HOLD_RELEASE = 0.25
 _AI_ZOMBIE_T = 180.0
 _PW_MODAL_DISMISS = 0.5   # 密码提示符被消费后陈旧模态的代关防抖
 
+
+class PasswordCancelled(ConnectionError):
+    """终端内联密码输入的 Ctrl+C：用户主动中止连接尝试（区别于连接意外
+    关闭——_run 捕获后向前端发「连接已取消」而非「连接失败：…」）。"""
+
 # 换壳探测（_probe_shell_kind）：等 __OTPROBE__ 输出的最长时限
 _PROBE_TIMEOUT = 1.5
 #: 工具执行通道不可用的退出码（hook 不在位 / 远端 shell 已退出）
@@ -316,6 +321,12 @@ _CMDSET_CONFIRM_RE = re.compile(r"yes/no|verification code", re.IGNORECASE)
 # 新 shell 提示符 = 命令真跑完(含嵌套 ssh/su - 登录后的新提示符)。
 # 密码类提示不以 $/#/%/> 结尾,故与 _CMDSET_PROMPT_RE 互斥,不会互相误判。
 _CMDSET_DONE_RE = re.compile(r"[$#%>]\s*$")
+# 提示符身份(user@host):换壳(sudo su - / 嵌套 ssh 登录)的唯一廉价凭据。
+# 命令集凭它决定发下一条前要不要先补注入——hook 标记是全会话新鲜度,
+# 分不清标记来自哪个壳(su - 后外层标记仍新鲜 → _hook_ok 假阳性)。
+_CS_PROMPT_ID_RE = re.compile(
+    r"^[\[({]?\s*([A-Za-z0-9._-]+)@([A-Za-z0-9._-]+)")
+CMDSET_HOOK_WAIT = 20.0     # 等他人补注入窗口关闭的封顶(秒)
 # CSI / OSC / 字符集切换等转义:提示符重绘、PSReadLine 上色都会带上,剥掉才
 # 判得出「提示符在行尾」(见 PipelineCore._cs_text)
 _ANSI_RE = re.compile(
@@ -357,6 +368,12 @@ class PipelineCore:
         self._outbox: asyncio.Queue = asyncio.Queue()
         self._inbox: asyncio.Queue = asyncio.Queue()
         self._pws: asyncio.Queue = asyncio.Queue()      # 密码应答
+        # 内联密码输入的 Ctrl+C 标记：password_cancel 置位 + 队列喂 None，
+        # ask_password 据此抛 PasswordCancelled（区别于连接意外关闭）
+        self._pw_cancelled = False
+        # 内联手输密码留档（password auth 时记下）：password_remember 确认后
+        # 由 _store_auth_password 写 keyring，密码无需从前端回流
+        self._pw_last_entered = None
         self._hks: asyncio.Queue = asyncio.Queue()      # 主机密钥应答
         self._decisions: asyncio.Queue = asyncio.Queue()  # 审批决策
         # 未决审批记账：审批帧只发一次，WS 断隙/刷新即丢，core 会永久等决策
@@ -371,6 +388,7 @@ class PipelineCore:
         self._target: TargetConfig | None = None   # _connect 时持有(命令集等读取)
         self._cs_tail: bytearray | None = None     # 命令集监听的输出滚动缓冲
         self._cs_pw_pending = False   # 上一条命令是密码类:发下条前先确认未停在提示
+        self._cs_prompt_id: str | None = None  # 上一条命令落点提示符的 user@host
         self._cs_task: asyncio.Task | None = None
         self._cs_resume = asyncio.Event()          # 「继续」按钮强制放行
         self._target_host = ""       # _connect 时填充
@@ -631,9 +649,21 @@ class PipelineCore:
             await self._decisions.put(msg.decision)
         elif msg.type == "auth":
             if msg.auth_kind == "password":
+                # 内联手输的密码留档：ready 后前端确认「记住」时回读写库
+                # （password_remember 不携明文，避免密码再回流一遍）
+                self._pw_last_entered = msg.text
                 await self._pws.put(msg.text)
                 if msg.remember:
                     self._store_auth_password(msg.text)
+            elif msg.auth_kind == "password_remember":
+                # 手输密码登录成功后的「记住」确认：与弹窗勾选记住同键写 keyring
+                if getattr(self, "_pw_last_entered", ""):
+                    self._store_auth_password(self._pw_last_entered)
+            elif msg.auth_kind == "password_cancel":
+                # 终端内联密码输入的 Ctrl+C：中止认证等待（等同连接关闭），
+                # ask_password 抛 PasswordCancelled → 前端显示「连接已取消」
+                self._pw_cancelled = True
+                await self._pws.put(None)
             elif msg.auth_kind == "nested_password":
                 # 嵌套 ssh/sudo 密码提示符的模态代答：打进 PTY 而非认证队列
                 await self._on_nested_password(msg.text, msg.remember)
@@ -1131,12 +1161,14 @@ class PipelineCore:
         return load_password(host, user, 22 if port is None else None)
 
     async def _on_nested_password_prompt(self) -> None:
-        """密码提示符上升沿：自动填充或弹窗。
+        """密码提示符上升沿：凭据库自动填充一次，否则交给终端手输。
 
         凭据键优先取提示符自带的 user@host（_pw_prompt_host，归属最强）；
         提示符无主机信息时回退最内层 ssh 帧解析（_nested_ssh_target）。
-        自动填充每条命令只试一次：密码错误时 ssh 会重新讨，第二次起一律
-        弹窗，避免凭据过期时连环静默失败。"""
+        自动填充每条命令只试一次：密码错误时 ssh 会重新讨，第二次起不再
+        静默代答，避免凭据过期时连环静默失败。**无凭据不弹模态**——提示符
+        本来就在终端里（真实 ssh/sudo 行为），用户直接手输；旧实现弹窗代答，
+        手输消费提示符后模态被防抖代关，表现为弹框一闪而过（真机 2026-10-08）。"""
         if self._closed or self.session is None:
             return
         attempt = self._nested_pw_attempts
@@ -1160,12 +1192,8 @@ class PipelineCore:
                     type="status",
                     text=f"已用记住的密码自动填充 {user + '@' if user else ''}"
                          f"{host}"))
-                return
-        label = f"{user + '@' if user else ''}{host or ''} 密码: " \
-            if host else "密码: "
-        self._pw_modal_open = True
-        await self.emit_msg(ServerMsg(type="ask_password", label=label,
-                                      auth_kind="nested_password"))
+        # 无凭据/自动填充未命中：不做任何事——用户在终端手输密码（提示符
+        # 已可见）。模态代答路径（_on_nested_password）保留但不再触发。
 
     async def _on_nested_password(self, pw: str, remember: bool) -> None:
         """模态提交的嵌套密码：整行打进 PTY（远端 echo 关闭，不回显）。"""
@@ -1193,6 +1221,8 @@ class PipelineCore:
         （readline 回显 = 半行在场的凭据）才动手。"""
         if not self._interactive or self.session is None or self._closed:
             return
+        if self._cs_tail is not None:
+            return   # 命令集在跑:它逐条过 _cs_hook_gate,主动注入只会并发
         await asyncio.sleep(0.6)
         if time.monotonic() - self._last_live_at < 0.4:
             return   # 目标提示符上有回显（用户敲字中）：放弃主动注入
@@ -1364,6 +1394,9 @@ class PipelineCore:
             type="ask_password", label=label, auth_kind=auth_kind))
         val = await self._pws.get()
         if val is None:
+            if getattr(self, "_pw_cancelled", False):
+                self._pw_cancelled = False
+                raise PasswordCancelled()
             raise ConnectionError("连接已关闭")
         return val
 
@@ -1459,6 +1492,11 @@ class PipelineCore:
     async def _run(self) -> None:
         try:
             await self._connect()
+        except PasswordCancelled:
+            await self.emit_msg(ServerMsg(type="closed", text="连接已取消"))
+            self._closed = True  # sender 据此排空后退出，避免协程泄漏
+            self._closed_sent = True
+            return
         except Exception as e:  # noqa: BLE001 - 连接失败通知前端
             await self.emit_msg(ServerMsg(
                 type="closed", text=f"连接失败：{type(e).__name__}: {e}"))
@@ -1748,8 +1786,14 @@ class PipelineCore:
 
         不在结束时清 tail:密码提示常与命令回显同批到达(快网络),
         后续应答行要能继承这段输出继续匹配。
+
+        发命令前先过 _cs_hook_gate:换壳后不补注入就把命令打进裸壳,
+        回显没有青色重绘(hook 不在位);补注入窗口与发送并发则更糟——
+        窗口吞掉命令回显与新壳提示符(真机:sudo su - / cd /tmp / root
+        提示符全不上屏、光标悬空),分片还会被换壳拆进两个壳装配错乱。
         """
         await self._cs_wait_pw_verify()
+        await self._cs_hook_gate()
         self._cs_tail = bytearray()
         await self.session.send_raw((cmd + "\r").encode())
         deadline = time.monotonic() + CMDSET_ECHO_TIMEOUT
@@ -1782,6 +1826,64 @@ class PipelineCore:
             if time.monotonic() > deadline:
                 return
             await asyncio.sleep(0.05)
+
+    def _cs_prompt_identity(self) -> str | None:
+        """当前壳身份 user@host：尾窗末个非空行优先，尾窗全空退回 _cur_prompt。
+
+        必须是「末个非空行」而不是 rsplit 出来的末行：ssh / su 登录后的提示符
+        块常以 CR 或括号粘贴模式转义收尾再补换行，归一化后末行是空串 → 身份
+        判不出 → 门禁按「同壳」放行，下一条命令打进裸壳（真机 2026-10-08：
+        sudo su - 回显白色、无青色重绘）。只认末个非空行、不向上多扫：再往上
+        就是上一个壳的提示符，拿它记账会把换壳判成没换。
+        """
+        for line in reversed(self._cs_text().split("\n")):
+            if not line.strip():
+                continue
+            m = _CS_PROMPT_ID_RE.match(line.strip())
+            return f"{m.group(1)}@{m.group(2)}" if m else None
+        # 尾窗一个非空行都没有（命令集第一条：连接后还没有泵输出进尾窗）→ 退回
+        # 路由最近一次 B 标记捕获的提示符。否则基线永远种不下：第二条命令时
+        # base is None → ubuntu→xiaojian 的换壳判不出来 → sudo su - 打进裸壳、
+        # 回显白色不青（真机 2026-10-08 run4：ident= None base= None）。
+        # 只在尾窗全空时退回：末个非空行是输出文本（Last login 等）时宁返回
+        # None——_cur_prompt 只在装了 hook 的壳里更新，拿它记账会把「刚跳进
+        # 裸壳」判成同壳；None 不改基线，下一次门禁仍判得出换壳。
+        m = _CS_PROMPT_ID_RE.match(self._cur_prompt.strip())
+        return f"{m.group(1)}@{m.group(2)}" if m else None
+
+    async def _cs_hook_gate(self) -> None:
+        """命令集逐条前置门禁:注入在飞等窗口关;换壳/缺 hook 先补注入。
+
+        补注入的 _suppress_live 窗口吞窗口内全部泵输出——与命令集并发时
+        正好吞掉命令回显与新壳提示符(真机 2026-10-08:sudo su - 之后整屏
+        冻结、光标悬在旧提示符);分片飞行途中换壳(su -)还会把 base64 装配
+        拆进两个壳 → eval 语法错误 → hook 永远装不进嵌套壳(命令行不青)。
+        串行化后两症同解:窗口在飞只等不发;提示符身份变了先注入完再发,
+        嵌套壳 thereby 拿到 hook,回显青色重绘与提示符落屏都恢复。
+        """
+        deadline = time.monotonic() + CMDSET_HOOK_WAIT
+        while self._suppress_live and not self._closed:
+            if time.monotonic() > deadline:
+                return          # 注入卡死:不再等,命令照发(宁显不青不吞屏)
+            await asyncio.sleep(0.05)
+        if self._closed:
+            return
+        ident = self._cs_prompt_identity()
+        base = self._cs_prompt_id
+        if ident is not None:
+            self._cs_prompt_id = ident
+        # 首条命令没有基线可比（base is None）：不算换壳。setup 注入刚落地就
+        # 再注一遍＝白等 2~4s，还把实例号推进新号段（外层帧号空间白白作废）
+        changed = base is not None and ident is not None and ident != base
+        _dbg("cs gate: ident=", ident, "base=", base, "changed=", changed,
+             "hook_ok=", self._hook_ok(), "hook_gone=", self._hook_gone,
+             "lastline=", repr(self._cs_lastline()[-40:]))
+        if not changed and (self._hook_ok() or self._hook_gone):
+            return              # 同壳且 hook 在位(或结构性不可集成)
+        try:
+            await self._ensure_integrated()
+        except Exception:  # noqa: BLE001 - 注入失败不阻断命令集
+            return
 
     async def _cs_watch_prompt(self) -> None:
         """上一条是密码类命令时,发下一条前先确认它没停在交互提示上。
@@ -2498,7 +2600,15 @@ class PipelineCore:
                 # ①每片 __ot_run 的 C 标记各补一个 \r\n → 任务启动连打空行；
                 # ②重注入 export -f 报错走无帧 exec 直通前端。internal 行不补
                 # 收束换行、输出全吞（__ot_exec__ 恒走 EXEC 分支，不受影响）
-                self._exec_stack.append({"ctx": "silent", "line": line, "inst": inst})
+                top = self._exec_stack[-1] if self._exec_stack else None
+                if top is not None and top.get("inj"):
+                    # 注入行串行执行：上一条内部行的 D 丢了（换壳 / 分片被打断）
+                    # 就别让它压在栈里——inj 帧泄漏 = 此后所有 exec 字节被当静默
+                    # 输出吞掉（真机：命令输出与提示符全不上屏，只剩 live 回显）
+                    _dbg("exec_start: 丢弃未闭合注入帧", top["inst"], "->", inst)
+                    self._exec_stack.pop()
+                self._exec_stack.append(
+                    {"ctx": "silent", "line": line, "inst": inst, "inj": True})
                 return
             # 用户命令（CMD 报告或无报告）：显示全靠 PTY 原样字节，这里只
             # 记账（transcript 在 exec_end 带退出码记一次，避免重复）
@@ -2589,7 +2699,16 @@ class PipelineCore:
             return    # 孤儿 D：无帧的执行周期，忽略
         top = self._exec_stack[-1]
         if inst != top["inst"]:
-            return    # 旧实例的 D：忽略
+            if top.get("inj"):
+                # 注入 eval 行的 C 标记带旧实例号、它自己的 D 带新实例号（eval
+                # 刚把 __ot_i 改写成新基址）。按「旧实例的 D」一律忽略，这个
+                # silent 帧就永不闭合，此后每条 exec 字节都被当静默帧输出吞掉
+                # ——真机表现：命令集/换壳后密码提示、Last login、提示符全不
+                # 上屏，只剩 live 回显；缺了 exec 里的换行，后续重绘还会把
+                # 历史逐条砸在同一行上（屏幕塌成两三行）。跨实例收束这一帧。
+                self._exec_stack.pop()
+                _dbg("exec_end: 跨实例收束注入帧", top["inst"], "->", inst)
+            return    # 旧实例的 D：忽略（注入帧已跨实例收束）
         frame = self._exec_stack.pop()
         if frame["ctx"] in ("agent", "probe"):
             fut = self._exec_future

@@ -73,6 +73,13 @@ __ot_off=0
 # 单管线（§5.6）：历史自然累积进唯一 xterm 的 scrollback，不再每命令清屏
 __ot_clear=0
 __ot_last_ec=0
+# 宏式 Enter 的收尾状态（见 __ot_prompt_cmd 与文件末 bind）：__ot_clr 由本轮
+# 提交回调置位、__ot_p0 是上一轮提示符可见串。重注入是 eval 新脚本，普通赋值
+# 会把「先置旗、后 eval」的这轮收尾擦行清掉——注入链每片净多占一行（抑制窗内
+# 前端看不见，PTY 与前端就此错行），故只在未定义时兜底赋空。
+: "${__ot_clr:=}"
+: "${__ot_p0:=}"
+: "${__ot_w0:=}"
 export PAGER=cat GIT_PAGER=cat
 # su - 等 login shell 会继承 readline 裸模式留下的 termios（-echo -icanon -isig：
 # 按键不可见、Ctrl+C 失效，真机「su - 后黑屏」根因）——bash 不在 bind -x 回调
@@ -106,8 +113,44 @@ bind -x '"\C-y": __ot_yank_line'
 __ot_prompt_cmd() {
   local ec=$?
   printf '\033]133;D;%s;%s;%s\007' "$ec" "$__ot_i" "$PWD"
+  # 宏式 Enter 收尾（见文件末 bind）：hook 回调期间 readline() 不返回、PS1 不重
+  # 展开，回调一返回 readline 必先拿「上次展开的陈旧 rl_prompt」重画一次提示符
+  # （真机 2026-10-09 字节级实测：cd /etc 后先出 ~ 再出 /etc 两截），宏尾
+  # accept-line 的 CR+LF 又把光标推到其下一行，bash 才重展开 PS1 画新提示符。
+  # 故按上一轮提示符可见宽度算折行数 k，上移 k 行逐行擦净，新提示符原位落下
+  # （不留空行）。只在经 hook 的周期擦（__ot_clr 由提交回调置位）：裸周期没有
+  # 陈旧重绘，且保留标准 bash 语义。擦的恒是纯提示符行——输出不以换行收尾的
+  # 情形由 __ot_run 末尾的补白把光标推到新行，真实输出不受牵连。
+  if [ -n "${__ot_clr:-}" ]; then
+    __ot_clr=
+    # 擦行必须紧贴陈旧重绘发出，中间不能有 fork：core 的重注入抑制窗在
+    # _ev_prompt（陈旧重绘的 A 标记）之后只多留 80ms，若擦行被一次 wc/id fork
+    # 拖到窗外，就成「陈旧行被吞、擦行却放行」——前端白擦掉一行真实输出。
+    # 故宽度在下方建 __ot_p0 时算好缓存进 __ot_w0（提示符串没变则连算都不算，
+    # 同目录连发命令零 fork），这里只剩算术 + printf 内建。
+    local cols=${COLUMNS:-80} k i
+    k=$(( (${__ot_w0:-0} + cols - 1) / cols ))
+    (( k < 1 )) && k=1
+    printf '\033[%dA\r' "$k"
+    for ((i=1; i<k; i++)); do printf '\033[2K\033[1B'; done
+    printf '\033[2K'
+    (( k > 1 )) && printf '\033[%dA\r' "$((k-1))"
+  fi
   if [ "$__ot_off" != 1 ] && [ "$__ot_clear" = 1 ]; then printf '\033[H\033[2J'; fi
   if [ -n "$__ot_pc_orig" ]; then eval "$__ot_pc_orig"; fi
+  # 记下 bash 即将展开并缓存进 rl_prompt 的提示符可见串（与 PS1 的
+  # [\u@\H \w]\$ 同形）：下一轮陈旧重绘擦行按它算折行数。放在
+  # __ot_pc_orig 之后，用户自己的 PROMPT_COMMAND 改了 PWD 也记得准。
+  local d="${PWD/#$HOME/\~}" c='#' p0 ch by
+  [ "$EUID" != 0 ] && c='$'
+  p0="[${USER:-$(id -un)}@$HOSTNAME $d]$c "
+  if [ "$p0" != "${__ot_p0:-}" ]; then
+    ch=${#p0}
+    by=$(printf %s "$p0" | wc -c | tr -d ' ')
+    # 显示宽 = 字符数 + UTF-8 额外字节/2（与 __ot_repaint 同式，CJK 双宽恰准）
+    __ot_w0=$(( ch + (by - ch) / 2 ))
+    __ot_p0="$p0"
+  fi
   return 0
 }
 if [ -z "$__ot_pc_mine" ]; then __ot_pc_orig="$PROMPT_COMMAND"; __ot_pc_mine=1; fi
@@ -116,7 +159,7 @@ if [ -z "$__ot_ps1_orig" ]; then __ot_ps1_orig="$PS1"; fi
 # PS1 不另行配色（观感对齐 main 分支：提示符用终端默认前景白，输入文本青色）；
 # 原生 PS1 存 __ot_ps1_orig 备用
 PS1='\[\033]133;A;'"$__ot_i"'\007\][\u@\H \w]\$ \[\033]133;B;'"$__ot_i"'\007\]'
-# 提交后重绘（§5.6）：bind -x 吞掉 Enter（accept-line 不再发生），但 readline
+# 提交后重绘（§5.6）：命令在 bind -x 回调里自执行（宏尾 accept 的是空行），
 # 进回调前已把 \C-m 的换行画完——光标在回显行的下一行行首（真机 bash 5.1 对照
 # 实验：回调内 \r\033[2K 只擦到空行，白回显行恒漏）。故先 CUU 上一行回到回显行、
 # 清行、提示符（默认色）+命令重画、\n 收束本行（输出紧随其后）。
@@ -134,7 +177,14 @@ __ot_repaint() {
   local s="$prompt$1" ch by w k i
   # $3=same：同行擦除。空行提交时 readline 不为 \C-m 画换行（无回显字符可收束），
   # 光标仍停在提示符行——上移擦会吃掉上一行（真机：连按 Enter 逐行吃掉连接
-  # 横幅、提示符不前进＝"Enter 不换行"根因）。非空行 readline 已画换行，走上移。
+  # 横幅、提示符不前进＝"Enter 不换行"根因）。
+  # 非空行在 bash 5.x 上同理：readline 进 bind -x 回调前自己发 \r\033[K 把回显行
+  # 擦净、光标停在回显行行首（真机 2026-10-08 字节级实测 CentOS bash 5.1.8：
+  # keys=b'\r' → raw b'\r\x1b[K'，且早于 6337 上报标记）。此时再 CUU 就上到回显
+  # 行的上一行、连真实输出一起擦掉——每命令吃一行（真机：sudo su - 的 Last
+  # login 行、上一条命令的青色行逐条消失，屏幕逐命令上塌）。故 5.x 走「k-1 次
+  # 上移擦折行段 + 同行擦」；bash 4 及更早按旧实测（\C-m 已画换行、光标在回显
+  # 行下一行行首）保留 k 次上移擦——4.x 未在真机复核，宁保守不动。
   if [ "${3:-up}" = same ]; then
     printf '\r\033[2K'
   else
@@ -143,13 +193,20 @@ __ot_repaint() {
     w=$(( ch + (by - ch) / 2 ))
     k=$(( (w + ${COLUMNS:-80} - 1) / ${COLUMNS:-80} ))
     (( k < 1 )) && k=1
-    for ((i=0; i<k; i++)); do printf '\033[1A\033[2K'; done
+    if (( ${BASH_VERSINFO[0]:-5} >= 5 )); then
+      for ((i=1; i<k; i++)); do printf '\033[1A\033[2K'; done
+      printf '\r\033[2K'
+    else
+      for ((i=0; i<k; i++)); do printf '\033[1A\033[2K'; done
+    fi
   fi
   printf '%s\033[38;5;%sm%s\033[0m\n' "$prompt" "${2:-51}" "$1"
 }
-# bind -x 会吞掉 Enter（accept-line 不再发生），所以 CMD/EXEC/off 路径由 hook
-# 自执行：报告 → C → eval → D → 清屏；hook 返回后 readline 必然重画提示符
-# （A…B），完成一个视觉上的"命令周期"。历史引用（!! 等）在记入 history 前用
+# Enter 由双段宏收尾（见文件末 bind）：宏尾的 accept-line 只收空行，所以
+# CMD/EXEC/off 路径仍由 hook 自执行：报告 → C → eval → D → 清屏；hook 返回后
+# readline 先用陈旧 rl_prompt 重画一次提示符（A…B），accept 空行后 bash 重展开
+# PS1 再画一次——前一次由 __ot_prompt_cmd 擦净，完成一个视觉上的"命令周期"。
+# 历史引用（!! 等）在记入 history 前用
 # history -p 展开，保持原生语义。fzf 的 bind -x TUI 是此模式可行性的先例。
 __ot_run() {
   local ec
@@ -165,6 +222,12 @@ __ot_run() {
   [ -n "$__ot_rl_tty" ] && stty "$__ot_rl_tty" 2>/dev/null
   printf '\033]133;D;%s;%s;%s\007' "$ec" "$__ot_i" "$PWD"
   if [ "$__ot_off" != 1 ] && [ "$__ot_clear" = 1 ]; then printf '\033[H\033[2J'; fi
+  # 半行补白（zsh PROMPT_SP 同法）：输出不以换行收尾时光标停在行中，回调返回后
+  # readline 的陈旧重绘会把提示符接在输出尾巴上画（真机 2026-10-09：printf abc
+  # → "abc[root@… /etc]# "），__ot_prompt_cmd 的收尾擦行就得连真实输出一起擦。
+  # 补 COLUMNS 个空格再 CR：光标本在行首 → 整行 blanks 后回行首（无副作用）；
+  # 光标在行中 → 空格填满本行并自动折到下一行行首，陈旧重绘恒落在纯提示符行。
+  printf '%*s\r' "${COLUMNS:-80}" ''
   return 0
 }
 # EXEC 注入体还原可读命令后 入史+青色重绘 再执行：注入行经过 tty 回显，明文
@@ -227,6 +290,9 @@ __ot_nl_en() {
 }
 __ot_submit() {
   local line="$READLINE_LINE" kind t first exp rest r0 r1
+  # 本轮经 hook：宏尾 accept-line 会让 bash 重画提示符，PROMPT_COMMAND 据此擦掉
+  # readline 陈旧重绘留下的那一截（见 __ot_prompt_cmd 收尾注释）
+  __ot_clr=1
   # readline 裸模式快照：__ot_run 在 eval 前按 __ot_tty_save 恢复正常态（子命令
   # 所需），eval 后必须按本快照还回 readline 裸模式——readline 自认终端仍预置、
   # 不会重新 prep，不还则下个提示符跑在 canonical 态：Tab 补全/↑ 历史/Ctrl+R
@@ -264,6 +330,9 @@ __ot_submit() {
   # 空行也走重绘：只 printf '\r\n' 的话，bind -x 返回后 readline 的重绘会
   # 擦掉先前画好的提示符——连按 Enter 只剩最后一个提示符、上方一片空行
   if [ -z "$t" ]; then
+    # 宏尾 accept 的必须是空行：纯空白行留着会被 bash 当命令收下（ignorespace
+    # 不保证处处开着）并进历史
+    READLINE_LINE=""; READLINE_POINT=0
     # 真空行 readline 不为 \C-m 画换行（光标停在提示符行）→ 同行擦；纯空白行
     # 有回显字符、readline 画了换行 → 上移擦（残留空格不可见，无害）
     if [ -z "$line" ]; then __ot_repaint "" 51 same; else __ot_repaint ""; fi
@@ -357,8 +426,21 @@ __ot_submit() {
   __ot_run "$exp"
   return 0
 }
-bind -x '"\C-m": __ot_submit'
-bind -x '"\C-j": __ot_submit'
+# Enter 双段宏（真机 2026-10-09 字节级验证，CentOS bash 5.1.8）：\e[44~ 先跑
+# hook（分类/重绘/执行；readline 进 bind -x 回调前自发的 CR+EL 预擦回显行照旧
+# 发生，重绘几何不变），\e[45~ 再 accept 一条空行让 readline() 真的返回——
+# bash 主循环这才重跑 PROMPT_COMMAND 并重展开 PS1。只 bind -x 吞 Enter 时
+# readline() 永不返回、rl_prompt 停在首次展开值：换目录后空闲提示符目录冻结
+# （cd /etc 后仍显示 ~），且用户自己的 PROMPT_COMMAND、bracketed paste 开关等
+# 原生提示符周期动作全部不跑。空行不入史也不执行（bash 对空命令两者都跳；
+# 实测 history 号连续无空洞）；PROMPT_COMMAND 补发的 D 与 __ot_run 那份同 inst
+# 同 ec，core 按孤儿 D 忽略（栈已空）。私有 CSI 键位终端不会自发发送；宏体不含
+# \C-m，无递归。\C-j 同绑（发 LF 的终端走同一条路径）。zsh 侧 widget 本就
+# zle .accept-line，无此结构问题。
+bind -x '"\e[44~": __ot_submit'
+bind '"\e[45~": accept-line'
+bind '"\C-m": "\e[44~\e[45~"'
+bind '"\C-j": "\e[44~\e[45~"'
 # 子 shell 继承（bug 修复：su 不带 - 切 root 后集成与主题色丢失）：非 login
 # 子 shell 继承导出的变量/函数/PROMPT_COMMAND/PS1；su - 等 login shell 会被
 # root 的 profile 重置，无法覆盖
