@@ -25,6 +25,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, replace
+from typing import Callable
 
 _OT_DBG = bool(os.environ.get("OT_WEB_DEBUG"))
 _OT_T0 = time.monotonic()   # _dbg 相对时间戳基准（轨迹排障用时差分析）
@@ -104,6 +105,9 @@ _SHELL_EXIT_WEAK_RULES = (
 # 不是集成壳（嵌套 shell 被 TMOUT/exit 收走后落回的裸壳）——此时健康路径的裸
 # \r 会把整行自然语言交给它当命令执行（真机 -bash: 执行: command not found）
 _HOOK_LIVENESS = 1.0
+# 注入期续行提示符指纹（zsh PS2）：回显流里出现即判定输入字节被行规程丢弃、
+# 引号失配，shell 卡在续行等补引号——setup 注入竞态的自愈触发点
+_PS2_ECHO_RE = re.compile(rb"(?:quote|dquote|cmdsubst)> ")
 
 
 def _looks_ai(text: str) -> bool:
@@ -365,6 +369,7 @@ class PipelineCore:
         self._sink = None
         self._hb = None                # 应用层心跳任务（attach 起、close 自然退）
         self._pad_reinject_at = 0.0    # _shell_pad hook 补注入节流阀（monotonic）
+        self._reinject_pending = False  # 任务起跑重注入在途（pad 路径免重试）
         self._hook_seen = False        # hook 曾在位（掉线才补注入；结构性无则不试）
         self._outbox: asyncio.Queue = asyncio.Queue()
         self._inbox: asyncio.Queue = asyncio.Queue()
@@ -780,12 +785,16 @@ class PipelineCore:
             if self._hook_ok():
                 self._hook_seen = True
             elif (self._hook_seen and
-                    time.monotonic() - self._pad_reinject_at > 60):
+                    time.monotonic() - self._pad_reinject_at > 60
+                    and not self._reinject_pending):
                 # hook 中途掉线（su -/exec/脚本重置 PROMPT_COMMAND）时 pad 会
                 # 秒应答零空行＝卡出生即夹紧截断（真机「总结卡底部被切」）。
                 # 任务起手已补注入一次，这里做 60s 节流的兜底重试：能救回就
                 # 照正常路径垫行，救不回再走宁藏不盖的降级。_hook_seen 门卫：
-                # 从未在位＝结构上不可集成（非掉线），不空转注入
+                # 从未在位＝结构上不可集成（非掉线），不空转注入。
+                # _reinject_pending：任务起跑的重注入已在途（外部触发链任务
+                # 必有）——pad 在它后面排队会让降级提交的分析卡迟到整段重注入
+                # （真机 Enter→卡 2.5s 根因），此时立即 ack，卡由显隐/夹紧兜底
                 self._pad_reinject_at = time.monotonic()
                 try:
                     # 已持 _runner_lock：走无锁实现（经 _ensure_integrated
@@ -1666,11 +1675,14 @@ class PipelineCore:
             pass
 
     async def _drain_quiet(self, quiet: float = 0.12,
-                           router: "StreamRouter | None" = None) -> str | None:
+                           router: "StreamRouter | None" = None,
+                           raw_sink: "Callable[[bytes], None] | None" = None
+                           ) -> str | None:
         """排空输出直到静默；喂 router 时返回其间出现的提示符（无则 None）。
 
         setup 注入期专用：泵未启动，必须主动读，否则 zle 回显塞满输出队列
         会导致 shell 停读输入、写入端 EAGAIN 自旋死锁（Task 注入排障结论）。
+        raw_sink：原始字节旁路（PS2 续行指纹扫描等），不影响 router 解析。
         """
         prompt = None
         while True:
@@ -1683,6 +1695,8 @@ class PipelineCore:
             if not chunk:
                 return prompt
             _dbg("drain raw=", repr(chunk[:60]))
+            if raw_sink is not None:
+                raw_sink(chunk)
             if router is not None:
                 for ev in router.feed(chunk):
                     if ev[0] == "prompt" and prompt is None:
@@ -1999,8 +2013,14 @@ class PipelineCore:
             # 清掉旧版本已落盘的垃圾（用户报障「↑ 全是 __ot_inj 分片」）
             if shell != "powershell":
                 await self.session.send_raw(history_quiet_line())
+                # 等 shell 消化完再发下一波：rc 尾声（conda init 等）zle 尚未
+                # 读输入，行规程缓冲积压会整段丢字节——真机注入竞态根因
+                # （丢在引号中间 → shell 卡 quote> 续行 → 8s 兜底 → 直通）
+                await self._drain_quiet(0.15)
             # 历史注入须在集成脚本之前（裸 shell 阶段执行 history -r / fc -R）
             await self._inject_shell_history(shell, flag)
+            if shell != "powershell":
+                await self._drain_quiet(0.15)
             router = StreamRouter()
             _dbg("setup: inject shell=", shell, "flag=", flag,
                  "chunks=", len(injection_lines(shell, 1, flag)))
@@ -2020,16 +2040,39 @@ class PipelineCore:
 
             self.session._write_sink = _sink
             try:
-                for _ci, chunk_line in enumerate(
-                        injection_lines(shell, 1, flag)):
-                    _dbg("chunk", _ci, "sending", len(chunk_line), "B")
-                    await self.session.send_raw(chunk_line)
-                    _dbg("chunk", _ci, "sent, draining")
-                    drained = await self._drain_quiet(0.12, router)
-                    _dbg("chunk", _ci, "drained, prompt=", drained is not None)
-                    # sink 可能在写入停顿期已捕获提示符；drain 未再见时不覆盖
-                    if drained is not None:
-                        prompt = drained
+                # 注入竞态自愈：shell 若已卡进续行提示符（quote>/dquote>/
+                # cmdsubst>，输入字节被行规程丢弃、引号失配的指纹），当前
+                # 批必不执行——\x15 收残行 + ^C 回提示符后整链重灌一次，
+                # 不再烧满 8s 兜底才回退直通。b64 字母表无空格/`>`，误报面
+                # 仅限注入行回显本身；误报代价 = 一次无害清行重试。
+                for _attempt in (1, 2):
+                    ps2_buf = bytearray()
+
+                    def _scan_ps2(b: bytes) -> None:
+                        ps2_buf.extend(b)
+                        del ps2_buf[:-64]
+
+                    for _ci, chunk_line in enumerate(
+                            injection_lines(shell, 1, flag)):
+                        _dbg("chunk", _ci, "sending", len(chunk_line), "B")
+                        await self.session.send_raw(chunk_line)
+                        _dbg("chunk", _ci, "sent, draining")
+                        drained = await self._drain_quiet(0.12, router,
+                                                          raw_sink=_scan_ps2)
+                        _dbg("chunk", _ci, "drained, prompt=", drained is not None)
+                        # sink 可能在写入停顿期已捕获提示符；drain 未再见时不覆盖
+                        if drained is not None:
+                            prompt = drained
+                        if prompt is not None:
+                            break
+                        if _PS2_ECHO_RE.search(bytes(ps2_buf)):
+                            _dbg("setup: 续行提示符指纹，清行重试",
+                                 f"attempt={_attempt}")
+                            await self.session.send_raw(b"\x15\x03")
+                            await self._drain_quiet(0.5, router)
+                            break
+                    else:
+                        break   # 全部片发完且未见续行指纹：不需要重试
                     if prompt is not None:
                         break
             finally:
@@ -2253,6 +2296,7 @@ class PipelineCore:
         # 在途蓝色重绘字节（真机「提交行消失」）；外部启动（无上报）才需要
         if not hooked:
             await self._ensure_integrated()   # su - 等 login shell 重置后先重注入
+            self._reinject_pending = False   # 在途重注入已落定：pad 恢复 60s 兜底
         presenter = CorePresenter(self)
         self.backend.on_start = presenter.on_start
         self.backend.on_output = None   # 输出由 exec 状态机直写主 xterm
@@ -2810,14 +2854,16 @@ class PipelineCore:
         su - 整段会话——其 C 帧不闭合还会让 _hook_ok 的时间戳比较永久误判在位）
         时 readline 不在读行，补发的 \r 只落进命令 stdin，hook 永不重绘/上报。
 
-        降级路径（hook 标记绝迹 = su - 重置）：先**可见地**丢弃已回显半行（\x15 发在
-        _suppress_live 窗口外），再 Ctrl+C 把 shell 从可能的前台命令里要回提示符，
-        然后重注入分片脚本——成功且镜像可信时把整行重发进 hook
-        （蓝色回显 + 上报触发，su - 后用户同样看得见自己的输入）；镜像 dirty 时
-        不重发（残尾巴会被当整行画屏并送 AI），静默走 AI 流；重注入失败才静默
-        走 AI 流。工具命令执行中不动终端，只透传回车。
+        降级路径（hook 标记绝迹 = su - 重置）：任务先行——task_start→分析卡
+        毫秒级出场（文字由卡的 text 承接，与直通修复同形态）；清场（\x15 可见
+        地收掉已回显半行 + ^C 把 shell 从可能的前台命令里要回提示符）放后台
+        且持 _runner_lock，_run_task 里 if not hooked 的 _ensure_integrated
+        等锁串行在其后完成重注入（su - 后下一条自然语言即恢复健康路径）。
+        旧序先擦行再同步重注入 4-6s 才见蓝行/起任务——用户对着空行干等光标
+        闪几秒（真机根因，已废）。前一任务在跑时只排队、不发任何终端字节
+        （擦行/^C/重注入都会与在跑任务的工具注入赛跑）。
         typed=False（验证窗口 hold 输入的回放）：字符当时被 hold、不在 shell
-        buffer——健康路径补发整行+回车，降级路径跳过 \x03（无半行回显可丢）。
+        buffer——健康路径补发整行+回车，降级路径跳过清场（无半行回显可丢）。
         验证窗口（_pw_verifying）内整行与按键一并 hold（见 _begin_pw_verify），
         验证结束由 _flush_pw_hold 依序释放。"""
         if self.session is None:
@@ -2877,50 +2923,49 @@ class PipelineCore:
                     asyncio.create_task(self._passthrough_reset())
             await self._on_ai_line(t)
             return
-        # 降级路径：先**可见地**擦掉已回显半行，再 Ctrl+C 把 shell 从可能的
-        # 前台命令里要回提示符（su - 重置是主因），然后尝试重注入——成功则
-        # 把整行重发进 hook：蓝色回显 + 6337
-        # 上报触发，与健康路径同一条 proven 链路，用户看得见自己的输入；重注入
-        # 失败才回退外部启动（静默不回显）。工具命令执行中不动终端，只透传回车。
+        # 降级路径（hook 标记绝迹 = su - 重置等）：任务先行——task_start→分析卡
+        # 毫秒级出场，文字由卡的 text 承载（与直通修复同形态）。旧序先**可见地**
+        # 擦掉已回显半行，再同步重注入（探测 + 27 分片 ≈ 4-6s）成功才重发蓝行/
+        # 失败才起任务——用户对着空行干看光标闪几秒（真机「Enter 后光标闪几秒
+        # 才见字和卡」根因）。清场（\x15 收残行 + ^C 救回提示符）放后台且持
+        # _runner_lock：_run_task 里 if not hooked 的 _ensure_integrated 等锁
+        # 串行在其后——探测行必须敲在干净提示符上，且重注入与工具命令注入
+        # （InteractiveRunner 同锁）互斥，无赛跑窗口。
+        if self._ai_task is not None:
+            # 前一任务在跑：只排队，不发任何终端字节——此刻擦行/^C/重注入
+            # 都会与在跑任务的工具注入赛跑。回放行的重注入由 _run_task
+            # 既有逻辑（not hooked 分支）兜住
+            await self._on_ai_line(t)
+            return
         if typed:
-            if not dirty:
-                # 丢弃已回显半行——必须**前端看得见**：\x15 发在
-                # _suppress_live 窗口之外。（真机「自然语言输入重复两遍」根因：
-                # _ensure_integrated 前置的 \x15 重画落在窗口里被吞掉，旧回显
-                # 留屏不动；窗口后整行重发又回显一遍，hook 再把第二份重绘成蓝 =
-                # 白孤儿行 + 蓝重绘行两份输入。）\x03/^C 只丢 readline 缓冲，
-                # 已敲的字仍留在屏上，故不能只靠它。镜像 dirty 不重发，保留残行。
-                # \x15/^U 在 hook 在位时是 __ot_kill_line（存 __ot_saved，
-                # 不经 kill ring），不在位是原生 unix-line-discard；其后不会有原生 \x19
-                # 把 kill ring 副本 yank 回提示符行——_ensure_integrated 只 \x15
-                # 不 \x19，工具注入的 \x19 恒由 _hook_ok 门控、彼时 ^Y 已
-                # 重绑为 __ot_yank_line。
+            asyncio.create_task(self._degraded_reset())
+        await self._on_ai_line(t)
+
+    async def _degraded_reset(self) -> None:
+        """降级提交的后台清场：\x15 收掉已回显半行 + ^C 把 shell 从可能的
+        前台命令里要回提示符（su - 重置是主因）。持 _runner_lock：与任务内
+        _ensure_integrated（探测行须敲在干净提示符上）和工具命令注入互斥。
+        镜像 dirty 也照发 \x15——降级不再重发整行，不存在「保留残行等重发」
+        的语义，宁可多擦（残半行会拼进工具命令）；擦掉的画面由分析卡的 text
+        承接（卡先于清理完成出现）。"""
+        if self.session is None:
+            return
+        try:
+            async with self._runner_lock:
+                _dbg("dg-reset: send \\x15")
                 await self.session.send_raw(b"\x15")
                 await asyncio.sleep(0.12)
-            self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
-            await self.session.send_raw(b"\x03")
-            # readline 的 SIGINT 恢复窗口（^C 回显 + 退格重画）会丢弃期间到达的
-            # 输入：紧贴 ^C 写分片会丢 chunk0 头部（真机实测：解码脚本缺字节、注释行
-            # 断成命令报 "对策: …: command not found"；settle 0.4s 后消失）。
-            # ^C 回显本身由 _strip_intr_echo 精确吞除（只两字节，不吞提示符段——
-            # 整窗吞会让前端光标与 PTY 失步 = 真机「同一行输入重复两遍」根因）；
-            # 分片回显的吞窗口由 _ensure_integrated 自管（自带 try/finally 复位）
-            await asyncio.sleep(0.4)
-        if self._interactive and await self._ensure_integrated() and not dirty:
-            if typed:
-                # ^C 在已擦净的行上会另开一行空提示符：删掉它，蓝行才与健康路径
-                # 同形（否则蓝行上方多一行空提示符，每问一次累一行）。只发前端
-                # ——PTY 无屏，xterm.js 就是那块屏——不动 readline 的行模型：重发
-                # 回显与 hook 重绘都是相对位移，落点仍正确。DECSC/DECRC 包住 DL：
-                # DL 的光标列语义各实现不一，存/取保证光标仍落在提示符尾。
-                await self.emit_bytes(b"\x1b[1A\x1b7\x1b[1M\x1b8")
-            await self.session.send_raw((t + "\r").encode())
-            self._hook_report_pending = t
-            self._fallback_task = asyncio.create_task(self._submit_fallback(t))
-            return
-        # 镜像 dirty：残尾巴重发会被当整行画屏并送 AI（真机截图根因）；
-        # 重注入失败亦静默外部启动
-        await self._on_ai_line(t)
+                self._arm_intr_swallow()   # bash 会在半行尾回显 "^C"：吞掉这两字节
+                _dbg("dg-reset: send \\x03")
+                await self.session.send_raw(b"\x03")
+                # readline 的 SIGINT 恢复窗口（^C 回显 + 退格重画）会丢弃期间
+                # 到达的输入：紧贴 ^C 写分片会丢 chunk0 头部（真机实测：解码
+                # 脚本缺字节、注释行断成命令报 "对策: …: command not found"；
+                # settle 0.4s 后消失）。^C 回显由 _strip_intr_echo 精确吞除
+                await asyncio.sleep(0.4)   # settle 躲开 SIGINT 恢复窗口
+                _dbg("dg-reset: done")
+        except Exception as e:  # noqa: BLE001 - 清理失败不追责：任务已起跑
+            _dbg("dg-reset: exc", repr(e))
 
     async def _passthrough_reset(self) -> None:
         """直通模式的行缓冲后台清理：\x15 收掉已回显/残存半行 + ^C 把 shell
@@ -3116,6 +3161,9 @@ class PipelineCore:
 
     def _start_ai(self, line: str, hooked: bool = False) -> None:
         self._ai_ping_at = time.monotonic()   # 僵尸回收基准：任务起点即有锚
+        # 任务起跑未走 hook 上报（外部触发链）→ _run_task 必有重注入在途：
+        # _shell_pad 的 60s 节流补注入对本次任务冗余（pad ack 不必等它）
+        self._reinject_pending = not hooked
         self._ai_task = asyncio.create_task(self._ai_flow(line, hooked))
 
     async def _ai_flow(self, line: str, hooked: bool = False) -> None:
@@ -3137,6 +3185,7 @@ class PipelineCore:
                                      "text": f"处理失败：{type(e).__name__}: {e}"}))
         finally:
             self._ai_task = None
+            self._reinject_pending = False
             try:
                 await self._curtain_open()   # 任务收尾：扣住的提示符放行
             except Exception:                # noqa: BLE001 - 收尾放行不能盖错误

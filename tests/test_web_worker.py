@@ -1495,8 +1495,9 @@ async def test_worker_submit_dirty_hook_alive_routes_through_hook(monkeypatch):
 
 
 async def test_worker_submit_dirty_hook_dead_silent_start(monkeypatch):
-    """hook 不在位 + 镜像 dirty：\\x03 清残行 + 重注入后不把残镜像当整行重发
-    （尾巴会被画屏并送 AI，真机截图根因）——按镜像文本静默外部启动任务。"""
+    """hook 不在位 + 镜像 dirty：任务先行——镜像文本立即起任务（task_start
+    毫秒级，文字由卡的 text 承接），清场（\\x15/\\x03）后台并行；残镜像不重发
+    （尾巴会被画屏并送 AI，真机截图根因）。"""
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
     w, sink = await _make_worker(monkeypatch)
@@ -1510,19 +1511,25 @@ async def test_worker_submit_dirty_hook_dead_silent_start(monkeypatch):
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="的别名", dirty=True))
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
-    assert b"\x03" in raws
     assert "的别名\r".encode() not in raws, "残镜像不得当整行重发"
     assert w._hook_report_pending is None
-    await asyncio.wait_for(w._ai_task, timeout=2)
+    assert w._ai_task is not None, "任务先行：不等清场/重注入"
+    task = w._ai_task
+    await asyncio.wait_for(task, timeout=2)
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
         and x["event"]["text"] == "的别名" for x in m))
+    await asyncio.sleep(0.8)       # 后台清场（0.12+0.4s）落地
+    raws = [d for k, d in w.session.calls if k == "raw"][n:]
+    assert b"\x15" in raws and b"\x03" in raws, "清场后台并行发生"
     await _drain_fallback(w)
 
 
-async def test_worker_submit_hook_dead_reintegrates_and_echoes(monkeypatch):
-    """本会话无 hook 标记上报（注入失败 / 裸 shell）：\\x03 清残行 → 重注入集成脚本 → 整行重发
-    走 hook 蓝色回显 + 上报触发；不再静默吞掉用户输入（真机反馈 bug）。"""
+async def test_worker_submit_hook_dead_task_first(monkeypatch):
+    """hook 不在位（注入失败 / 裸 shell）：任务先行——task_start 立即出发
+    （文字由分析卡承接，不再让用户对着擦掉的空行干等重注入 4-6s，真机根因）；
+    清场 \\x15→\\x03 后台并行；整行不重发（无蓝色重绘，重注入改由 _run_task
+    的 not hooked 分支在任务内完成）。"""
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
     w, sink = await _make_worker(monkeypatch)
@@ -1536,21 +1543,25 @@ async def test_worker_submit_hook_dead_reintegrates_and_echoes(monkeypatch):
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
-    assert b"\x03" in raws
-    assert "帮我查询系统资源\r".encode() in raws
-    assert w._hook_report_pending == "帮我查询系统资源"
-    await w._on_stream_event(("report", 1, "AI", "帮我查询系统资源"))
-    await asyncio.wait_for(w._ai_task, timeout=2)
+    assert "帮我查询系统资源\r".encode() not in raws, "降级不再整行重发"
+    assert w._hook_report_pending is None
+    assert w._ai_task is not None, "任务先行：提交即起跑"
+    task = w._ai_task
     await _wait_json(sink, lambda m: any(
-        x.get("event", {}).get("kind") == "task_start" for x in m))
+        x.get("event", {}).get("kind") == "task_start"
+        and x["event"]["text"] == "帮我查询系统资源" for x in m))
+    await asyncio.wait_for(task, timeout=2)
+    await asyncio.sleep(0.8)       # 后台清场（0.12+0.4s）落地
+    raws = [d for k, d in w.session.calls if k == "raw"][n:]
+    assert raws.index(b"\x15") < raws.index(b"\x03"), "清行先于 ^C：^C 后是新提示符行"
     await _drain_fallback(w)
 
 
 async def test_worker_submit_open_user_cmd_takes_degraded_path(monkeypatch):
     """用户命令执行帧开着（前台占用，典型 sudo su - 整段会话——其 C 帧不闭合
-    进入后 hook 标记亦绝迹）：readline 不在读行，健康
-    路径补发的 \\r 只落进命令 stdin、hook 永不重绘/上报（真机自然语言被裸 shell
-    当命令执行 command not found 的根因）——必须走降级：\\x03 + 重注入 + 整行重发。"""
+    进入后 hook 标记亦绝迹）：readline 不在读行，健康路径补发的 \\r 只落进
+    命令 stdin、hook 永不重绘/上报（真机自然语言被裸 shell 当命令执行
+    command not found 的根因）——必须走降级：任务先行，清场后台并行，整行不重发。"""
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
     w, sink = await _make_worker(monkeypatch)
@@ -1565,16 +1576,25 @@ async def test_worker_submit_open_user_cmd_takes_degraded_path(monkeypatch):
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="看看磁盘用量"))
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
-    assert b"\x03" in raws, "帧开着不走健康路径：先清残行"
-    assert "看看磁盘用量\r".encode() in raws, "重注入后整行重发取蓝色回显"
-    assert w._hook_report_pending == "看看磁盘用量"
+    assert "看看磁盘用量\r".encode() not in raws, "降级不整行重发"
+    assert w._hook_report_pending is None
+    assert w._ai_task is not None, "帧开着不走健康路径，但任务先行"
+    task = w._ai_task
+    await _wait_json(sink, lambda m: any(
+        x.get("event", {}).get("kind") == "task_start"
+        and x["event"]["text"] == "看看磁盘用量" for x in m))
+    await asyncio.wait_for(task, timeout=2)
+    await asyncio.sleep(0.8)       # 后台清场（0.12+0.4s）落地
+    raws = [d for k, d in w.session.calls if k == "raw"][n:]
+    assert b"\x15" in raws and b"\x03" in raws, "清场后台并行发生"
     await _drain_fallback(w)
 
 
 async def test_worker_degraded_settles_after_intr(monkeypatch):
-    """\\x03 与后续写入之间必须 settle：readline 的 SIGINT 恢复窗口丢弃期间
+    """\\x03 与重注入写入之间必须 settle：readline 的 SIGINT 恢复窗口丢弃期间
     到达的输入（真机实测紧贴 ^C 发分片丢 chunk0 头部，解码脚本缺字节、注释行
-    断成命令报 command not found）。settle 期间 ^C 回显/退格重画也要吞掉。"""
+    断成命令报 command not found）。清场持 _runner_lock：_run_task 里的重注入
+    等锁串行在其后，探测行/分片必落在 settle 之后。"""
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
     w, sink = await _make_worker(monkeypatch)
@@ -1584,28 +1604,36 @@ async def test_worker_degraded_settles_after_intr(monkeypatch):
     w._open_cmds[1] = "sudo su -"
     await _install_fake_runner(monkeypatch)
     _wire_presenter(w)
-    _skip_reintegrate(w, monkeypatch)
+
+    # 重注入替身模拟真身：取 _runner_lock 后才写 PTY（探测行）
+    async def _fake_reintegrate():
+        async with w._runner_lock:
+            await w.session.send_raw(b" _ot_probe_line\r")
+    monkeypatch.setattr(w, "_ensure_integrated", _fake_reintegrate)
 
     await w.handle_client(ClientMsg(type="submit", text="看看磁盘用量"))
-    raws = [(i, d) for i, (k, d) in enumerate(w.session.calls) if k == "raw"]
-    idx3 = [p for p, (_i, d) in enumerate(raws) if d == b"\x03"]
-    assert idx3, "降级先 \x03"
+    assert w._ai_task is not None
+    task = w._ai_task
+    await asyncio.wait_for(task, timeout=2)
+    await asyncio.sleep(0.8)       # 后台清场 + 重注入替身落地
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    idx3 = [p for p, d in enumerate(raws) if d == b"\x03"]
+    assert idx3, "降级清场有 \\x03"
     p = idx3[-1]
-    assert p + 1 < len(raws), "^C 后仍有写入（重注入/重发）"
-    gap = w.session.raw_times[p + 1] - w.session.raw_times[p]
+    probe = [q for q, d in enumerate(raws) if d == b" _ot_probe_line\r"]
+    assert probe, "重注入探测行落地"
+    assert probe[0] > p, "重注入在 ^C 之后（等锁串行）"
+    gap = w.session.raw_times[probe[0]] - w.session.raw_times[p]
     assert gap >= 0.35, f"settle 不足（{gap:.2f}s）：分片会落进 SIGINT 恢复窗口"
     await _drain_fallback(w)
 
 
-async def test_worker_degraded_erases_echo_before_retype(monkeypatch):
-    """降级整行重发不得把输入画两遍（真机截图：白色孤儿行 + 蓝色重绘行各一份）。
+async def test_worker_degraded_erases_echo_visibly(monkeypatch):
+    """降级清行的擦除必须前端看得见（\\x15 发在 _suppress_live 窗口之外）。
 
-    根因：已回显半行的擦除由 _ensure_integrated 前置的 \\x15 完成，但那次重画
-    落在 _suppress_live 窗口里被吞掉——前端看不见擦除，旧回显留在屏上；窗口后
-    整行重发又回显一遍，hook 再把第二份重绘成蓝色 = 屏上两份输入。
-
-    契约：①清行必须发在抑制窗口之外（前端看得见这次擦除）；②^C 在已擦净的行上
-    会另开一行空提示符，重发前要把它删掉，否则蓝行上方多一行；③重发在两者之后。
+    旧根因：擦除落在重注入的 _suppress_live 窗口里被吞掉，旧回显留屏不动——
+    前端只见「输入重复两遍」。任务先行重构后：清场在后台独立完成，不与任何
+    抑制窗口重叠；整行不再重发（无蓝色重绘 = 无两份输入的可能）。
     """
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "SUBMIT_FALLBACK_DELAY", 60)
@@ -1619,7 +1647,6 @@ async def test_worker_degraded_erases_echo_before_retype(monkeypatch):
     _skip_reintegrate(w, monkeypatch)
 
     # DL 走 emit_bytes -> outbox（异步送达），挂进 send_raw 同一条时间线
-    # 才能断言「删行先于重发」
     _orig_emit = w.emit_bytes
     async def _emit(data):
         w.session.calls.append(("dl", data))
@@ -1628,21 +1655,72 @@ async def test_worker_degraded_erases_echo_before_retype(monkeypatch):
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="帮我查看 docker容器"))
+    assert w._ai_task is not None, "任务先行"
+    task = w._ai_task
+    await asyncio.wait_for(task, timeout=2)
+    await asyncio.sleep(0.8)       # 后台清场（0.12+0.4s）落地
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
-    body = "帮我查看 docker容器\r".encode()
     dls = [d for k, d in w.session.calls if k == "dl"]
 
     assert b"\x15" in raws, "清行须发在 _suppress_live 窗口外，前端才看得见擦除"
     assert b"\x03" in raws
     assert raws.index(b"\x15") < raws.index(b"\x03"), "清行先于 ^C：^C 后是新提示符行"
-    assert body in raws
-    assert raws.index(b"\x03") < raws.index(body), "重发在 ^C 之后"
-    assert any(b"\x1b[1M" in d for d in dls), "重发前删掉 ^C 另开的空提示符行，否则蓝行上方多一行"
-    dl = next(d for d in dls if b"\x1b[1M" in d)
-    i_dl = w.session.calls.index(("dl", dl))
-    i_body = w.session.calls.index(("raw", body))
-    assert i_dl < i_body, "删行必须先于重发"
+    assert "帮我查看 docker容器\r".encode() not in raws, "整行不重发（无蓝色重绘）"
+    assert not any(b"\x1b[1M" in d for d in dls), "无重发则无 DL 删行"
     await _drain_fallback(w)
+
+
+async def test_worker_setup_injection_ps2_selfheal(monkeypatch):
+    """setup 注入竞态自愈：回显流出现续行提示符指纹（quote> = 输入字节被行
+    规程丢弃、引号失配）→ \\x15\\x03 清行整链重灌一次 → 拿到提示符标记
+    （不再烧满 8s 兜底才回退直通，真机 8s 死等根因）。"""
+    from openterminal.shell_integration import injection_lines
+    from openterminal.shell_session import CommandResult
+    w, sink = await _make_worker(monkeypatch, session=PassthroughSession())
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    # 暂停字节泵：脚本化 feed 必须留给 setup 注入期的 _drain_quiet 消费
+    #（泵与 drain 并发 _read_some 会互抢脚本字节）
+    w._pump.cancel()
+    try:
+        await w._pump
+    except asyncio.CancelledError:
+        pass
+
+    async def _probe_run(command, *, timeout=None, on_output=None):
+        w.session.calls.append(("run", command))
+        return CommandResult(output="__OTPROBE__zsh5.9|-d", exit_code=0,
+                             truncated=False, cwd="/tmp")
+    monkeypatch.setattr(w.session, "run", _probe_run)
+    monkeypatch.setattr(w, "_target_host", "")   # 跳过历史注入
+
+    # 脚本化回显按注入进度生成：首条 chunk0 的回显卡在 quote>（竞态指纹）；
+    # \x15\x03 清行重灌后，第二条 chunk0 的回显干净并带提示符标记（SWALLOW
+    # 相位照常解析 OSC）。前置的静默行/历史注入 drain 无回显（真机同款时序）
+    chunk0 = injection_lines("zsh", 1, "-d")[0]
+    served = {"n": 0}
+
+    async def _scripted_read(idle_timeout):
+        sess = w.session
+        n0 = sum(1 for k, d in sess.calls if k == "raw" and d == chunk0)
+        await asyncio.sleep(0)
+        if n0 >= 2 and served["n"] < 2:
+            served["n"] = 2
+            return (b"__ot_inj='AAAA'\r\x1b[0m\x1b[27m\x1b[24m\x1b[J"
+                    b"\x1b]133;A;1\x07$\x1b]133;B;1\x07")
+        if n0 >= 1 and served["n"] < 1:
+            served["n"] = 1
+            return (b"__ot_inj='AAAA'\r\x1b[0m\x1b[27m\x1b[24m\x1b[J"
+                    b"quote> \x1b[K")
+        await asyncio.sleep(0.02)
+        raise asyncio.TimeoutError()
+    monkeypatch.setattr(w.session, "_read_some", _scripted_read)
+
+    await asyncio.wait_for(w._setup_interactive(), timeout=10)
+    assert w._interactive is True
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert b"\x15\x03" in raws, "检测到续行指纹：清行重灌"
+    chunk0 = injection_lines("zsh", 1, "-d")[0]
+    assert raws.count(chunk0) == 2, "分片链整链重灌一次"
 
 
 async def test_worker_exec_text_swallowed_in_injection_window(monkeypatch):
@@ -1662,8 +1740,9 @@ async def test_worker_exec_text_swallowed_in_injection_window(monkeypatch):
 
 
 async def test_worker_submit_hook_dead_reintegrate_fails_silent_start(monkeypatch):
-    """重注入失败（老 shell / 2s 无标记回执）：退回静默启动（无回显），
-    任务不悬空——与既有失联行为一致。"""
+    """重注入失败（老 shell / 2s 无标记回执）：任务不悬空——任务先行照常
+    起跑（文字由分析卡承接），重注入在任务内失败不阻断；整行不重发（无回显），
+    与既有失联行为一致。"""
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
@@ -1678,8 +1757,8 @@ async def test_worker_submit_hook_dead_reintegrate_fails_silent_start(monkeypatc
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
-    assert b"\x03" in raws
     assert "帮我查询系统资源\r".encode() not in raws, "重注入失败不得重发行"
+    assert w._ai_task is not None, "任务先行：重注入失败不阻断起跑"
     await _wait(lambda: w._ai_task is None)
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
