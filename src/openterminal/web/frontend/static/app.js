@@ -925,6 +925,14 @@ class Session {
             this._sendInput("\r");
             this.focusCursor();
           },
+          // store 整卡移除（interrupt 收束/sweep/drop）：布局槽同步丢弃——
+          // island 与 decoration 一起消失，不留无主半截卡
+          onDrop: ids => {
+            for (const id of ids || []) {
+              const s = this._slots && this._slots.get(id);
+              if (s) this._dropSlot(s);
+            }
+          },
         });
         return this._feed;
       }).catch(e => {
@@ -1913,12 +1921,24 @@ class Session {
     if (slot.reanchorT) clearTimeout(slot.reanchorT);
     if (slot.ro) { try { slot.ro.disconnect(); } catch (e) {} }
     if (slot.decoration) { try { slot.decoration.dispose(); } catch (e) {} }
+    if (this._cardsText) this._cardsText.delete(slot.id);
     // 同 id 被新槽顶替后，旧槽 marker 迟到 dispose 不得删掉新槽（unmount
     // 的是新槽的 React root = 卡片凭空消失）
     if (this._slots.get(slot.id) === slot) {
       if (this._feed) this._feed.unmount(slot.id);
       this._slots.delete(slot.id);
     }
+  }
+
+  // 整卡丢弃（收束扫尾/中止移除）：marker 一并 dispose，锚点不留尸体钉。
+  // 先摘身份再 dispose——onDispose 的身份守卫（slot.marker === marker）不再
+  // 触发二次删槽，收尾统一走 _discardSlot
+  _dropSlot(slot) {
+    if (!slot) return;
+    const m = slot.marker;
+    slot.marker = null;
+    if (m) { try { m.dispose(); } catch (e) {} }
+    this._discardSlot(slot);
   }
 
   _destroySlots() {
@@ -2054,6 +2074,7 @@ class Session {
 
   async _onTaskStart() {
     this._taskActive = true;
+    this._taskClosed = false;   // 新任务起跑：收束门卫复位（迟到宣告照常挂）
     this._lastSummaryMd = null;
     this._summaryShown = false;   // 新一轮：总结卡未挂，思考徽标可接班空隙期
     this._setStopVisible(true);
@@ -2114,6 +2135,8 @@ class Session {
     // 徽标同步说人话：模型在跑哪条命令。旧实现全程「AI 正在思考」，
     // 长命令/多轮排查时用户看到的就是假死（真机 bug2 的观感根因之一）。
     if (ev.phase === "start") {
+      // 收束后迟到的工具宣告不再挂卡（事件队列尾残迹）——半截卡只减不增
+      if (this._taskClosed) return;
       this._runningTool = (ev.name === "execute"
         ? String(ev.args || "") : String(ev.name || "")).trim();
       this._refreshThink();
@@ -2176,11 +2199,14 @@ class Session {
   }
 
   _onAiCard(markdown) {
-    this._mountSummary(markdown, null, false);
+    // ai_card 与 final 同文连发时本调用会去重早退；final 空文本时总结挂载
+    // 在这条路上——扫尾同样等挂载完再查完整性
+    this._endSweepSoon(this._mountSummary(markdown, null, false));
   }
 
   _onFinal(text) {
     this._taskActive = false;
+    this._taskClosed = true;   // 收束：迟到的工具宣告不再挂卡
     this._approvalOpen = false;   // 任务收束：未决审批窗（若有）一并释放
     this._approvalCmd = null;
     this._approvalResolved = false;
@@ -2201,10 +2227,12 @@ class Session {
     this._ensureFeed().then(f => f && f.handle(
       transform ? {kind: "final", md: text || ""}
                 : {kind: "ai_collapse", trimMd: text || ""}));
-    this._mountSummary(text, transform ? reuse : null, transform);
+    const mp = this._mountSummary(text, transform ? reuse : null, transform);
     // 换装路径由 _mountSummary 自己结账；新开总结卡时把定格的分析卡垫满
     if (slot && !transform) this._settleCard(slot);
     this._scheduleHeal();
+    // 收束扫尾等总结卡挂完：总结/残留卡要么垫满完整显示、要么整卡消失
+    this._endSweepSoon(mp);
   }
 
   // 总结挂载：transform = 原地换装（store 的 final 已把同 id 卡改型，这里只按
@@ -2235,9 +2263,14 @@ class Session {
   }
 
   // 任务中止（denied/limit/error/interrupt）：island 定格失败态，文案只进
-  // 状态栏（终端网格只留原生字节，不写系统提示——单管线约束）
+  // 状态栏（终端网格只留原生字节，不写系统提示——单管线约束）。
+  // interrupt（Ctrl+C/⏹）例外：流式**未渲染完毕**的卡整卡移除——store
+  // task_fail 撤内容、onDrop 丢槽（用户诉求：不显示半截/中断态尸块，
+  // 要么不显示要么显示完整），活流卡不做失败定格。任何收束都过
+  // _endSweepSoon：仍不完整的卡垫不满就整卡消失。
   _onTaskFail(kind, text) {
     this._taskActive = false;
+    this._taskClosed = true;   // 收束：迟到的工具宣告不再挂卡
     this._approvalOpen = false;   // 中止即收束：审批窗释放，徽标归位
     this._approvalCmd = null;
     this._approvalResolved = false;
@@ -2245,13 +2278,63 @@ class Session {
     this._endTimer();
     this._setStopVisible(false);
     this._refreshThink();
+    const interrupted = kind === "interrupt";
     const slot = this._taskCardId ? this._slots.get(this._taskCardId) : null;
-    if (slot) { slot.frozen = true; slot.frozenAt = Date.now(); }
+    if (slot && !interrupted) { slot.frozen = true; slot.frozenAt = Date.now(); }
     this._taskCardId = null;
     this._ensureFeed().then(f => f && f.handle({kind: "task_fail", reason: kind}));
     this.setStatus(kind === "denied" ? "error" : this.status,
                    text || (kind === "denied" ? "✗ 已拒绝" : "任务已中止"));
-    if (slot) this._scheduleReanchor(slot);
+    if (slot && !interrupted) this._scheduleReanchor(slot);
+    this._scheduleHeal();
+    this._endSweepSoon();
+  }
+
+  // 收束扫尾编排：串行防重入（fail 紧跟 final 两连发不交错），等在途挂载链、
+  // 挂载串行队列与 extra（总结挂载）全部落定再查完整性
+  _endSweepSoon(extra) {
+    const run = async () => {
+      try {
+        await Promise.all([
+          this._cardReady || Promise.resolve(),
+          this._mountQ || Promise.resolve(),
+          extra || Promise.resolve(),
+        ]);
+        await this._endSweep();
+      } catch (e) {}
+    };
+    this._sweepQ = (this._sweepQ || Promise.resolve()).then(run, run);
+    return this._sweepQ;
+  }
+
+  // 收束不变量：中断/任务结束后卡片要么完整显示、要么整卡消失——不留半截。
+  // ① store 扫迟到补挂的未完毕内容卡（sweep）；② 逐槽结账一次给「垫得进去」
+  // 的卡补齐机会；仍不完整的（盖帽垫不进/夹紧/pendingMount）整卡丢弃。
+  // 审批/救援卡豁免：按钮行底线夹紧是功能（可点性优先），不算半截尸块。
+  async _endSweep() {
+    if (this._dead) return;
+    const feed = await this._ensureFeed();
+    if (feed) feed.handle({kind: "sweep"});
+    // React 把定格内容渲一帧再量高（_settleCard 自带 host 补挂），否则量到半截
+    await new Promise(r => requestAnimationFrame(() => r()));
+    const settle = [...this._slots.values()]
+      .filter(s => s.marker && s.kind !== "approval");
+    await Promise.all(settle.map(s => this._settleCard(s).catch(() => {})));
+    await new Promise(r => requestAnimationFrame(() => r()));
+    const drop = [];
+    for (const slot of [...this._slots.values()]) {
+      if (!slot.marker || slot.kind === "approval") continue;
+      const full = slot.mounted && !slot.pendingMount &&
+                   slot.pinnedRows == null && !slot.clamped &&
+                   (slot.reserved || 0) >= (slot.rows || 1);
+      if (full) {
+        if (!slot.revealed) this._revealSlot(slot);
+      } else {
+        drop.push(slot.id);
+        this._dropSlot(slot);
+      }
+    }
+    if (drop.length && feed) feed.handle({kind: "drop", ids: drop});
     this._scheduleHeal();
   }
 

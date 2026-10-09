@@ -3322,8 +3322,10 @@ class PipelineCore:
             text = line.lstrip("?").strip() or line
             await self._run_task(text, hooked)
         except asyncio.CancelledError:
+            # 用户中止（Ctrl+C/⏹）语义发 interrupt（不是 error）：前端按
+            # 「中止」收束——流式未渲染完毕的卡整卡移除，不留下半截卡
             await self.emit_msg(ServerMsg(
-                type="event", event={"kind": "error", "text": "已停止"}))
+                type="event", event={"kind": "interrupt", "text": "已停止"}))
         except Exception as e:  # noqa: BLE001 - 兜底：前端靠 error 停表收卡片
             await self.emit_msg(ServerMsg(
                 type="event", event={"kind": "error",

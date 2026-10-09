@@ -43,7 +43,8 @@
    est_output_tokens``（全 0 → 无 usage 上报，状态行不显 token）。
 7. **Ctrl+C 中断形态**：core._maybe_cancel_ai 直接 ``self._ai_task.cancel()``
    ——CancelledError 从 ScriptedRunner.run() 内部上抛即可（_ai_flow 捕获后
-   发 error 事件「已停止」，前端红行收尾）。前端截获层在空闲态且
+   发 interrupt 事件「已停止」，前端按中止收尾——流式未完毕的卡整卡移除）。
+   前端截获层在空闲态且
    ``core._ai_task`` 非 None 时把 \x03 转成 ClientMsg(type="interrupt")
    本地消费，不透传 PTY（test 7 的前提：ScriptedRunner 流式期间 _ai_task
    已置位——_start_ai 同步 create_task，task_start 事件先于首个 token）。

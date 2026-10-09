@@ -722,6 +722,9 @@ class CliRenderer:
             self._fail_line(ev.get("text", ""), "✗", "bold red")
         elif kind == "limit":
             self._fail_line(ev.get("text", ""), "⚠", "bold yellow")
+        elif kind == "interrupt":
+            # 用户中止（Ctrl+C/⏹）：黄行收尾（对齐 web 状态栏「已停止」）
+            self._fail_line(ev.get("text", "已停止"), "⏹", "bold yellow")
         elif kind in ("error", "task_fail"):
             self._fail_line(ev.get("text") or ev.get("reason", ""),
                             "✗", "bold red")

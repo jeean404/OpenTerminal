@@ -288,4 +288,59 @@ describe("CardsStore", () => {
     expect(cards[0]).toMatchObject({ id: "tool3", done: true, failed: true });
     expect(cards[1]).toMatchObject({ id: "tool4", done: true, failed: false });
   });
+
+  it("task_fail interrupt：流式未完毕卡整卡移除，已收束卡留下", () => {
+    // 用户诉求：Ctrl+C 时未渲染完毕的卡不显示半截——活流卡/在跑工具卡整卡
+    // 消失；已收束的分析卡与已完成工具卡是完整卡，保留
+    const s = new CardsStore();
+    const onDrop = vi.fn();
+    s.onDrop = onDrop;
+    s.handle({ kind: "task_start", id: 40 });
+    s.handle({ kind: "ai_think", text: "第一段" });
+    s.handle({ kind: "ai_collapse" });                  // 分析卡 40 定格（已收束）
+    s.handle({ kind: "tool_start", id: "tool5", name: "execute", args: "ls" });
+    s.handle({ kind: "tool_end", id: "tool5" });        // 工具完成（✓）
+    s.handle({ kind: "tool_start", id: "tool6", name: "execute", args: "cat x" });  // 在跑
+    s.handle({ kind: "task_start", id: 41 });           // 阶段二流式卡（未完毕）
+    s.handle({ kind: "ai_token", text: "半截" });
+    vi.runAllTimers();
+    s.handle({ kind: "task_fail", reason: "interrupt" });
+    expect(s.getSnapshot().cards.map(c => c.id)).toEqual([40, "tool5"]);
+    expect(onDrop).toHaveBeenCalledWith(expect.arrayContaining(["tool6", 41]));
+  });
+
+  it("task_fail interrupt：未决审批卡一并撤除，已决策留回执", () => {
+    const s = new CardsStore();
+    s.handle({ kind: "approval", id: 51, command: "rm x", reasons: "", risk: "high" });
+    s.handle({ kind: "decide", decision: "reject" });   // 已决策：回执长留
+    s.handle({ kind: "approval", id: 50, command: "ls", reasons: "", risk: "normal" });
+    s.handle({ kind: "task_fail", reason: "interrupt" });
+    const cards = s.getSnapshot().cards;
+    expect(cards.map(c => c.id)).toEqual([51]);          // 未决 50 撤除
+    expect(cards[0].decided.text).toBe("✗ 已拒绝");
+  });
+
+  it("sweep 移除迟到补挂的未完毕卡（tool 无 end / analysis 未收束）", () => {
+    const s = new CardsStore();
+    const onDrop = vi.fn();
+    s.onDrop = onDrop;
+    s.handle({ kind: "task_start", id: 42 });
+    s.handle({ kind: "ai_collapse" });                  // 已收束：留下
+    s.handle({ kind: "tool_start", id: "tool7", name: "execute", args: "ls" });  // 无 end
+    s.handle({ kind: "task_start", id: 43 });           // 迟到 zombie 流式卡
+    s.handle({ kind: "sweep" });
+    expect(s.getSnapshot().cards.map(c => c.id)).toEqual([42]);
+    expect(onDrop).toHaveBeenCalledWith(expect.arrayContaining(["tool7", 43]));
+  });
+
+  it("drop 按 id 撤卡并回调 onDrop", () => {
+    const s = new CardsStore();
+    const onDrop = vi.fn();
+    s.onDrop = onDrop;
+    s.handle({ kind: "tool_start", id: "tool8", name: "execute", args: "ls" });
+    s.handle({ kind: "tool_end", id: "tool8" });
+    s.handle({ kind: "drop", ids: ["tool8"] });
+    expect(s.getSnapshot().cards).toHaveLength(0);
+    expect(onDrop).toHaveBeenCalledWith(["tool8"]);
+  });
 });

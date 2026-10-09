@@ -2,6 +2,8 @@
 // 事件契约与 worker 的 ServerMsg event kinds 一一对应：
 //   task_start / ai_token / ai_think / ai_collapse / ai_tool / ai_card / final /
 //   task_fail / approval / approval_key / decide / rescue / rescue_decide / clear
+// 收束补充事件（app.js 布局层发起）：
+//   sweep（任务结束扫尾：移除迟到补挂的未完毕卡）/ drop（按 id 移除）
 // （fold/toggle 折叠机制已随 v5 spec §3.4/§8 删除——分析卡整卡长留）
 // React 侧经 useSyncExternalStore(subscribe, getSnapshot) 订阅快照。
 
@@ -25,6 +27,7 @@ export class CardsStore {
     this.onDecision = null;  // (decision, stateText, command, cardId) => void（app.js 结账后发 WS + 状态栏）
     this.onRescue = null;    // (accept) => void（app.js 发 rescue 决策 WS）
     this.onNewSession = null; // (cardId) => void（app.js 发 new_session WS + 回车换行）
+    this.onDrop = null;      // (ids) => void（app.js 丢弃对应布局槽——整卡消失）
   }
 
   subscribe = (fn) => {
@@ -77,6 +80,23 @@ export class CardsStore {
       this._dirty = false;
     }
     return a;
+  }
+
+  // 按 id 整卡移除（收束路径专用）：返回真正删掉的 id 列表；emit/onDrop 由
+  // 调用方统一收口（一次收束只出一份快照、一次 onDrop）
+  _remove(ids) {
+    if (!ids || !ids.length) return [];
+    const dropSet = new Set(ids);
+    const dropped = [];
+    this.cards = this.cards.filter(c => {
+      if (dropSet.has(c.id)) { dropped.push(c.id); return false; }
+      return true;
+    });
+    if (this._activeId != null && dropSet.has(this._activeId)) {
+      this._activeId = null;
+      this._dirty = false;
+    }
+    return dropped;
   }
 
   // 决策入口（审批卡按钮与快捷键共用）：写回执徽标 + 通知 app.js 发 WS
@@ -193,17 +213,55 @@ export class CardsStore {
         this._emit();
         break;
       }
-      case "task_fail":
-        // 任务中止时未决工具卡一并标失败，⏳ 不得悬挂到任务结束
-        for (const c of this.cards) {
-          if (c.type === "tool" && !c.done) {
-            c.done = true;
-            c.failed = true;
+      case "task_fail": {
+        let dropped = [];
+        if (evt.reason === "interrupt") {
+          // Ctrl+C/⏹ 中止：流式**未渲染完毕**的卡整卡移除（用户诉求：不显示
+          // 半截/中断态尸块，要么不显示要么显示完整）——活流卡（正在渲染流式
+          // 输出）+ 未收 tool_end 的工具卡。已收束的卡不动，布局层收尾扫半截。
+          dropped = this._remove(this.cards
+            .filter(c => (c.type === "analysis" && !c.done) ||
+                         (c.type === "tool" && !c.done))
+            .map(c => c.id));
+        } else {
+          // 任务中止时未决工具卡一并标失败，⏳ 不得悬挂到任务结束
+          for (const c of this.cards) {
+            if (c.type === "tool" && !c.done) {
+              c.done = true;
+              c.failed = true;
+            }
           }
+          this._freezeActive(true);
         }
-        this._freezeActive(true);
+        // 任务已死：未决审批卡按钮悬空（点了也是幽灵决策）→ 一并撤除
+        dropped = dropped.concat(this._remove(this.cards
+          .filter(c => c.type === "approval" && !c.decided)
+          .map(c => c.id)));
         this._emit();
+        if (dropped.length) this.onDrop && this.onDrop(dropped);
         break;
+      }
+      case "sweep": {
+        // 收束扫尾（app.js 在挂载链落定后发起）：迟到事件补挂的未完毕卡
+        // （tool 无 end / analysis 未收束）不许留到任务结束后——整卡移除
+        const dropped = this._remove(this.cards
+          .filter(c => (c.type === "tool" || c.type === "analysis") && !c.done)
+          .map(c => c.id));
+        if (dropped.length) {
+          this._emit();
+          this.onDrop && this.onDrop(dropped);
+        }
+        break;
+      }
+      case "drop": {
+        // 布局层判定「垫不满＝半截」后按 id 撤卡（连同槽里 island 一起消失）
+        const dropped = this._remove(evt.ids || []);
+        if (dropped.length) {
+          this._emit();
+          this.onDrop && this.onDrop(dropped);
+        }
+        break;
+      }
       case "approval": {
         const card = {
           id: evt.id || ++this._seq, type: "approval", command: evt.command || "",

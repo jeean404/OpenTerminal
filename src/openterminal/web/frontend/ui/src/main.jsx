@@ -17,6 +17,7 @@ export function createFeed(api) {
   if (api && api.onDecision) store.onDecision = api.onDecision;
   if (api && api.onRescue) store.onRescue = api.onRescue;
   if (api && api.onNewSession) store.onNewSession = api.onNewSession;
+  if (api && api.onDrop) store.onDrop = api.onDrop;
   const roots = new Map();   // cardId -> {root, el}
 
   return {
