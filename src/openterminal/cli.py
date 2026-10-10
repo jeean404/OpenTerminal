@@ -19,7 +19,8 @@ from prompt_toolkit.styles import Style
 from . import render
 from .config import Config, TargetConfig
 from .connections import (
-    RenameConflictError, TargetList, build_target_list, delete_saved_target,
+    RenameConflictError, TargetList, build_target_list, cred_alias_eq,
+    credential_referenced, delete_saved_target,
     display_name, load_saved_targets, parse_user_at_host,
     rename_saved_target, upsert_saved_target,
 )
@@ -296,17 +297,23 @@ class Cli:
         except RenameConflictError:
             render.console.print(f"[yellow]名称 {new_label} 已被另一条连接占用。[/]")
             return False
-        if removed is not None and (removed.host, removed.user, removed.port) != (host, user, port):
-            # 地址变了：旧凭据已无意义，清掉（与 Web 端 edit_saved 同规则）
-            delete_password(removed.host, removed.user, removed.port)
+        if removed is not None and not cred_alias_eq(
+                (removed.host, removed.user, removed.port), (host, user, port)):
+            # 地址变了（port None/22 视同没变）：清旧凭据，但仅当无其他
+            # 条目共享（与 Web 端 edit_saved 同规则——共享键防误删 §2-6）
+            if not credential_referenced(removed.host, removed.user,
+                                         removed.port):
+                delete_password(removed.host, removed.user, removed.port)
         self._sync_saved_targets()
         render.console.print(f"[green]已更新主机 {old_label} → {new_label}[/]")
         return True
 
     async def _delete_saved_host(self, name: str) -> None:
-        """删除已存主机，并同步清掉它的 keyring 凭据（不留孤儿密码）。"""
+        """删除已存主机，并同步清掉它的 keyring 凭据（不留孤儿密码；
+        其他条目仍共享该凭据时不动，与 Web 端 remove_saved 同规则）。"""
         removed = delete_saved_target(name)
-        if removed is not None:
+        if removed is not None and not credential_referenced(
+                removed.host, removed.user, removed.port):
             delete_password(removed.host, removed.user, removed.port)
         self._sync_saved_targets()
 

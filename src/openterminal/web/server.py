@@ -15,7 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from ..cmdset import extract_inline_secrets
 from ..config import Config, TargetConfig
 from ..connections import (
-    RenameConflictError, build_target_list, delete_saved_target, display_name,
+    RenameConflictError, build_target_list, cred_alias_eq,
+    credential_referenced, delete_saved_target, display_name,
     find_saved_target, load_saved_targets, parse_user_at_host,
     rename_saved_target, upsert_saved_target,
 )
@@ -198,9 +199,15 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         # 内存注册表同步失效(旧名可能已缓存/新名可能撞旧缓存)
         cfg.targets.pop(name, None)
         cfg.targets.pop(new_name, None)
-        if removed is not None and (removed.host, removed.user, removed.port) != (host, user, port):
-            # 地址变了：旧凭据已无意义，清掉（新密码在下面按新地址存）
-            delete_password(removed.host, removed.user, removed.port)
+        if not cred_alias_eq((removed.host, removed.user, removed.port),
+                             (host, user, port)):
+            # 地址变了（port None/22 视同没变——凭据键别名，改端口写法不
+            # 该作废密码）。表单密码留空 = 「留空不修改」：旧凭据原样保留
+            # （旧实现删了不写，静默丢）；带新密码才清旧键，且仅当无其他
+            # 条目共享——三条跳板条目共用 pe@跳板 键，删一毁三（§2-6）
+            if (payload.get("password") or "") and not credential_referenced(
+                    removed.host, removed.user, removed.port):
+                delete_password(removed.host, removed.user, removed.port)
         _store_form_password(payload, host, user, port)
         return resp
 
@@ -210,7 +217,10 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         removed = delete_saved_target(name)
         if removed is None:
             raise HTTPException(404, "unknown target")
-        delete_password(removed.host, removed.user, removed.port)
+        if not credential_referenced(removed.host, removed.user, removed.port):
+            # 共享键防误删：还有别的条目共用同一凭据（别名语义）就不动，
+            # 凭据仍服务其余条目；无引用才清（不留孤儿密码）
+            delete_password(removed.host, removed.user, removed.port)
         cfg.targets.pop(name, None)  # 内存注册表同步反注册
         return {"ok": True}
 

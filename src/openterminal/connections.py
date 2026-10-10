@@ -34,6 +34,19 @@ def cred_alias_eq(a: tuple[str | None, str | None, int | None],
             and (p1 == p2 or (p1 in (None, 22) and p2 in (None, 22))))
 
 
+def credential_referenced(host: str | None, user: str | None,
+                          port: int | None) -> bool:
+    """凭据键 (host,user,port) 是否仍被其他记住的连接引用（别名语义）。
+
+    删除连接 / 编辑改地址清旧凭据前的防误删判定（Web 与 CLI 共用）：
+    跳板机常被多条条目共享同一凭据键（三条条目同指 pe@跳板），删一条
+    就清键会让其余条目跟着全部重弹密码（任务书 §2-6）。
+    """
+    key = (host, user, port)
+    return any(cred_alias_eq((t.host, t.user, t.port), key)
+               for t in load_saved_targets())
+
+
 def saved_targets_path() -> Path:
     """记住的连接存储位置（SQLite，用户主目录，不在 git 仓库内）。"""
     return connections_db.db_path()
