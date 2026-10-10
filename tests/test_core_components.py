@@ -89,3 +89,35 @@ def test_core_lazy_auth_property():
     core = PipelineCore.__new__(PipelineCore)
     a = core.auth
     assert a is core.auth
+
+
+def test_execevents_owns_state():
+    from openterminal.core.exec_events import ExecEvents
+    core = FakeCore()
+    ExecEvents(core)
+    for attr in ("_open_cmds", "_open_cmd_at", "_exec_stack", "_exec_buf",
+                 "_suppress_live", "_curtain", "_curtain_parts",
+                 "_tool_card_seq", "_tool_idx_map", "_intr_swallow_until",
+                 "_intr_pending", "_user_out", "_pad_inflight"):
+        assert hasattr(core, attr), attr
+
+
+def test_execevents_preserves_presets():
+    from openterminal.core.exec_events import ExecEvents
+    core = FakeCore()
+    core._open_cmds = {1: "ssh wujian@1.2.3.4"}
+    ExecEvents(core)
+    # hasattr 守卫：裸构造测试在 core 上预置的值不得被初始化覆盖
+    assert core._open_cmds == {1: "ssh wujian@1.2.3.4"}
+
+
+def test_strip_intr_echo_passthrough_normal():
+    from openterminal.core.exec_events import ExecEvents
+    e = ExecEvents(FakeCore())
+    assert e.strip_intr_echo(b"ls\r\n$ ") == b"ls\r\n$ "  # 正常字节原样透传
+
+
+def test_core_lazy_exec_property():
+    from openterminal._core_impl import PipelineCore
+    core = PipelineCore.__new__(PipelineCore)
+    assert core.exec is core.exec

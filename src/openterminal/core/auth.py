@@ -154,13 +154,13 @@ class AuthFlow:
     def _end_pw_verify(self) -> None:
         """退出验证窗口并撤销强制到期定时器。"""
         self.core._pw_verifying = False
-        t = getattr(self, "_pw_verify_timer", None)
+        t = getattr(self.core, "_pw_verify_timer", None)
         if t is not None:
             t.cancel()
             self.core._pw_verify_timer = None
 
     def _schedule_pw_verify_expiry(self) -> None:
-        t = getattr(self, "_pw_verify_timer", None)
+        t = getattr(self.core, "_pw_verify_timer", None)
         if t is not None:
             t.cancel()
         self.core._pw_verify_timer = asyncio.get_running_loop().create_task(
@@ -283,7 +283,7 @@ class AuthFlow:
                 return _needs_password_prompt(line)
         for line in reversed(list(self.core._open_cmds.values())):
             return _needs_password_prompt(line)
-        return bool(getattr(self, "_cs_pw_pending", False))
+        return bool(getattr(self.core, "_cs_pw_pending", False))
 
     @staticmethod
     def _load_nested_password(host: str, user: str | None,
@@ -475,7 +475,7 @@ class AuthFlow:
             type="ask_password", label=label, auth_kind=auth_kind))
         val = await self.core._pws.get()
         if val is None:
-            if getattr(self, "_pw_cancelled", False):
+            if getattr(self.core, "_pw_cancelled", False):
                 self.core._pw_cancelled = False
                 raise PasswordCancelled()
             raise ConnectionError("连接已关闭")

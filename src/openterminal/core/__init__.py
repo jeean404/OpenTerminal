@@ -1,42 +1,25 @@
 """编排层子包。公开 API 经此再导出（最终由 pipeline.py 提供）。
 
 阶段一过渡：原 core.py 的全部内容现居 _core_impl.py（Task 9 瘦身后消失）。
-包在这里转发全部公开符号，旧 import 路径（openterminal.core）不变——
-Python 的包与同名模块冲突时包胜出，term_frontend/web.worker 等指向
-``openterminal.core`` 的 import 无需改动。
+包在这里**惰性**转发全部公开符号（PEP 562 __getattr__），旧 import 路径
+（openterminal.core）不变。惰性是必须的：_core_impl 模块级导入
+``.core.messages`` 等子模块会先触发本包初始化，若这里再模块级转发回
+_core_impl 即成环（首次 ``import openterminal._core_impl`` 直接
+ImportError）。子模块（messages/auth/exec_events/nested_ssh）不受
+__getattr__ 影响：from-import 对未知属性抛 AttributeError 后由导入
+系统按子模块解析。
 """
-
-# 阶段一过渡：转发 _core_impl 的全部公开符号
-from .._core_impl import *  # noqa: F401,F403
-from .._core_impl import (  # noqa: F401 - 显式列出测试引用的符号
-    CMDSET_ECHO_TIMEOUT,
-    CMDSET_HOOK_WAIT,
-    CMDSET_PROMPT_TIMEOUT,
-    CMDSET_QUIET,
-    CMDSET_RESUME_QUIET,
-    SUBMIT_FALLBACK_DELAY,
-    ClientMsg,
-    InteractiveRunner,
-    PasswordCancelled,
-    PipelineCore,
-    ServerMsg,
-    _CMDSET_CONFIRM_RE,
-    _CMDSET_DONE_RE,
-    _CMDSET_PROMPT_RE,
-    _CMDSET_SECRET_RE,
-    _CS_PROMPT_ID_RE,
-    _PROBE_TIMEOUT,
-    _PW_HOLD_RELEASE,
-    _PW_MODAL_DISMISS,
-    _PW_REMEMBER_DELAY,
-    _PW_VERIFY_TIMEOUT,
-    build_agent,
-    build_chat_model,
-)
 
 import sys as _sys
 
-from .. import _core_impl as _impl
+
+def __getattr__(name):
+    # 惰性转发：首次属性访问才拉起 _core_impl（打破初始化环）
+    from .. import _core_impl as _impl
+    try:
+        return getattr(_impl, name)
+    except AttributeError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class _CoreBridge(type(_sys.modules[__name__])):
@@ -50,8 +33,10 @@ class _CoreBridge(type(_sys.modules[__name__])):
 
     def __setattr__(cls, name, value):
         super().__setattr__(name, value)
-        if not name.startswith("__") and hasattr(_impl, name):
-            setattr(_impl, name, value)
+        if not name.startswith("__"):
+            from .. import _core_impl as _impl
+            if hasattr(_impl, name):
+                setattr(_impl, name, value)
 
 
 _sys.modules[__name__].__class__ = _CoreBridge
