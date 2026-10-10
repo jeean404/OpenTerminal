@@ -6,9 +6,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import connections_db
-from .config import TargetConfig
-from .connections_db import RenameConflictError  # noqa: F401 - 供调用方统一 import
+from . import db
+from ..config import TargetConfig
+from .db import RenameConflictError  # noqa: F401 - 供调用方统一 import
 
 
 def display_name(host: str, user: str | None, port: int | None) -> str:
@@ -49,18 +49,18 @@ def credential_referenced(host: str | None, user: str | None,
 
 def saved_targets_path() -> Path:
     """记住的连接存储位置（SQLite，用户主目录，不在 git 仓库内）。"""
-    return connections_db.db_path()
+    return db.db_path()
 
 
 def load_saved_targets(path: Path | None = None) -> list[TargetConfig]:
     """读取记住的连接；库不存在/为空返回空列表。"""
-    conn = connections_db.connect(path)
+    conn = db.connect(path)
     try:
         return [TargetConfig(
             name=r["name"], mode="ssh", host=r["host"] or r["name"],
             user=r["user"], port=r["port"],
             commands=(r["commands"] or "").splitlines(),
-        ) for r in connections_db.fetch_saved(conn)]
+        ) for r in db.fetch_saved(conn)]
     finally:
         conn.close()
 
@@ -68,9 +68,9 @@ def load_saved_targets(path: Path | None = None) -> list[TargetConfig]:
 def save_saved_targets(targets: list[TargetConfig],
                        path: Path | None = None) -> None:
     """整表重写记住的连接。"""
-    conn = connections_db.connect(path)
+    conn = db.connect(path)
     try:
-        connections_db.replace_saved(conn, [
+        db.replace_saved(conn, [
             {"name": t.name, "host": t.host or t.name, "port": t.port,
              "user": t.user,
              "commands": "\n".join(t.commands)} for t in targets])
@@ -101,9 +101,9 @@ def upsert_saved_target(*, name: str, host: str, port: int | None = None,
 
     commands 传 None 不改动既有命令集（旧调用方兼容），空串显式清空。
     """
-    conn = connections_db.connect(path)
+    conn = db.connect(path)
     try:
-        connections_db.upsert_saved(conn, {
+        db.upsert_saved(conn, {
             "name": name, "host": host, "port": port, "user": user,
             "commands": commands})
     finally:
@@ -112,9 +112,9 @@ def upsert_saved_target(*, name: str, host: str, port: int | None = None,
 
 def delete_saved_target(name: str, path: Path | None = None) -> TargetConfig | None:
     """删除一条记住的连接；返回被删条目（供调用方清理凭据），不存在返回 None。"""
-    conn = connections_db.connect(path)
+    conn = db.connect(path)
     try:
-        row = connections_db.delete_saved(conn, name)
+        row = db.delete_saved(conn, name)
     finally:
         conn.close()
     if row is None:
@@ -132,9 +132,9 @@ def rename_saved_target(old: str, *, name: str, host: str,
     旧条目不存在返回 None（不写入）；新名字撞既有条目抛
     RenameConflictError（库不动，Web 层映射 409 / CLI 层提示）。
     """
-    conn = connections_db.connect(path)
+    conn = db.connect(path)
     try:
-        row = connections_db.rename_saved(conn, old, {
+        row = db.rename_saved(conn, old, {
             "name": name, "host": host, "port": port, "user": user,
             "commands": commands})
     finally:
@@ -230,7 +230,7 @@ def _backfill_password(target: TargetConfig, session) -> bool:
     """
     if target.mode != "ssh" or not target.host:
         return False
-    from .secrets_store import load_password_alias, store_password
+    from .secrets import load_password_alias, store_password
 
     used = getattr(session, "last_password", None)
     if used is None:
@@ -260,17 +260,17 @@ async def open_session(target: TargetConfig, password: str | None = None,
     if target.mode == "local":
         if sys.platform == "win32":
             # Windows：ConPTY 会话（pywinpty 仅 win32 安装）
-            from .local_win import WinPtySession
+            from ..local_win import WinPtySession
 
             s = WinPtySession(**kwargs_session)
         else:
             # 延迟导入：local_pty 依赖 POSIX 专属模块（fcntl/termios），
             # Windows 上只要不进本地模式就不应触发导入
-            from .local_pty import LocalPtySession
+            from ..local_pty import LocalPtySession
 
             s = LocalPtySession(**kwargs_session)
     else:
-        from .ssh_pty import SshPtySession
+        from ..ssh_pty import SshPtySession
 
         host = target.host or target.name
         s = SshPtySession(
