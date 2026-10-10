@@ -54,9 +54,11 @@ Xshell 可以省了。
   markdown 表格直接由真实命令输出汇总而成
 - 命令和人话共用一个输入行——`!` 强制命令、`?` 强制任务;
   Ctrl+C 中断正在跑的任务
-- 斜杠命令:`/target` 切主机 · `/system` 手动方言 · `/clear` 新任务 ·
-  `/model` 查看模型 · `/exit` 退出
+- 斜杠命令:`/help` 查命令 · `/target` 切主机 · `/system` 手动方言 ·
+  `/clear` 新任务 · `/model` 查看模型 · `/exit` 退出
 - 有界自纠:同一失败最多重试一次,工具调用轮次有预算上限
+- 状态行显示本会话 token 用量——网关回传就用真值,不回传退化为
+  tiktoken 本地估算
 
 **Shell 与系统**
 
@@ -67,11 +69,22 @@ Xshell 可以省了。
   可用 `/system` 手动覆盖
 - 本机 shell 支持 macOS 与 Linux(PTY)、Windows(ConPTY + PowerShell)
 
+**Agent 技能**
+
+- 内置技能包随包分发(如 `markdown-tables`);其 `SKILL.md` 挂在
+  `/skills/` 虚拟路径下,模型遇到对应任务才按需读取
+
 **SSH 与连接**
 
 - 主机来自 `~/.ssh/config`、临时 `user@host:port`,或记住的连接
 - 密码与密钥认证;密码存系统凭据库,不落明文文件
 - 主机密钥 TOFU 确认;每 target 的历史在重连时灌回 shell
+- **连接后命令集**——登录即自动逐条执行(跳板机接力、`su - deploy` 等)。
+  行内写 `> @名称=密码` 会在保存时抽进系统凭据库,落库只留
+  `> @名称` 引用;其余密码弹窗询问。进度按行显示,卡在等输入的行
+  Web 端可手动「继续」
+- 手输密码验证成功后会问一次要不要记住;之后嵌套 `ssh` / `sudo` / `su`
+  的密码提示自动从凭据库填
 
 **安全**——详见[安全模型](#安全模型)
 
@@ -82,7 +95,8 @@ Xshell 可以省了。
 
 **Web UI**(`ot web`)
 
-- 服务器侧栏 + 多 tab 终端;每个 tab 可在 Agent 视图与纯 Shell 视图切换
+- 服务器侧栏 + 多 tab 终端;每个 tab 可在 Agent 视图与纯 Shell 视图切换,
+  tab 标签上各自显示连接状态
 - 密码、主机密钥用浏览器弹窗输入;可选局域网访问,绑定非本机地址
   必须带 token
 
@@ -98,6 +112,7 @@ Xshell 可以省了。
 
 - 任意 Anthropic 兼容或 OpenAI 兼容网关——协议、base URL、模型、
   key 环境变量均可配置
+- Web 状态栏的模型下拉读 `[model] models` 列表
 
 ## 安装
 
@@ -194,8 +209,9 @@ provider = "anthropic"       # anthropic | openai(OpenAI 兼容协议)
 base_url = "http://127.0.0.1:15721"
 model = "claude-sonnet-4-6"
 api_key_env = "ANTHROPIC_API_KEY"
+models = ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]  # Web 模型下拉
 
-# OpenAI 兼容协议示例(任一 OpenAI 兼容网关皆可;上面四字段的缺省值
+# OpenAI 兼容协议示例(任一 OpenAI 兼容网关皆可;上面几项的缺省值
 # 会随 provider 换成 openai 一套,显式写了的字段一律优先):
 # provider = "openai"
 # base_url = "https://api.openai.com/v1"
@@ -214,6 +230,14 @@ mode = "tiered"              # tiered(分级)| approve-all | deny-all
 [target.prod-web]
 mode = "ssh"
 host = "prod-web.example.com"
+user = "deploy"
+# 连接后命令集——登录成功后逐行执行。
+# "> @名称=密码" 那一行会把密码抽进系统凭据库,落库只留 "> @名称";
+# 密码框应答时按这个引用去取。
+commands = [
+  "su - deploy",
+  "> @deploy_pw",
+]
 ```
 
 配置目录可用环境变量 `OPENTERMINAL_HOME` 覆盖(测试即用它做隔离)。
@@ -223,9 +247,14 @@ host = "prod-web.example.com"
 ## 日常使用
 
 **终端里**——直接打字。说人话就是任务,敲命令就在你的真 shell 里跑。
-`!` 强制命令、`?` 强制任务;`/target` 切主机、`/system` 手动方言、
-`/clear` 新任务、`/model` 查看模型、`/exit` 退出;Ctrl+C 中断当前任务,
-回到提示符。
+`!` 强制命令、`?` 强制任务;`/help` 列出全部斜杠命令:`/target` 切主机、
+`/system` 手动方言、`/clear` 新任务、`/model` 查看模型、`/exit` 退出;
+Ctrl+C 中断当前任务,回到提示符。
+
+**连接后命令集**在目标连上的那一刻自己跑完——跳板机接力、`su -` 换用户
+这类事最顺手。密码别写进文件:写一次 `> @名称=密码`,落库只剩
+`> @名称`,提示符要密码时按引用去凭据库取。哪一行停下来等输入,Web 状态栏
+有「继续」,不会把你晾在那(终端 CLI 暂无续跑入口)。
 
 **浏览器里**(`ot web`)——侧栏选服务器(local / 直连 SSH),
 tab 想开几个开几个,Agent 视图和纯 Shell 视图随意切换。密码、主机密钥
@@ -272,7 +301,8 @@ ot exec -t prod-web -c "df -h /" --output json
 三层结构:自然语言前端(终端或 Web)、deepagents(LangGraph)Agent、
 持久 shell 会话。自然语言直接交给 Agent 多轮调用工具,命令执行是 Agent
 的子能力(经同一会话);三级策略在 Agent 中间件层强制,提示词内容绕不过
-审批闸门。
+审批闸门。内置技能以文件形式挂在 `/skills/` 下,模型读技能和读普通参考
+文件走同一条路。
 
 显示走**单管线**:PTY 字节流原样直达终端,shell 集成 hook 用带内 OSC 标记
 记账(历史/退出码/AI 上下文),AI 工具命令经 `__ot_exec__` 注入同一个 PTY,
@@ -286,9 +316,9 @@ ot exec -t prod-web -c "df -h /" --output json
 | 存储 | 位置 | 内容 |
 |---|---|---|
 | 配置 | `~/.openterminal/config.toml` | 模型网关 / shell 超时 / 策略 / 目标 |
-| 连接 | `~/.openterminal/connections.db` | 记住的连接 |
+| 连接 | `~/.openterminal/connections.db` | 记住的连接及其命令集 |
 | 命令历史 | `~/.openterminal/history.db` | 每 target 的历史,重连灌回 shell |
-| 密码 | 系统凭据库(keyring) | 不落明文文件 |
+| 密码 | 系统凭据库(keyring) | 连接密码、命令集内联密码——不落明文文件 |
 | 主机画像缓存 | `~/.openterminal/hosts.toml` | 免重复探测 |
 | 会话记录 | `~/.openterminal/sessions/<日期>/` | 输入/命令/审批/总结的 JSONL |
 | 主机密钥 | `~/.ssh/known_hosts` | TOFU 确认后写入 |

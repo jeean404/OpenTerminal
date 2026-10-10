@@ -64,10 +64,12 @@ second in the browser (`ot web`). Here's what happens:
   every task; summaries are markdown built from the real command output
 - Plain commands and plain sentences share one input line — `!` forces a
   command, `?` forces a task; Ctrl+C interrupts a running task
-- Slash commands: `/target` switch host · `/system` override dialect ·
-  `/clear` new task · `/model` show model · `/exit` quit
+- Slash commands: `/help` list them · `/target` switch host · `/system`
+  override dialect · `/clear` new task · `/model` show model · `/exit` quit
 - Bounded self-correction: a failed command is retried at most once,
   tool-call turns are budget-capped
+- Session token usage on the status line — exact when the gateway reports
+  it, a local tiktoken estimate otherwise
 
 **Shells & systems**
 
@@ -78,6 +80,12 @@ second in the browser (`ot web`). Here's what happens:
   Alpine→apk, Arch→pacman, macOS→brew — with `/system` manual override
 - Local shells on macOS & Linux (PTY) and Windows (ConPTY + PowerShell)
 
+**Agent skills**
+
+- Skill packs ship inside the package (e.g. `markdown-tables`); their
+  `SKILL.md` files are mounted at `/skills/` and the model pulls one in
+  only when the task calls for it
+
 **SSH & connections**
 
 - Hosts from `~/.ssh/config`, ad-hoc `user@host:port`, or remembered
@@ -86,6 +94,14 @@ second in the browser (`ot web`). Here's what happens:
   plaintext files
 - Host-key TOFU confirmation; per-target history is replayed into the
   shell on reconnect
+- **Post-connect command sets** — per-target lists that run on login
+  (jump-host hops, `su - deploy`, …). An inline `> @name=secret` line is
+  stripped into the keyring on save and answered by reference; anything
+  else is asked in a dialog. Progress is shown per line, and on the web a
+  line stuck waiting for input can be resumed by hand.
+- A password you type by hand is offered for remembering once it verifies;
+  nested `ssh` / `sudo` / `su` prompts then fill themselves in from the
+  keyring
 
 **Safety** — details in [Security model](#security-model)
 
@@ -98,7 +114,7 @@ second in the browser (`ot web`). Here's what happens:
 **Web UI** (`ot web`)
 
 - Server sidebar + multi-tab terminals; Agent view and plain Shell view
-  per tab
+  per tab, each tab showing its own connection status
 - Browser-dialog password and host-key entry; optional LAN access with a
   mandatory token for non-loopback binds
 
@@ -114,6 +130,7 @@ second in the browser (`ot web`). Here's what happens:
 
 - Any Anthropic-compatible or OpenAI-compatible gateway — protocol, base
   URL, model, and key env var all configurable
+- The web model picker reads its options from `[model] models`
 
 ## Installation
 
@@ -217,9 +234,10 @@ provider = "anthropic"       # anthropic | openai (OpenAI-compatible protocol)
 base_url = "http://127.0.0.1:15721"
 model = "claude-sonnet-4-6"
 api_key_env = "ANTHROPIC_API_KEY"
+models = ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]  # web model picker
 
 # OpenAI-compatible protocol example (any OpenAI-compatible gateway works;
-# the defaults of the four fields above switch to an openai set with the
+# the defaults of the fields above switch to an openai set with the
 # provider — explicit fields always win):
 # provider = "openai"
 # base_url = "https://api.openai.com/v1"
@@ -238,6 +256,14 @@ mode = "tiered"              # tiered | approve-all | deny-all
 [target.prod-web]
 mode = "ssh"
 host = "prod-web.example.com"
+user = "deploy"
+# Post-connect command set — runs line by line right after login.
+# A "> @name=secret" line stores the secret in the keyring and is kept as
+# "> @name"; the password box then answers from that reference.
+commands = [
+  "su - deploy",
+  "> @deploy_pw",
+]
 ```
 
 Config directory can be moved with `OPENTERMINAL_HOME` (the test suite uses
@@ -248,9 +274,16 @@ profiles are cached in `~/.openterminal/hosts.toml`.
 
 **In the terminal** — just type. A normal sentence becomes a task; a plain
 command runs in your real shell. `!` forces a command, `?` forces a task.
-`/target` switch host, `/system` override the detected dialect, `/clear`
-new task, `/model` show model, `/exit` quit. Ctrl+C interrupts a running
-task and returns you to the prompt.
+`/help` lists the slash commands: `/target` switch host, `/system` override
+the detected dialect, `/clear` new task, `/model` show model, `/exit` quit.
+Ctrl+C interrupts a running task and returns you to the prompt.
+
+**Post-connect command sets** run themselves the moment a target is up —
+handy for jump hosts and `su -` switches. Keep a password out of the file by
+writing `> @name=secret` once; the stored line is just `> @name` and the
+prompt is answered from the keyring. If a line stops to ask for something,
+the web status bar offers a Resume button instead of leaving you stuck
+(the terminal CLI has no resume entry yet).
 
 **In the browser** (`ot web`) — pick a server from the sidebar (local or
 direct SSH), open as many tabs as you like, and work in the Agent view or
@@ -308,7 +341,9 @@ deepagents (LangGraph) agent, and persistent shell sessions. Natural
 language goes straight to the agent for multi-turn tool use; command
 execution is a sub-capability of the agent, over the same session. The
 tiered policy is enforced as agent middleware, so the approval gate can't
-be bypassed by prompt content.
+be bypassed by prompt content. Built-in skills are mounted as files under
+`/skills/`, so the agent loads them the same way it loads any other
+reference file.
 
 Display is a **single pipeline**: PTY bytes go straight to the terminal,
 shell-integration hooks keep the books via in-band OSC markers (history /
@@ -325,9 +360,9 @@ in-memory and cleared on restart. What persists is factual state:
 | Store | Location | Contents |
 |---|---|---|
 | Config | `~/.openterminal/config.toml` | gateway / shell budgets / policy / targets |
-| Connections | `~/.openterminal/connections.db` | remembered connections |
+| Connections | `~/.openterminal/connections.db` | remembered connections and their command sets |
 | Command history | `~/.openterminal/history.db` | per-target history, replayed into the shell on reconnect |
-| Passwords | OS credential store (keyring) | never written to plaintext files |
+| Passwords | OS credential store (keyring) | connection passwords and command-set secrets — never written to plaintext files |
 | Host profiles | `~/.openterminal/hosts.toml` | per-host system profile cache |
 | Transcripts | `~/.openterminal/sessions/<date>/` | JSONL of inputs/commands/approvals/summaries |
 | Host keys | `~/.ssh/known_hosts` | written after TOFU confirmation |
