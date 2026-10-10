@@ -1,6 +1,6 @@
 import json
 
-from openterminal.transcript import Transcript
+from openterminal.core.transcript import Transcript
 
 
 def test_append_jsonl(tmp_path):

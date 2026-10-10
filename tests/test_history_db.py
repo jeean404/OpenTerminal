@@ -1,6 +1,6 @@
 """history_db：连接级命令历史长期记忆（SQLite）单元测试。"""
 
-from openterminal.history_db import record, recent
+from openterminal.core.history import record, recent
 
 
 def test_record_and_recent_roundtrip(tmp_path):

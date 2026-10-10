@@ -138,7 +138,7 @@ async def test_worker_fallback_bytes_passthrough(monkeypatch):
 async def test_worker_cmd_accounting_and_forward(monkeypatch, tmp_path):
     """CMD 报告的用户命令：不进 ctx 栈，_open_cmds 记账；输出字节直通；
     exec_end 记 transcript 退出码 + 历史库（source=user）。"""
-    import openterminal.history_db as history_db
+    import openterminal.core.history as history_db
 
     monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
     w, sink = await _make_worker(monkeypatch)
@@ -162,7 +162,7 @@ async def test_worker_cmd_accounting_and_forward(monkeypatch, tmp_path):
 async def test_worker_agent_exec_flow_and_ai_collapse_once(monkeypatch, tmp_path):
     """AI 工具命令：EXEC 报告 + runner 持 fut → ctx=agent；输出捕获并直写
     主 xterm；ai_collapse 每任务只发首个命令（多命令并发发起时同理）。"""
-    import openterminal.history_db as history_db
+    import openterminal.core.history as history_db
     monkeypatch.setattr(history_db, "record", lambda *a, **k: None)
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
@@ -195,7 +195,7 @@ async def test_worker_agent_exec_flow_and_ai_collapse_once(monkeypatch, tmp_path
     assert b"out-of-df -h" in out and b"out-of-free -h" in out
     # 注入行回显不外显
     assert b"eval" not in out
-    import openterminal.history_db as history_db
+    import openterminal.core.history as history_db
     got = [r["command"] for r in history_db.recent("10.0.0.20", 100)]
     # 历史库在 tmp 外（本测试未设 OPENTERMINAL_HOME），只验证登记路径不崩
     assert isinstance(got, list)
@@ -203,7 +203,7 @@ async def test_worker_agent_exec_flow_and_ai_collapse_once(monkeypatch, tmp_path
 
 async def test_worker_agent_history_recorded(monkeypatch, tmp_path):
     """AI 工具命令落历史库（source=agent），用户命令落 user。"""
-    import openterminal.history_db as history_db
+    import openterminal.core.history as history_db
 
     monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
     w, sink = await _make_worker(monkeypatch)
@@ -232,7 +232,7 @@ async def test_worker_agent_history_recorded(monkeypatch, tmp_path):
 
 async def test_worker_probe_exec_hidden(monkeypatch, tmp_path):
     """ctx=probe（隐藏探测）：输出只捕获不转发、无事件、不落历史。"""
-    import openterminal.history_db as history_db
+    import openterminal.core.history as history_db
 
     monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
     w, sink = await _make_worker(monkeypatch)

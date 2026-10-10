@@ -12,7 +12,7 @@ from tests.core_fakes import FakeCore, _bare_core
 async def test_worker_suppressed_echo_swallowed_then_newline(monkeypatch, tmp_path):
     """注入窗口（§5.5）：live 回显字节吞掉；执行开始时补 \\r\\n 收束被吞的
     提示符行（否则命令输出接在提示符同一行）。"""
-    import openterminal.history_db as history_db
+    import openterminal.core.history as history_db
     monkeypatch.setattr(history_db, "record", lambda *a, **k: None)
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
