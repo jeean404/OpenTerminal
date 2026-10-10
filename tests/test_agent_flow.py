@@ -127,6 +127,64 @@ async def test_parallel_tool_caps_require_parallel_decisions():
     await session.close()
 
 
+async def test_parallel_approve_tool_cards_mount_once():
+    # P0-1 回归（docs/card_duplicate.md）：HITL resume 后回灌的 AIMessage 不得
+    # 重复宣告工具卡——全程 tool_start×2、tool_end×2、index 两两配对、记账不双计
+    model = scripted(
+        AIMessage(content="", tool_calls=[
+            {"name": "execute", "args": {"command": "touch aa.txt"},
+             "id": "p1", "type": "tool_call"},
+            {"name": "execute", "args": {"command": "touch bb.txt"},
+             "id": "p2", "type": "tool_call"},
+        ]),
+        AIMessage(content="两个文件都建好了。"),
+    )
+    graph, session, _, _ = await _agent(model)
+    seen: list = []
+    runner = TaskRunner(graph, "th-parallel-once", max_tool_turns=10,
+                        on_event=seen.append)
+    await runner.run("x")
+    events2 = await runner.resume([
+        {"type": "approve"}, {"type": "approve"},
+    ])
+    starts = [e for e in seen if e.kind == "tool_start"]
+    ends = [e for e in seen if e.kind == "tool_end"]
+    assert len(starts) == 2
+    assert len(ends) == 2
+    assert sorted(e.index for e in starts) == sorted(e.index for e in ends)
+    assert len([e for e in seen if e.kind == "tool_call"]) == 2  # 不双计
+    assert any(e.kind == "final" for e in events2)
+    await session.close()
+
+
+async def test_edit_decision_does_not_reannounce_tool_card():
+    # P0-1 回归（docs/card_duplicate.md）：edit 决策改了 tool_call 的 args、
+    # id 不变——回灌后不得再长一张工具卡，编辑后的命令仍真实执行
+    model = scripted(
+        tool_call("execute", {"command": "touch aa.txt"}, "p1"),
+        AIMessage(content="按编辑后的命令执行完毕。"),
+    )
+    graph, session, _, _ = await _agent(model)
+    seen: list = []
+    runner = TaskRunner(graph, "th-edit-once", max_tool_turns=10,
+                        on_event=seen.append)
+    await runner.run("x")
+    assert len([e for e in seen if e.kind == "tool_start"]) == 1
+    events2 = await runner.resume([
+        {"type": "edit", "edited_action": {
+            "name": "execute", "args": {"command": "touch cc.txt"}}},
+    ])
+    assert len([e for e in seen if e.kind == "tool_start"]) == 1  # 无新宣告
+    ends = [e for e in seen if e.kind == "tool_end"]
+    assert len(ends) == 1
+    assert not ends[0].failed
+    from pathlib import Path
+
+    assert Path("cc.txt").exists() and not Path("aa.txt").exists()
+    assert any(e.kind == "final" for e in events2)
+    await session.close()
+
+
 async def test_recursion_budget_reports_limit():
     # 模型一直调工具，必须在预算处停下并产出 limit 事件
     model = scripted(*[tool_call("execute", {"command": "echo x"}, f"t{i}")

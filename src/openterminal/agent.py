@@ -235,6 +235,7 @@ class TaskRunner:
         # 非 execute 工具的 start/end 配对记账（前端工具调用小卡）
         self._tool_seq = 0
         self._pending_tools: dict[str, tuple[int, str]] = {}
+        self._tool_seen: set[str] = set()   # 已宣告 tool_call_id（只增不减）
         self.input_tokens = 0    # 本次任务的累计输入 token（usage_metadata）
         self.output_tokens = 0   # 本次任务的累计输出 token
         # 会话栏 token 估算（tiktoken，token_est）：网关不回传 usage_metadata
@@ -399,6 +400,16 @@ class TaskRunner:
                     failed=m.status == "error"))
         if isinstance(m, AIMessage) and m.tool_calls:
             for tc in m.tool_calls:
+                tid = tc.get("id")
+                # HITL after_model 在 resume 后把同一 AIMessage 回灌 updates 流
+                # （langchain HumanInTheLoopMiddleware.after_model 返回
+                # {"messages": [last_ai_msg, ...]}）——按 tool_call_id 幂等：
+                # 每个调用全任务只宣告一次；跳过时不动 _tool_seq/_pending_tools，
+                # 配对保持指向首次 index，tool_end 才能换徽标回原卡
+                if tid and tid in self._tool_seen:
+                    continue
+                if tid:
+                    self._tool_seen.add(tid)
                 if tc["name"] == "execute":
                     self._tool_calls += 1
                     self._add(events, TaskEvent(
