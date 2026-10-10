@@ -1155,14 +1155,21 @@ class PipelineCore:
         return (host or None), (user or None)
 
     def _pw_armed(self) -> bool:
-        """最内层未闭合用户命令是否 ssh/sudo 类（提示符检测的触发门槛）。"""
+        """最内层未闭合用户命令是否 ssh/sudo 类（提示符检测的触发门槛）。
+
+        三条路径覆盖三种命令执行方式：
+        ① _exec_stack——AI/探测的 EXEC 帧（C/D 标记驱动）；
+        ② _open_cmds——用户手敲命令的记账帧（C/D 标记驱动）；
+        ③ _cs_pw_pending——命令集 _cs_command 直发 PTY 的密码类命令
+          （不走 C/D 标记，前两条路都看不到；真机：跳板命令集
+          `ssh pe@目标` 后密码提示自动填充被 _pw_armed 拦死）。"""
         for frame in reversed(self._exec_stack):
             line = frame.get("line") or ""
             if line and not is_internal_line(line):
                 return _needs_password_prompt(line)
         for line in reversed(list(self._open_cmds.values())):
             return _needs_password_prompt(line)
-        return False
+        return bool(getattr(self, "_cs_pw_pending", False))
 
     def _innermost_ssh_frame(self) -> int | None:
         """最内层未闭合用户帧若是 ssh 类返回其 inst（嵌套会话存续判定）。"""
@@ -2090,6 +2097,10 @@ class PipelineCore:
         await self._cs_wait_pw_verify()
         await self._cs_hook_gate()
         self._cs_tail = bytearray()
+        # 密码类命令：发前置标记——密码提示随输出到达时 _pw_armed 需要
+        # 已能看到它（_cs_command 尾部再置一次是给 _cs_pause_for_input 用的，
+        # 那时提示符早已被 _detect_password_prompt 处理过）
+        self._cs_pw_pending = _needs_password_prompt(cmd)
         await self.session.send_raw((cmd + "\r").encode())
         deadline = time.monotonic() + CMDSET_ECHO_TIMEOUT
         while time.monotonic() < deadline and cmd not in self._cs_text():
