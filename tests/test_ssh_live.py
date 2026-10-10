@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from openterminal.ssh_pty import SshPtySession
+from openterminal.session.ssh import SshPtySession
 
 pytestmark = pytest.mark.ssh
 

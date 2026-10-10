@@ -109,7 +109,7 @@ from ..shell_integration import (
     injection_lines, is_internal_line,
     parse_probe, probe_command, toggle_line,
 )
-from ..shell_session import (
+from ..session.base import (
     _PASSWORD_PROMPT_RE, CommandResult, _needs_password_prompt)
 from ..sysprobe import (
     LOCAL_PROFILE, MANUAL_PRESETS, load_host_cache, probe_profile,

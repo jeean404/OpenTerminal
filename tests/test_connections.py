@@ -257,7 +257,7 @@ def _open_with_password(monkeypatch, *, last_password="s3cret"):
     async def fake_start(self):
         self.last_password = last_password
 
-    monkeypatch.setattr("openterminal.ssh_pty.SshPtySession.start", fake_start)
+    monkeypatch.setattr("openterminal.session.ssh.SshPtySession.start", fake_start)
     return secrets_mod
 
 

@@ -181,7 +181,7 @@ def cmd_exec(args: argparse.Namespace, cfg: Config, out, err) -> int:
 
     # 主机指纹 TOFU 预检：无头模式不询问，未收录直接报错
     if target.mode == "ssh":
-        from .ssh_pty import known_hosts_has_entry, known_hosts_path
+        from .session.ssh import known_hosts_has_entry, known_hosts_path
 
         host = target.host or target.name
         if not known_hosts_has_entry(known_hosts_path(), host, target.port):

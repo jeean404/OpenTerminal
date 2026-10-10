@@ -2,7 +2,7 @@ import sys
 
 import pytest
 
-# 模块级跳过须在 import local_pty 之前：Windows 上 fcntl 不存在，
+# 模块级跳过须在 import local_posix 之前：Windows 上 fcntl 不存在，
 # 顶层导入会直接 ImportError，pytestmark 的 skipif 来不及生效
 if sys.platform == "win32":
     pytest.skip("PTY 仅 POSIX", allow_module_level=True)
@@ -14,7 +14,7 @@ from openterminal.agent import (
     DenyMiddleware, TaskRunner, build_agent, build_system_prompt,
 )
 from openterminal.config import Config
-from openterminal.local_pty import LocalPtySession
+from openterminal.session.local_posix import LocalPtySession
 from openterminal.policy import Policy
 from openterminal.sysprobe import MANUAL_PRESETS, SystemProfile
 from tests.fakes import scripted, tool_call

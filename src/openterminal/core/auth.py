@@ -20,7 +20,7 @@ import time
 
 from . import pipeline as _impl
 from ..shell_integration import is_internal_line
-from ..shell_session import _PASSWORD_PROMPT_RE, _needs_password_prompt
+from ..session.base import _PASSWORD_PROMPT_RE, _needs_password_prompt
 from .messages import PasswordCancelled, ServerMsg, _dbg
 
 

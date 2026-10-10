@@ -3,12 +3,12 @@ import sys
 
 import pytest
 
-# 模块级跳过须在 import local_pty 之前：Windows 上 fcntl 不存在，
+# 模块级跳过须在 import local_posix 之前：Windows 上 fcntl 不存在，
 # 顶层导入会直接 ImportError，pytestmark 的 skipif 来不及生效
 if sys.platform == "win32":
     pytest.skip("本地 PTY 仅支持 macOS/Linux", allow_module_level=True)
 
-from openterminal.local_pty import LocalPtySession
+from openterminal.session.local_posix import LocalPtySession
 
 
 @pytest.fixture

@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 
 from ..shell_integration import agent_exec_line
-from ..shell_session import CommandResult
+from ..session.base import CommandResult
 
 _OT_DBG = bool(os.environ.get("OT_WEB_DEBUG"))
 _OT_T0 = time.monotonic()   # _dbg 相对时间戳基准（轨迹排障用时差分析）

@@ -260,17 +260,17 @@ async def open_session(target: TargetConfig, password: str | None = None,
     if target.mode == "local":
         if sys.platform == "win32":
             # Windows：ConPTY 会话（pywinpty 仅 win32 安装）
-            from ..local_win import WinPtySession
+            from ..session.local_win import WinPtySession
 
             s = WinPtySession(**kwargs_session)
         else:
             # 延迟导入：local_pty 依赖 POSIX 专属模块（fcntl/termios），
             # Windows 上只要不进本地模式就不应触发导入
-            from ..local_pty import LocalPtySession
+            from ..session.local_posix import LocalPtySession
 
             s = LocalPtySession(**kwargs_session)
     else:
-        from ..ssh_pty import SshPtySession
+        from ..session.ssh import SshPtySession
 
         host = target.host or target.name
         s = SshPtySession(

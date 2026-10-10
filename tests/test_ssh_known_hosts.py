@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from openterminal.ssh_pty import (
+from openterminal.session.ssh import (
     format_known_host_line,
     known_hosts_has_entry,
 )

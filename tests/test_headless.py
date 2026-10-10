@@ -159,7 +159,7 @@ def test_exec_remote_code_in_tool_band_squashed(monkeypatch):
     """远程退出码撞上 64~69 工具保留段：进程码收敛为 63（保住「≥64 必是
     工具问题」契约），真实值仍在 JSON 的 exit_code 里。"""
     import openterminal.headless as hl
-    from openterminal.shell_session import CommandResult
+    from openterminal.session.base import CommandResult
 
     async def fake_exec(target, command, *, timeout):
         return CommandResult(output="boom", exit_code=65, truncated=False,

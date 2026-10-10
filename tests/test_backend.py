@@ -4,7 +4,7 @@ import sys
 import pytest
 
 from openterminal.backend import PtyShellBackend
-from openterminal.shell_session import CommandResult
+from openterminal.session.base import CommandResult
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="PTY 仅 POSIX")
 

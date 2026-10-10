@@ -82,7 +82,7 @@ def test_probe_command_is_valid_posix():
 def test_probe_profile_parses_fake_session():
     import asyncio
 
-    from openterminal.shell_session import CommandResult
+    from openterminal.session.base import CommandResult
     from openterminal.sysprobe import probe_profile
 
     class FakeSession:

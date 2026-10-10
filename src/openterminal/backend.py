@@ -9,7 +9,7 @@ from pathlib import Path
 from deepagents.backends import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
 
-from .shell_session import ShellSession
+from .session.base import ShellSession
 
 
 class PtyShellBackend(LocalShellBackend):

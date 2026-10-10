@@ -42,7 +42,7 @@ class FakeSession:
 
     async def run(self, command, *, timeout=None, on_output=None):
         self.calls.append(("run", command))
-        from openterminal.shell_session import CommandResult
+        from openterminal.session.base import CommandResult
         return CommandResult(output="hello", exit_code=0, truncated=False, cwd="/tmp")
 
     async def send_raw(self, data):

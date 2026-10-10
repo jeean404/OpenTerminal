@@ -1,7 +1,7 @@
 import asyncio
 
-from openterminal.shell_session import BasePtySession
-from openterminal.shell_session import (
+from openterminal.session.base import BasePtySession
+from openterminal.session.base import (
     BEGIN_MARKER, END_MARKER, CommandResult, slice_capture, truncate_output,
     wrap_command,
     wrap_passthrough,

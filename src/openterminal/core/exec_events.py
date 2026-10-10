@@ -21,7 +21,7 @@ from collections import deque
 
 from .messages import ServerMsg, _dbg, _ansi_free
 from ..shell_integration import is_internal_line
-from ..shell_session import CommandResult
+from ..session.base import CommandResult
 
 
 class ExecEvents:

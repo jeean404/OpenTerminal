@@ -9,8 +9,8 @@ import pytest
 if sys.platform != "win32":
     pytest.skip("ConPTY 会话仅支持 Windows", allow_module_level=True)
 
-from openterminal.local_win import WinPtySession
-from openterminal.shell_session import slice_capture
+from openterminal.session.local_win import WinPtySession
+from openterminal.session.base import slice_capture
 
 
 # --- 纯逻辑：PowerShell 哨兵包装与 POSIX 切片器兼容（不碰真 ConPTY）---
