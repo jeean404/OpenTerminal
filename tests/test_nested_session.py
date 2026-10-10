@@ -1,20 +1,25 @@
-"""嵌套会话（ssh 跳板机 / su - / 预置命令嵌套 ssh）修复回归测试。
+"""嵌套会话回归测试（Task 10 拆分后保留跨域共享用例）。
 
-覆盖三块：
+覆盖四块：
 1. parse_probe 对「探测行整行回显混进收集缓冲」的鲁棒性——嵌套换壳
    注入的根因（真机：跳板机→目标机后自然语言整链无声失败）；
 2. _PASSWORD_PROMPT_RE 对现代 OpenSSH 客户端提示符 `(user@host)
    Password:` 与中文 `密码：/口令：` 的匹配（密码模态代答 + 自然语言
    透传的触发前提）；
-3. PipelineCore 嵌套密码目标解析（_nested_ssh_target）与自然语言在
-   密码提示符前的透传闸（_on_frontend_line 的 _pw_prompt_seen 分支）。
+3. 嵌套密码目标解析（NestedSshTracker：_nested_ssh_target /
+   ssh_frame_host / sudo_pw_key，Task 10 自 test_core_components 并入）；
+4. 跨组件时序：内层 ssh 提示符活性闩弛放、任务起跑先于 agent 构建
+   （其余密码/认证用例已按域分流 tests/test_auth_flow.py）。
 """
 import asyncio
 
 import openterminal.core as cmod
 from openterminal.core import PipelineCore
+from openterminal.core.nested_ssh import NestedSshTracker
 from openterminal.shell_integration import parse_probe, probe_command
 from openterminal.shell_session import _PASSWORD_PROMPT_RE
+
+from tests.core_fakes import FakeCore, _bare_core
 
 
 def _bare_core(**attrs) -> PipelineCore:
@@ -24,8 +29,6 @@ def _bare_core(**attrs) -> PipelineCore:
         setattr(c, k, v)
     return c
 
-
-# --- 1. parse_probe：回显鲁棒性 ------------------------------------------
 
 def test_parse_probe_skips_echoed_template():
     """嵌套 shell 场景：探测命令的整行回显先于真实输出进入缓冲。
@@ -44,8 +47,6 @@ def test_parse_probe_clean_output_still_works():
     assert parse_probe("") == (None, "-d")
 
 
-# --- 2. 密码提示符正则 ----------------------------------------------------
-
 def test_password_prompt_re_modern_openssh():
     """macOS/新版 OpenSSH 客户端提示 `(user@host) Password:`（旧正则漏配，
     嵌套 ssh 密码模态因此永不触发）。"""
@@ -57,8 +58,6 @@ def test_password_prompt_re_modern_openssh():
     assert _PASSWORD_PROMPT_RE.search(b"\xe5\xaf\x86\xe7\xa0\x81:")   # 密码:
     assert not _PASSWORD_PROMPT_RE.search(b"password policy updated\r\n")
 
-
-# --- 3. 嵌套目标解析 + 密码提示符透传闸 ----------------------------------
 
 def test_nested_ssh_target_parses_valued_options():
     """`ssh -p 2222 user@host` 的端口值不得被当成目标主机（真机复现出
@@ -101,567 +100,7 @@ def test_pw_prompt_host_extracts_from_prompt():
     assert c.auth._pw_prompt_host() == (None, None)
 
 
-def test_frontend_line_passthrough_on_password_prompt():
-    """密码提示符在前台时自然语言整行必须透传：只补发回车，不起任务、
-    不动终端（真机：预置命令 ssh 跳板机到讨密码时，中文密码被误判成
-    自然语言 → 登录被 \\x03 掉）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _bare_core(session=_Session(), _exec_future=None,
-                   _pw_prompt_seen=True, _pw_verifying=False, _pw_hold=[],
-                   _pw_capture_key=None, _pw_typed=bytearray(),
-                   _pw_remember_candidate=None,
-                   _open_cmds={})
-    asyncio.run(c.ai._on_frontend_line("帮我看下当前目录有什么文件", False))
-    assert sent == [b"\r"]
-
-
-# --- 4. \x03 后 ^C 回显吞除（「奇怪符号+c」）-----------------------------
-
 import time as _time
-
-
-def _armed_core() -> PipelineCore:
-    return _bare_core(_intr_swallow_until=_time.monotonic() + 10.0,
-                      _intr_pending=b"")
-
-
-def test_strip_intr_echo_exact_two_bytes():
-    """bash 在半行尾回显 "^C"：恰好吞这两字节，换行与提示符照常透传。"""
-    c = _armed_core()
-    assert c.exec._strip_intr_echo("查看backend资源^C\r\n# ".encode()) == \
-        "查看backend资源\r\n# ".encode()
-    # 吞完即解除武装：后续字面 ^C 不再吞
-    assert c._intr_swallow_until == 0.0
-    assert c.exec._strip_intr_echo(b"^C") == b"^C"
-
-
-def test_strip_intr_echo_cross_chunk_caret():
-    """"^" 与 "C" 分属两块：悬置跨块匹配；非 C 开头原样放回不丢字面 ^。"""
-    c = _armed_core()
-    assert c.exec._strip_intr_echo(b"abc^") == b"abc"
-    assert c.exec._strip_intr_echo(b"C\r\n") == b"\r\n"
-    c = _armed_core()
-    assert c.exec._strip_intr_echo(b"abc^") == b"abc"
-    assert c.exec._strip_intr_echo(b"x\r\n") == b"^x\r\n"   # 不是回显：放回
-
-
-def test_strip_intr_echo_expiry_releases_pending():
-    """窗口过期（zsh 不回显 ^C）：悬置的块尾 ^ 原样补放，零丢字节。"""
-    c = _bare_core(_intr_swallow_until=_time.monotonic() - 1.0,
-                   _intr_pending=b"^")
-    assert c.exec._strip_intr_echo(b"next") == b"^next"
-    assert c._intr_swallow_until == 0.0
-
-
-# --- 5. 密码重讨模态 + 验证窗口输入 hold + 分析卡时机 ---------------------
-
-def _pw_core(session) -> PipelineCore:
-    """密码状态机 + submit 链所需属性齐备的最小核心（ssh 帧开着、内层
-    提示符标记在位 = 嵌套会话已登录态）。"""
-    return _bare_core(
-        session=session, _exec_future=None, _closed=False, _session_dead=False,
-        _pw_tail=bytearray(), _pw_prompt_seen=False, _pw_verifying=False,
-        _pw_verify_at=0.0, _pw_hold=[], _pw_hold_timer=None, _pw_at_end=False,
-        _pw_modal_open=False, _pw_dismiss_timer=None,
-        _nested_pw_attempts=0, _nested_pw_ctx=None,
-        _pw_capture_key=None, _pw_typed=bytearray(),
-        _pw_remember_candidate=None, _pw_remember_pending=None,
-        _pw_result_from=0,
-        _target_host="1.2.3.4",
-        _open_cmds={1: "ssh wujian@1.2.3.4"}, _open_cmd_at={1: 10.0},
-        _exec_stack=[], _last_mark_at=11.0, _interactive=True,
-        _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
-        # 回车看门狗状态：hook 陈旧判定 + 看门狗把手（_hook_ok 会读）
-        _hook_stale=False, _hook_watch=None, _hook_watch_text=False,
-        _display="agent")
-
-
-def test_password_reprompt_retriggers_rising_edge():
-    """输错后 ssh 重讨（deny+prompt 常被隧道合包成一块）：上升沿必须复现。
-
-    无凭据时不再弹模态（真实终端语义：提示符已在终端里，用户手输）——
-    但上升沿仍要每次重讨都走到 _on_nested_password_prompt（at_end 判定取
-    最后一个匹配），否则凭据库后来存了密码也不会再自动填充。"""
-    sent: list[bytes] = []
-    msgs: list = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _pw_core(_Session())
-
-    async def _emit(m):
-        msgs.append(m)
-    c.emit_msg = _emit
-    orig = cmod.load_password
-    cmod.load_password = lambda host, user, port: None
-
-    async def main():
-        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
-        await asyncio.sleep(0)
-        assert c._nested_pw_attempts == 1
-        assert not any(m.type == "ask_password" for m in msgs)
-        await c.auth._on_nested_password("wrongpw", False)
-        assert c._pw_verifying and not c._pw_prompt_seen
-        c.auth._detect_password_prompt(
-            b"\r\nPermission denied, please try again.\r\n"
-            b"wujian@1.2.3.4's password: ")
-        await asyncio.sleep(0)
-        assert c._nested_pw_attempts == 2, "重讨上升沿必须复现"
-        assert not any(m.type == "ask_password" for m in msgs)
-        assert c._pw_verifying   # 重讨在场：验证窗口继续 hold 输入
-    try:
-        asyncio.run(main())
-    finally:
-        cmod.load_password = orig
-
-
-def test_autofill_hits_default_port_alias_key():
-    """档案流记住的密码落在 ``user@host:22`` 键：嵌套 ssh 无 -p（port=None）
-    必须别名命中——否则「档案登录成功过、嵌套 ssh 仍弹窗重讨」（真机根因）。"""
-    sent: list[bytes] = []
-    msgs: list = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _pw_core(_Session())
-
-    async def _emit(m):
-        msgs.append(m)
-    c.emit_msg = _emit
-    seen: list = []
-    orig = cmod.load_password
-
-    def _fake_load(host, user, port):
-        seen.append((host, user, port))
-        return "savedpw" if port == 22 else None
-    cmod.load_password = _fake_load
-
-    async def main():
-        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
-        await asyncio.sleep(0)
-        assert sent == [b"savedpw\r"]          # 别名命中：自动填充而非弹窗
-        assert not any(m.type == "ask_password" for m in msgs)
-    try:
-        asyncio.run(main())
-    finally:
-        cmod.load_password = orig
-    assert seen[:2] == [("1.2.3.4", "wujian", None), ("1.2.3.4", "wujian", 22)]
-
-
-def test_first_hop_load_password_alias_matches_nested():
-    """首跳（_connect 的 stored_pw）与嵌套共用 load_password_alias：
-    同一密码落在 None 或 22 任一键上，另一侧读取也命中（P0-1——旧首跳
-    _connect 直查单键，档案流存 :22、连接解析 None 时永远 miss，首跳
-    每次重讨密码）。"""
-    orig = cmod.load_password
-
-    def _fake(host, user, port):
-        return "pw-at-22" if port == 22 else None
-
-    cmod.load_password = _fake
-    try:
-        assert cmod.load_password_alias("h", "u", None) == "pw-at-22"
-        assert cmod.load_password_alias("h", "u", 22) == "pw-at-22"
-    finally:
-        cmod.load_password = orig
-
-    def _fake2(host, user, port):
-        return "pw-at-none" if port is None else None
-
-    cmod.load_password = _fake2
-    try:
-        assert cmod.load_password_alias("h", "u", 22) == "pw-at-none"
-        assert cmod.load_password_alias("h", "u", None) == "pw-at-none"
-    finally:
-        cmod.load_password = orig
-
-
-def test_no_modal_on_prompt_cycle():
-    """无凭据的密码提示符全程不弹模态、不代关（真实终端语义：提示符已在
-    终端里，用户手输）。旧实现弹窗代答、手输消费提示符后再防抖代关——
-    表现为弹框一闪而过（真机 2026-10-08）。"""
-    msgs: list = []
-
-    class _Session:
-        async def send_raw(self, data):
-            pass
-
-    c = _pw_core(_Session())
-
-    async def _emit(m):
-        msgs.append(m)
-    c.emit_msg = _emit
-    orig = cmod.load_password
-    cmod.load_password = lambda host, user, port: None
-    wait = cmod._PW_MODAL_DISMISS + 0.15
-
-    async def main():
-        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
-        await asyncio.sleep(0)
-        # 防抖窗内重讨
-        c.auth._detect_password_prompt(b"denied\r\n")
-        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
-        await asyncio.sleep(wait)
-        # 终端手输消费提示符：登录横幅
-        c.auth._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
-                                  b"[wujian@host ~]$ ")
-        await asyncio.sleep(wait)
-        assert not any(m.type == "ask_password" for m in msgs)
-        assert not any(m.type == "ask_password_dismiss" for m in msgs)
-        assert not c._pw_modal_open
-    try:
-        asyncio.run(main())
-    finally:
-        cmod.load_password = orig
-
-
-def test_input_held_during_verify_and_flushed_after_login():
-    """验证窗口（密码已提交、auth 结果未到）hold 全部前端输入；重讨继续
-    hold；登录成功输出后按原序释放（真机：模态刚关抢跑的 sudo su -/cd /tmp
-    落进 ssh 输入队列被当下一条密码吃掉）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _pw_core(_Session())
-    wait = cmod._PW_HOLD_RELEASE + 0.15
-
-    async def main():
-        await c.auth._on_nested_password("pw1", False)
-        await c._on_keys(b"sudo su -\r")
-        await c._on_keys(b"cd /tmp\r")
-        assert sent == [b"pw1\r"]            # 抢跑按键被 hold
-        # deny+prompt 分两块到（合包拆开）：防抖释放必须被重讨取消
-        c.auth._detect_password_prompt(b"Permission denied, please try again.\r\n")
-        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
-        await asyncio.sleep(wait)
-        assert sent == [b"pw1\r"]
-        await c.auth._on_nested_password("pw2", False)
-        c.auth._detect_password_prompt(
-            b"\r\nLast login: Tue Oct  6\r\n[wujian@host ~]$ ")
-        await asyncio.sleep(wait)
-        assert sent == [b"pw1\r", b"pw2\r", b"sudo su -\r", b"cd /tmp\r"]
-    asyncio.run(main())
-
-
-def test_held_nl_replay_sends_full_line():
-    """验证窗口 hold 的自然语言行：字符当时不在 shell buffer，回放走健康
-    路径必须补发整行+回车（只补 \\r 会提交空行）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _pw_core(_Session())
-
-    async def main():
-        await c.auth._on_nested_password("pw1", False)
-        await c.ai._on_frontend_line("帮我看下当前目录有什么文件", False)
-        assert sent == [b"pw1\r"]            # 整行被 hold，未透传
-        c.auth._detect_password_prompt(b"\r\nLast login: x\r\n[wujian@host ~]$ ")
-        await asyncio.sleep(cmod._PW_HOLD_RELEASE + 0.15)
-        assert sent[-1] == "帮我看下当前目录有什么文件\r".encode()
-        assert c._hook_report_pending == "帮我看下当前目录有什么文件"
-        c._hook_report_pending = None   # 兜底任务醒来即退
-    asyncio.run(main())
-
-
-def test_modal_cancel_ends_verify_window():
-    """嵌套密码模态取消/点遮罩：改终端手输，立即退出验证窗口（否则手输
-    密码被 hold 到超时）；已 hold 的抢跑输入不丢，auth 结束后仍释放。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _pw_core(_Session())
-
-    async def main():
-        await c.auth._on_nested_password("pw1", False)
-        await c._on_keys(b"x")                      # 抢跑按键被 hold
-        await c.feed_msg(cmod.ClientMsg(
-            type="auth", auth_kind="nested_password_cancel", text=""))
-        assert not c._pw_verifying
-        await c._on_keys(b"y")                      # 手输密码直通
-        assert sent == [b"pw1\r", b"y"]
-        c.auth._detect_password_prompt(b"\r\nLast login: x\r\n$ ")
-        await asyncio.sleep(cmod._PW_HOLD_RELEASE + 0.15)
-        assert sent == [b"pw1\r", b"y", b"x"]
-    asyncio.run(main())
-
-
-# --- 6. 手输密码记忆询问（P1-3 sudo/su 专用键；P1-4 嵌套 ssh 键）---
-
-def _remember_core(session, *, open_cmds, target_host="172.25.104.182"):
-    c = _pw_core(session)
-    c._open_cmds = dict(open_cmds)
-    c._target_host = target_host
-    msgs: list = []
-    stored: list = []
-
-    async def _emit(m):
-        msgs.append(m)
-
-    c.emit_msg = _emit
-    return c, msgs, stored
-
-
-def _patch_pw_io(monkeypatch, stored, *, load=None):
-    monkeypatch.setattr(cmod, "load_password",
-                        load or (lambda h, u, p: None))
-    monkeypatch.setattr(
-        cmod, "store_password",
-        lambda h, u, p, pw: stored.append((h, u, p, pw)) or True)
-
-
-def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
-    """P1-3：sudo/su 类无主机提示符——手输 → 验证成功 → 询问「记住」→
-    同意后以 sudo@<最近 ssh 帧主机> 专用键落库（绝不与 ssh 登录凭据
-    user@host 混键）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        # 落键 = sudo@<最近 ssh 帧目标>（sudo 就跑在那台机上），非会话
-        # 目标主机（那是跳板），更不是 ssh 键 pe@…
-        assert c._pw_capture_key == ("172.25.105.150", "sudo", None)
-        await c._on_keys(b"s3cret\r")
-        assert sent == [b"s3cret\r"]            # 手输照常直达远端
-        assert c._pw_verifying                  # 回车即进验证窗
-        # auth 结果（提权成功 → root 提示符）
-        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        asks = [m for m in msgs if m.type == "ask_remember"]
-        assert len(asks) == 1, "验证成功后应发出一次记忆询问"
-        assert "sudo@172.25.105.150" in asks[0].text
-        await c.auth._finish_remember(True)
-        assert stored == [("172.25.105.150", "sudo", None, "s3cret")]
-    asyncio.run(main())
-
-
-def test_sudo_remember_key_falls_back_to_session_host(monkeypatch):
-    """无 ssh 帧（sudo 直接跑在会话目标机上）：sudo 键落会话目标主机。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={2: "sudo su -"}, target_host="10.0.0.9")
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        assert c._pw_capture_key == ("10.0.0.9", "sudo", None)
-    asyncio.run(main())
-
-
-def test_sudo_wrong_password_never_offers_or_stores(monkeypatch):
-    """错密（deny 指纹）不进库、不询问；重讨后再手输成功才问（只落本次
-    验证通过的密码）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        await c._on_keys(b"wrong\r")
-        # 错密：Sorry + 重讨（合包到达）——验证窗不收束，候选随重讨作废
-        c.auth._detect_password_prompt(
-            b"\r\nSorry, try again.\r\n[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        assert c._pw_remember_candidate is None
-        await c._on_keys(b"right\r")
-        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        asks = [m for m in msgs if m.type == "ask_remember"]
-        assert len(asks) == 1, "只有验证通过的那次才询问"
-        await c.auth._finish_remember(True)
-        assert stored == [("172.25.105.150", "sudo", None, "right")]
-    asyncio.run(main())
-
-
-def test_sudo_remember_decline_stores_nothing(monkeypatch):
-    """拒绝「不记住」：不写库（维持每次手输现状）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        await c._on_keys(b"s3cret\r")
-        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        assert any(m.type == "ask_remember" for m in msgs)
-        await c.auth._finish_remember(False)
-        assert stored == []
-    asyncio.run(main())
-
-
-def test_sudo_verify_timeout_never_offers(monkeypatch):
-    """验证窗超时（未见 auth 结果）不算验证通过：不询问不落库。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        await c._on_keys(b"s3cret\r")
-        await asyncio.sleep(cmod._PW_VERIFY_TIMEOUT + 0.1)   # 强制到期
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        assert not any(m.type == "ask_remember" for m in msgs)
-        assert stored == []
-    asyncio.run(main())
-
-
-def test_sudo_autofill_stored_key_no_ask(monkeypatch):
-    """凭据库命中自动填充：密码本来就在库里，验证成功后不再询问。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
-    _patch_pw_io(monkeypatch, stored,
-                 load=lambda h, u, p: "cached" if (h, u, p) ==
-                 ("172.25.105.150", "sudo", None) else None)
-
-    async def main():
-        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
-        await asyncio.sleep(0)
-        assert sent == [b"cached\r"]
-        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        assert not any(m.type == "ask_remember" for m in msgs)
-        assert stored == []
-    asyncio.run(main())
-
-
-def test_nested_ssh_typed_password_offers_remember_prompt_key(monkeypatch):
-    """P1-4：嵌套 ssh 无凭据、用户在终端手输 → 验证成功（登录横幅）→
-    询问「记住」→ 同意后按 _nested_pw_ctx 键（提示符 user@host）落库，
-    替代已停用的模态代答记忆。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150"})
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"pe@172.25.105.150's password: ")
-        await asyncio.sleep(0)
-        assert c._pw_capture_key == ("172.25.105.150", "pe", None)
-        await c._on_keys(b"s3cret\r")
-        assert sent == [b"s3cret\r"]
-        c.auth._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
-                                  b"[pe@inner ~]$ ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        asks = [m for m in msgs if m.type == "ask_remember"]
-        assert len(asks) == 1
-        assert "pe@172.25.105.150" in asks[0].text
-        await c.auth._finish_remember(True)
-        assert stored == [("172.25.105.150", "pe", None, "s3cret")]
-    asyncio.run(main())
-
-
-def test_nested_ssh_remember_decline_stores_nothing(monkeypatch):
-    """P1-4 拒绝「不记住」：不写库（下次仍手输）。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150"})
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"pe@172.25.105.150's password: ")
-        await asyncio.sleep(0)
-        await c._on_keys(b"s3cret\r")
-        c.auth._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        assert any(m.type == "ask_remember" for m in msgs)
-        await c.auth._finish_remember(False)
-        assert stored == []
-    asyncio.run(main())
-
-
-def test_nested_ssh_unparseable_key_never_asks(monkeypatch):
-    """「记住」没有可靠的键（提示符无主机、帧目标解析不出且无会话主机）
-    ：不捕获不询问——宁缺勿错键。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh -v"}, target_host="")
-    _patch_pw_io(monkeypatch, stored)
-
-    async def main():
-        c.auth._detect_password_prompt(b"Password: ")
-        await asyncio.sleep(0)
-        assert c._pw_capture_key is None
-        await c._on_keys(b"s3cret\r")
-        c.auth._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
-        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
-        assert not any(m.type == "ask_remember" for m in msgs)
-        assert stored == []
-    asyncio.run(main())
 
 
 def test_inner_ssh_prompt_live_relaxes_latch():
@@ -705,242 +144,39 @@ def test_task_start_precedes_agent_build():
     assert order == ["task_start", "agent_build", "error"]
 
 
-# --- 8. 嵌套 shell 被 TMOUT 收走：hook 陈旧假阳性 -------------------------
-#
-# 真机报障（2026-10-07）：跳板机 → 远程机 xiaojian → sudo su - root；root 空闲
-# TMOUT 自动登出掉回 xiaojian；再 sudo su - 回到 root 后输入自然语言失效——
-# 整行被 root 的裸 bash 当命令执行（-bash: 执行: command not found）。
-#
-# 根因：_hook_ok() 陈旧假阳性。带 hook 的那个 shell（root#1）已经死了，而
-#   ① bash 退出不发任何 OSC 标记，应用无从得知；
-#   ② _hook_gone 只由 _ensure_integrated 探测失败置位；
-#   ③ 它唯一的复位路径「_open_cmds 清空」在跳板机拓扑下永不发生（外层
-#      `ssh 跳板机` 帧整段会话开着）；
-#   ④ _inner_ssh_prompt_live() 拿死壳留下的 _last_mark_at 当活凭据。
-# 于是 submit 走健康路径只补一个 \r，把自然语言整行送进裸壳执行。
-
-_HOOK_LIVENESS = getattr(cmod, "_HOOK_LIVENESS", 1.0)
+def test_tracker_constructs_standalone():
+    t = NestedSshTracker(FakeCore())
+    assert t is not None
 
 
-def _stale_core(session) -> PipelineCore:
-    """root#1（集成壳，inst 100000）刚被 TMOUT 收走后的状态：_hook_gone 仍
-    False、_last_mark_at 仍是死壳留下的时间戳、外层 `ssh 跳板机` 帧开着。"""
-    c = _bare_core(
-        session=session, _exec_future=None, _closed=False, _session_dead=False,
-        _pw_tail=bytearray(), _pw_prompt_seen=False, _pw_verifying=False,
-        _pw_verify_at=0.0, _pw_hold=[], _pw_hold_timer=None, _pw_at_end=False,
-        _pw_modal_open=False, _pw_dismiss_timer=None,
-        _nested_pw_attempts=0, _nested_pw_ctx=None,
-        _pw_capture_key=None, _pw_typed=bytearray(),
-        _pw_remember_candidate=None, _pw_remember_pending=None,
-        _target_host="101.33.233.232",
-        _open_cmds={1: "ssh xiaojian@101.33.233.232"}, _open_cmd_at={1: 10.0},
-        _exec_stack=[], _last_mark_at=11.0, _interactive=True,
-        _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
-        _intr_swallow_until=0.0, _intr_pending=b"",
-        _suppress_live=False, _suppressed_echo=False, _curtain=False,
-        _curtain_parts=[], _curtain_at=0.0, _ai_task=None,
-        _probe_buf=None, _hidden_exec=False, _user_out=bytearray(),
-        _last_live_at=0.0, _cur_prompt="",
-        _hook_stale=False, _hook_watch=None, _hook_watch_text=False,
-        _display="agent",
-        _ev_stream=asyncio.Event(), _ev_prompt=asyncio.Event())
-
-    async def _emit_bytes(data):
-        pass
-    c.emit_bytes = _emit_bytes
-    return c
+def test_parse_ssh_cmd_target_host_user_port():
+    line = "ssh wujian@1.2.3.4 -p 2222"
+    host, user, port = NestedSshTracker.parse_ssh_cmd_target(line)
+    assert (host, user, port) == ("1.2.3.4", "wujian", 2222)
 
 
-def test_hook_stale_after_enter_yields_text_without_markers():
-    """补发回车后「只有文本、没有任何 OSC 标记」= 承接回车的不是集成壳。
-
-    root#2 是裸 bash：`sudo su -` 的回车与它的提示符全是纯文本。看门狗到点
-    必须把 hook 判为不在位，让下一条自然语言走降级（探测 + 重注入），而不是
-    健康路径的裸 \r —— 裸 \r 会把整行自然语言交给 root 的 shell 执行。
-
-    触发点必须是**按键路径**：命令行回车不经 _on_frontend_line（前端只对自然
-    语言发 submit），真机 [otdbg] 里 `sudo su -` 只有 keys= b'\r'。用 submit
-    驱动会绕过唯一的真实武装点——测试绿、浏览器里照旧复现。"""
-    sent: list[bytes] = []
-
-    class _Session:
-        async def send_raw(self, data):
-            sent.append(data)
-
-    c = _stale_core(_Session())
-
-    async def main():
-        # 用户在 xiaojian 逐字敲 `sudo su -` 再回车（纯按键透传，无 submit）
-        for ch in (b"s", b"u", b"d", b"o", b" ", b"s", b"u", b" ", b"-"):
-            await c._on_keys(ch)
-        await c._on_keys(b"\r")
-        assert sent[-1] == b"\r"
-        # root#1 已死、root#2 是裸壳：sudo 提示与新提示符全是纯文本，零标记
-        await c.exec._on_stream_event(("live", "[sudo] password for xiaojian: "))
-        await c.exec._on_stream_event(("live", "root@host:~# "))
-        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert not c.hook._hook_ok(), "死壳留下的 _last_mark_at 不得再当 hook 活凭据"
-
-        # 下一条自然语言必须走降级，不得把整行留给裸壳执行
-        sent.clear()
-        started: list[str] = []
-
-        async def _no_hook():
-            return False
-        c.hook._ensure_integrated = _no_hook
-
-        async def _ai(line, hooked=False):
-            started.append(line)
-        c.ai._on_ai_line = _ai
-
-        await c.ai._on_frontend_line("执行 echo MARK-AI-TWO 并把输出原样告诉我",
-                                  False)
-        assert started == ["执行 echo MARK-AI-TWO 并把输出原样告诉我"]
-        assert b"\r" not in sent, "健康路径的裸回车会把自然语言当命令执行"
-
-    asyncio.run(main())
+def test_parse_ssh_cmd_target_non_ssh_is_none():
+    assert NestedSshTracker.parse_ssh_cmd_target("sudo systemctl restart x") is None
 
 
-def test_hook_stale_latch_self_heals_on_marker():
-    """外层集成壳重新画出提示符（OSC 标记到达）→ 陈旧判定即撤销。
-
-    正常拓扑里 root#1 退出后落回的是**带 hook 的** xiaojian：它的提示符标记
-    一到，健康路径必须立刻恢复，否则每次自然语言都白付一次探测+分片注入。"""
-    class _Session:
-        async def send_raw(self, data):
-            pass
-
-    c = _stale_core(_Session())
-
-    async def main():
-        await c._on_keys(b"\r")
-        await c.exec._on_stream_event(("live", "root@host:~# "))
-        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert not c.hook._hook_ok()
-        await c.exec._on_stream_event(("prompt", "[xiaojian@host ~]$ "))
-        assert c.hook._hook_ok(), "标记一到即自愈，健康路径恢复"
-        await c._on_keys(b"\r")
-        await c.exec._on_stream_event(("prompt_start", 100000))
-        assert c.hook._hook_ok(), "prompt_start 同样是活凭据"
-
-    asyncio.run(main())
+def test_parse_ssh_cmd_target_scp_remote_path():
+    line = "scp dist.tar.gz wujian@1.2.3.4:/tmp/"
+    host, user, port = NestedSshTracker.parse_ssh_cmd_target(line)
+    assert (host, user, port) == ("1.2.3.4", "wujian", None)
 
 
-def test_hook_watch_disarmed_by_marker_before_deadline():
-    """健康壳里回车后标记立刻到（PROMPT_COMMAND 发 133;D + 133;A/B）：
-    看门狗必须被撤销，纯文本输出不得误判陈旧。"""
-    class _Session:
-        async def send_raw(self, data):
-            pass
-
-    c = _stale_core(_Session())
-
-    async def main():
-        await c._on_keys(b"\r")
-        await c.exec._on_stream_event(("live", "total 8\r\n"))
-        await c.exec._on_stream_event(("prompt", "[root@host ~]# "))
-        await c.exec._on_stream_event(("live", "drwxr-xr-x\r\n"))
-        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert c.hook._hook_ok()
-
-    asyncio.run(main())
+def test_nested_target_reads_innermost_open_cmds():
+    core = FakeCore()
+    core._open_cmds = {1: "ssh jump@10.0.0.1", 2: "sudo su -"}
+    t = NestedSshTracker(core)
+    # 最内层是 sudo（非 ssh 族）→ 不解析，绝不兜底到外层帧
+    assert t.nested_ssh_target() == (None, None, None)
 
 
-def test_hook_watch_not_armed_at_password_prompt():
-    """密码位上的回车不发标记是常态：sudo/ssh 的读取器在读密码，不是集成壳在
-    跑 PROMPT_COMMAND。据此判 hook 陈旧 = 每次嵌套登录都把健康路径打断一次。"""
-    class _Session:
-        async def send_raw(self, data):
-            pass
-
-    c = _stale_core(_Session())
-    c._pw_at_end = True          # 尾窗正停在 `[sudo] password for xiaojian: `
-
-    async def main():
-        await c._on_keys(b"\r")
-        await c.exec._on_stream_event(("live", "\r\nroot@host:~# "))
-        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert c.hook._hook_ok(), "密码回车不得触发陈旧判定"
-
-    asyncio.run(main())
-
-
-def test_hook_watch_not_armed_while_tool_command_running():
-    """工具命令在途的回车同理：那段的标记由 agent 帧负责，不看用户回车。"""
-    class _Session:
-        async def send_raw(self, data):
-            pass
-
-    c = _stale_core(_Session())
-    c._exec_future = object()    # 只作「工具命令在途」标志用，不驱动
-
-    async def main():
-        await c._on_keys(b"\r")
-        await c.exec._on_stream_event(("live", "drwxr-xr-x\r\n"))
-        await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert c.hook._hook_ok(), "工具命令在途不得据用户回车判陈旧"
-
-    asyncio.run(main())
-
-
-def test_probe_buf_collects_live_text_without_killing_pump():
-    """探测窗口里的 live 文本必须落进 _probe_buf，而不是抛 TypeError 打死泵。
-
-    泵一死整个会话就哑了（无回显、无输出、无 closed 帧），且因为任务引用被
-    self._pump 持有，asyncio 连「未取回异常」都不会打印——真机表现为「终端
-    彻底不再响应」，查无实据。"""
-    class _Session:
-        async def send_raw(self, data):
-            pass
-
-    c = _stale_core(_Session())
-    c._probe_buf = bytearray()          # _probe_shell_kind 正在收集
-
-    async def main():
-        # 裸壳回显探测行 + 它的真实输出，全是 live 纯文本
-        await c.exec._on_stream_event(
-            ("live", ' _ot_inj=""; v=""; ... echo "__OTPROBE__${v:-none}|$d"\r\n'))
-        await c.exec._on_stream_event(("live", "__OTPROBE__bash5.1.8(1)-release|-d\r\n"))
-        got = parse_probe(c._probe_buf.decode("utf-8", "replace"))
-        assert got == ("bash", "-d"), "探测输出没被收全：%r" % (got,)
-
-    asyncio.run(main())
-
-
-
-
-# --- 命令集门禁：壳身份基线 -------------------------------------------------
-
-def test_cs_prompt_identity_falls_back_to_router_prompt():
-    """尾窗全空时退回路由捕获的提示符——否则基线永远种不下。
-
-    真机 2026-10-08：命令集第一条命令时尾窗还是空的（连接后没有任何泵输出
-    进尾窗），只认尾窗 → ident None → 基线不记账；第二条命令时 base is None
-    → 换壳判定被短路（changed=False）→ sudo su - 打进裸壳，回显白色不青。
-    """
-    c = _bare_core(_cs_tail=None, _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c.cs._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu"
-    c2 = _bare_core(_cs_tail=bytearray(), _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c2.cs._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu", "空尾窗同样要退回"
-
-
-def test_cs_prompt_identity_prefers_tail_over_router_prompt():
-    """尾窗有内容就以末个非空行为准（比 _cur_prompt 新鲜）。"""
-    tail = ("[xiaojian@VM-0-11-centos ~]$ " + chr(13) + chr(10)).encode()
-    c = _bare_core(_cs_tail=bytearray(tail),
-                   _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c.cs._cs_prompt_identity() == "xiaojian@VM-0-11-centos"
-
-
-def test_cs_prompt_identity_no_fallback_when_tail_has_output():
-    """末个非空行是输出文本（Last login）时返回 None，不退回 _cur_prompt。
-
-    _cur_prompt 只在装了 hook 的壳里更新：刚跳进裸壳时它还是外层壳的身份，
-    拿它记账会把换壳判成同壳。None 不改基线，下一次门禁仍判得出换壳。
-    """
-    tail = ("[ubuntu@VM-0-5-ubuntu ~]$ " + chr(13) + chr(10)
-            + "Last login: Thu Oct  8 23:12:52 2026" + chr(13) + chr(10)).encode()
-    c = _bare_core(_cs_tail=bytearray(tail),
-                   _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c.cs._cs_prompt_identity() is None
+def test_ssh_frame_host_skips_non_ssh_frames():
+    core = FakeCore()
+    core._open_cmds = {1: "ssh wujian@1.2.3.4", 2: "sudo su -"}
+    t = NestedSshTracker(core)
+    # sudo 凭据键跳过非 ssh 帧向外找最近 ssh 帧（P1-3）
+    assert t.ssh_frame_host() == "1.2.3.4"
+    assert t.sudo_pw_key() == ("1.2.3.4", "sudo", None)
