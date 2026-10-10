@@ -11,21 +11,26 @@ from __future__ import annotations
 
 import sys
 
-from .. import core as _core
-from ..core import (  # noqa: F401 —— 再导出：测试 monkeypatch 命名空间
-    PipelineCore, ServerMsg, ClientMsg, SUBMIT_FALLBACK_DELAY, _PROBE_TIMEOUT,
+from .. import core as _core  # noqa: F401 —— _PatchBridge 转发目标
+# Task 9：改组件模块直连（不再经 core 包再导出）。测试 monkeypatch 打在
+# wmod 的名字仍经 _PatchBridge → core._CoreBridge 二跳落到 pipeline 模块
+# 字典，实现经 _impl.同名/模块全局读取——桥链语义不变。
+from ..core.cmdset_runner import (  # noqa: F401 —— 测试 monkeypatch 命名空间
     CMDSET_ECHO_TIMEOUT, CMDSET_QUIET, CMDSET_PROMPT_TIMEOUT,
-    CMDSET_RESUME_QUIET, build_agent, load_password, store_password,
-    open_session, probe_profile,
+    CMDSET_RESUME_QUIET,
 )
-# 阶段一验收硬线补充：tests/test_web_worker.py 还从本模块直名 import 这三个
-# 名字（L340 _WebPresenter、L699/722/757 InteractiveRunner、L740
-# CommandResult），实现搬去 core 后原样再导出，测试保持一行不改。
-# _WebPresenter 为 CorePresenter 的旧名别名（core 内已按 plan Step 2 更名）。
-from ..core import (  # noqa: F401
-    CorePresenter as _WebPresenter, InteractiveRunner, CommandResult,
-    CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG,
+from ..core.messages import (  # noqa: F401
+    CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG, ClientMsg, CommandResult,
+    InteractiveRunner, ServerMsg,
 )
+# _WebPresenter 为 CorePresenter 的旧名别名（tests/test_web_worker.py 直名
+# import L340；InteractiveRunner/CommandResult 直名 import L699/722/740/757）。
+from ..core.pipeline import (  # noqa: F401
+    CorePresenter as _WebPresenter, PipelineCore, SUBMIT_FALLBACK_DELAY,
+    _PROBE_TIMEOUT, build_agent, load_password, probe_profile,
+    store_password,
+)
+from ..connections import open_session  # noqa: F401
 from .protocol import encode_server
 
 

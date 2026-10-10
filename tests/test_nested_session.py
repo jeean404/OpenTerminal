@@ -93,12 +93,12 @@ def test_pw_prompt_host_extracts_from_prompt():
     """凭据归属优先取提示符自带的 user@host（OpenSSH 新旧两种格式）。"""
     c = _bare_core(
         _pw_tail=bytearray(b"(wujian@10.0.0.20) Password: "))
-    assert c._pw_prompt_host() == ("10.0.0.20", "wujian")
+    assert c.auth._pw_prompt_host() == ("10.0.0.20", "wujian")
     c = _bare_core(
         _pw_tail=bytearray(b"wujian@10.0.0.20's password: "))
-    assert c._pw_prompt_host() == ("10.0.0.20", "wujian")
+    assert c.auth._pw_prompt_host() == ("10.0.0.20", "wujian")
     c = _bare_core(_pw_tail=bytearray(b"[sudo] password for wujian: "))
-    assert c._pw_prompt_host() == (None, None)
+    assert c.auth._pw_prompt_host() == (None, None)
 
 
 def test_frontend_line_passthrough_on_password_prompt():
@@ -116,7 +116,7 @@ def test_frontend_line_passthrough_on_password_prompt():
                    _pw_capture_key=None, _pw_typed=bytearray(),
                    _pw_remember_candidate=None,
                    _open_cmds={})
-    asyncio.run(c._on_frontend_line("帮我看下当前目录有什么文件", False))
+    asyncio.run(c.ai._on_frontend_line("帮我看下当前目录有什么文件", False))
     assert sent == [b"\r"]
 
 
@@ -133,28 +133,28 @@ def _armed_core() -> PipelineCore:
 def test_strip_intr_echo_exact_two_bytes():
     """bash 在半行尾回显 "^C"：恰好吞这两字节，换行与提示符照常透传。"""
     c = _armed_core()
-    assert c._strip_intr_echo("查看backend资源^C\r\n# ".encode()) == \
+    assert c.exec._strip_intr_echo("查看backend资源^C\r\n# ".encode()) == \
         "查看backend资源\r\n# ".encode()
     # 吞完即解除武装：后续字面 ^C 不再吞
     assert c._intr_swallow_until == 0.0
-    assert c._strip_intr_echo(b"^C") == b"^C"
+    assert c.exec._strip_intr_echo(b"^C") == b"^C"
 
 
 def test_strip_intr_echo_cross_chunk_caret():
     """"^" 与 "C" 分属两块：悬置跨块匹配；非 C 开头原样放回不丢字面 ^。"""
     c = _armed_core()
-    assert c._strip_intr_echo(b"abc^") == b"abc"
-    assert c._strip_intr_echo(b"C\r\n") == b"\r\n"
+    assert c.exec._strip_intr_echo(b"abc^") == b"abc"
+    assert c.exec._strip_intr_echo(b"C\r\n") == b"\r\n"
     c = _armed_core()
-    assert c._strip_intr_echo(b"abc^") == b"abc"
-    assert c._strip_intr_echo(b"x\r\n") == b"^x\r\n"   # 不是回显：放回
+    assert c.exec._strip_intr_echo(b"abc^") == b"abc"
+    assert c.exec._strip_intr_echo(b"x\r\n") == b"^x\r\n"   # 不是回显：放回
 
 
 def test_strip_intr_echo_expiry_releases_pending():
     """窗口过期（zsh 不回显 ^C）：悬置的块尾 ^ 原样补放，零丢字节。"""
     c = _bare_core(_intr_swallow_until=_time.monotonic() - 1.0,
                    _intr_pending=b"^")
-    assert c._strip_intr_echo(b"next") == b"^next"
+    assert c.exec._strip_intr_echo(b"next") == b"^next"
     assert c._intr_swallow_until == 0.0
 
 
@@ -203,13 +203,13 @@ def test_password_reprompt_retriggers_rising_edge():
     cmod.load_password = lambda host, user, port: None
 
     async def main():
-        c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
+        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
         assert c._nested_pw_attempts == 1
         assert not any(m.type == "ask_password" for m in msgs)
-        await c._on_nested_password("wrongpw", False)
+        await c.auth._on_nested_password("wrongpw", False)
         assert c._pw_verifying and not c._pw_prompt_seen
-        c._detect_password_prompt(
+        c.auth._detect_password_prompt(
             b"\r\nPermission denied, please try again.\r\n"
             b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
@@ -246,7 +246,7 @@ def test_autofill_hits_default_port_alias_key():
     cmod.load_password = _fake_load
 
     async def main():
-        c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
+        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
         assert sent == [b"savedpw\r"]          # 别名命中：自动填充而非弹窗
         assert not any(m.type == "ask_password" for m in msgs)
@@ -305,14 +305,14 @@ def test_no_modal_on_prompt_cycle():
     wait = cmod._PW_MODAL_DISMISS + 0.15
 
     async def main():
-        c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
+        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(0)
         # 防抖窗内重讨
-        c._detect_password_prompt(b"denied\r\n")
-        c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
+        c.auth._detect_password_prompt(b"denied\r\n")
+        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(wait)
         # 终端手输消费提示符：登录横幅
-        c._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
+        c.auth._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
                                   b"[wujian@host ~]$ ")
         await asyncio.sleep(wait)
         assert not any(m.type == "ask_password" for m in msgs)
@@ -338,17 +338,17 @@ def test_input_held_during_verify_and_flushed_after_login():
     wait = cmod._PW_HOLD_RELEASE + 0.15
 
     async def main():
-        await c._on_nested_password("pw1", False)
+        await c.auth._on_nested_password("pw1", False)
         await c._on_keys(b"sudo su -\r")
         await c._on_keys(b"cd /tmp\r")
         assert sent == [b"pw1\r"]            # 抢跑按键被 hold
         # deny+prompt 分两块到（合包拆开）：防抖释放必须被重讨取消
-        c._detect_password_prompt(b"Permission denied, please try again.\r\n")
-        c._detect_password_prompt(b"wujian@1.2.3.4's password: ")
+        c.auth._detect_password_prompt(b"Permission denied, please try again.\r\n")
+        c.auth._detect_password_prompt(b"wujian@1.2.3.4's password: ")
         await asyncio.sleep(wait)
         assert sent == [b"pw1\r"]
-        await c._on_nested_password("pw2", False)
-        c._detect_password_prompt(
+        await c.auth._on_nested_password("pw2", False)
+        c.auth._detect_password_prompt(
             b"\r\nLast login: Tue Oct  6\r\n[wujian@host ~]$ ")
         await asyncio.sleep(wait)
         assert sent == [b"pw1\r", b"pw2\r", b"sudo su -\r", b"cd /tmp\r"]
@@ -367,10 +367,10 @@ def test_held_nl_replay_sends_full_line():
     c = _pw_core(_Session())
 
     async def main():
-        await c._on_nested_password("pw1", False)
-        await c._on_frontend_line("帮我看下当前目录有什么文件", False)
+        await c.auth._on_nested_password("pw1", False)
+        await c.ai._on_frontend_line("帮我看下当前目录有什么文件", False)
         assert sent == [b"pw1\r"]            # 整行被 hold，未透传
-        c._detect_password_prompt(b"\r\nLast login: x\r\n[wujian@host ~]$ ")
+        c.auth._detect_password_prompt(b"\r\nLast login: x\r\n[wujian@host ~]$ ")
         await asyncio.sleep(cmod._PW_HOLD_RELEASE + 0.15)
         assert sent[-1] == "帮我看下当前目录有什么文件\r".encode()
         assert c._hook_report_pending == "帮我看下当前目录有什么文件"
@@ -390,14 +390,14 @@ def test_modal_cancel_ends_verify_window():
     c = _pw_core(_Session())
 
     async def main():
-        await c._on_nested_password("pw1", False)
+        await c.auth._on_nested_password("pw1", False)
         await c._on_keys(b"x")                      # 抢跑按键被 hold
         await c.feed_msg(cmod.ClientMsg(
             type="auth", auth_kind="nested_password_cancel", text=""))
         assert not c._pw_verifying
         await c._on_keys(b"y")                      # 手输密码直通
         assert sent == [b"pw1\r", b"y"]
-        c._detect_password_prompt(b"\r\nLast login: x\r\n$ ")
+        c.auth._detect_password_prompt(b"\r\nLast login: x\r\n$ ")
         await asyncio.sleep(cmod._PW_HOLD_RELEASE + 0.15)
         assert sent == [b"pw1\r", b"y", b"x"]
     asyncio.run(main())
@@ -442,7 +442,7 @@ def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"[sudo] password for pe: ")
+        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
         await asyncio.sleep(0)
         # 落键 = sudo@<最近 ssh 帧目标>（sudo 就跑在那台机上），非会话
         # 目标主机（那是跳板），更不是 ssh 键 pe@…
@@ -451,12 +451,12 @@ def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
         assert sent == [b"s3cret\r"]            # 手输照常直达远端
         assert c._pw_verifying                  # 回车即进验证窗
         # auth 结果（提权成功 → root 提示符）
-        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         asks = [m for m in msgs if m.type == "ask_remember"]
         assert len(asks) == 1, "验证成功后应发出一次记忆询问"
         assert "sudo@172.25.105.150" in asks[0].text
-        await c._finish_remember(True)
+        await c.auth._finish_remember(True)
         assert stored == [("172.25.105.150", "sudo", None, "s3cret")]
     asyncio.run(main())
 
@@ -474,7 +474,7 @@ def test_sudo_remember_key_falls_back_to_session_host(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"[sudo] password for pe: ")
+        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
         await asyncio.sleep(0)
         assert c._pw_capture_key == ("10.0.0.9", "sudo", None)
     asyncio.run(main())
@@ -494,20 +494,20 @@ def test_sudo_wrong_password_never_offers_or_stores(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"[sudo] password for pe: ")
+        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
         await asyncio.sleep(0)
         await c._on_keys(b"wrong\r")
         # 错密：Sorry + 重讨（合包到达）——验证窗不收束，候选随重讨作废
-        c._detect_password_prompt(
+        c.auth._detect_password_prompt(
             b"\r\nSorry, try again.\r\n[sudo] password for pe: ")
         await asyncio.sleep(0)
         assert c._pw_remember_candidate is None
         await c._on_keys(b"right\r")
-        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         asks = [m for m in msgs if m.type == "ask_remember"]
         assert len(asks) == 1, "只有验证通过的那次才询问"
-        await c._finish_remember(True)
+        await c.auth._finish_remember(True)
         assert stored == [("172.25.105.150", "sudo", None, "right")]
     asyncio.run(main())
 
@@ -525,13 +525,13 @@ def test_sudo_remember_decline_stores_nothing(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"[sudo] password for pe: ")
+        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
         await asyncio.sleep(0)
         await c._on_keys(b"s3cret\r")
-        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         assert any(m.type == "ask_remember" for m in msgs)
-        await c._finish_remember(False)
+        await c.auth._finish_remember(False)
         assert stored == []
     asyncio.run(main())
 
@@ -549,7 +549,7 @@ def test_sudo_verify_timeout_never_offers(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"[sudo] password for pe: ")
+        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
         await asyncio.sleep(0)
         await c._on_keys(b"s3cret\r")
         await asyncio.sleep(cmod._PW_VERIFY_TIMEOUT + 0.1)   # 强制到期
@@ -574,10 +574,10 @@ def test_sudo_autofill_stored_key_no_ask(monkeypatch):
                  ("172.25.105.150", "sudo", None) else None)
 
     async def main():
-        c._detect_password_prompt(b"[sudo] password for pe: ")
+        c.auth._detect_password_prompt(b"[sudo] password for pe: ")
         await asyncio.sleep(0)
         assert sent == [b"cached\r"]
-        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        c.auth._detect_password_prompt(b"\r\n[root@inner ~]# ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         assert not any(m.type == "ask_remember" for m in msgs)
         assert stored == []
@@ -599,18 +599,18 @@ def test_nested_ssh_typed_password_offers_remember_prompt_key(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"pe@172.25.105.150's password: ")
+        c.auth._detect_password_prompt(b"pe@172.25.105.150's password: ")
         await asyncio.sleep(0)
         assert c._pw_capture_key == ("172.25.105.150", "pe", None)
         await c._on_keys(b"s3cret\r")
         assert sent == [b"s3cret\r"]
-        c._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
+        c.auth._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
                                   b"[pe@inner ~]$ ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         asks = [m for m in msgs if m.type == "ask_remember"]
         assert len(asks) == 1
         assert "pe@172.25.105.150" in asks[0].text
-        await c._finish_remember(True)
+        await c.auth._finish_remember(True)
         assert stored == [("172.25.105.150", "pe", None, "s3cret")]
     asyncio.run(main())
 
@@ -628,13 +628,13 @@ def test_nested_ssh_remember_decline_stores_nothing(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"pe@172.25.105.150's password: ")
+        c.auth._detect_password_prompt(b"pe@172.25.105.150's password: ")
         await asyncio.sleep(0)
         await c._on_keys(b"s3cret\r")
-        c._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
+        c.auth._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         assert any(m.type == "ask_remember" for m in msgs)
-        await c._finish_remember(False)
+        await c.auth._finish_remember(False)
         assert stored == []
     asyncio.run(main())
 
@@ -653,11 +653,11 @@ def test_nested_ssh_unparseable_key_never_asks(monkeypatch):
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c._detect_password_prompt(b"Password: ")
+        c.auth._detect_password_prompt(b"Password: ")
         await asyncio.sleep(0)
         assert c._pw_capture_key is None
         await c._on_keys(b"s3cret\r")
-        c._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
+        c.auth._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         assert not any(m.type == "ask_remember" for m in msgs)
         assert stored == []
@@ -701,7 +701,7 @@ def test_task_start_precedes_agent_build():
         raise RuntimeError("boom")
     c.ai._ensure_agent = _boom
 
-    asyncio.run(c._run_task("hi", hooked=True))
+    asyncio.run(c.ai._run_task("hi", hooked=True))
     assert order == ["task_start", "agent_build", "error"]
 
 
@@ -777,10 +777,10 @@ def test_hook_stale_after_enter_yields_text_without_markers():
         await c._on_keys(b"\r")
         assert sent[-1] == b"\r"
         # root#1 已死、root#2 是裸壳：sudo 提示与新提示符全是纯文本，零标记
-        await c._on_stream_event(("live", "[sudo] password for xiaojian: "))
-        await c._on_stream_event(("live", "root@host:~# "))
+        await c.exec._on_stream_event(("live", "[sudo] password for xiaojian: "))
+        await c.exec._on_stream_event(("live", "root@host:~# "))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert not c._hook_ok(), "死壳留下的 _last_mark_at 不得再当 hook 活凭据"
+        assert not c.hook._hook_ok(), "死壳留下的 _last_mark_at 不得再当 hook 活凭据"
 
         # 下一条自然语言必须走降级，不得把整行留给裸壳执行
         sent.clear()
@@ -794,7 +794,7 @@ def test_hook_stale_after_enter_yields_text_without_markers():
             started.append(line)
         c.ai._on_ai_line = _ai
 
-        await c._on_frontend_line("执行 echo MARK-AI-TWO 并把输出原样告诉我",
+        await c.ai._on_frontend_line("执行 echo MARK-AI-TWO 并把输出原样告诉我",
                                   False)
         assert started == ["执行 echo MARK-AI-TWO 并把输出原样告诉我"]
         assert b"\r" not in sent, "健康路径的裸回车会把自然语言当命令执行"
@@ -815,14 +815,14 @@ def test_hook_stale_latch_self_heals_on_marker():
 
     async def main():
         await c._on_keys(b"\r")
-        await c._on_stream_event(("live", "root@host:~# "))
+        await c.exec._on_stream_event(("live", "root@host:~# "))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert not c._hook_ok()
-        await c._on_stream_event(("prompt", "[xiaojian@host ~]$ "))
-        assert c._hook_ok(), "标记一到即自愈，健康路径恢复"
+        assert not c.hook._hook_ok()
+        await c.exec._on_stream_event(("prompt", "[xiaojian@host ~]$ "))
+        assert c.hook._hook_ok(), "标记一到即自愈，健康路径恢复"
         await c._on_keys(b"\r")
-        await c._on_stream_event(("prompt_start", 100000))
-        assert c._hook_ok(), "prompt_start 同样是活凭据"
+        await c.exec._on_stream_event(("prompt_start", 100000))
+        assert c.hook._hook_ok(), "prompt_start 同样是活凭据"
 
     asyncio.run(main())
 
@@ -838,11 +838,11 @@ def test_hook_watch_disarmed_by_marker_before_deadline():
 
     async def main():
         await c._on_keys(b"\r")
-        await c._on_stream_event(("live", "total 8\r\n"))
-        await c._on_stream_event(("prompt", "[root@host ~]# "))
-        await c._on_stream_event(("live", "drwxr-xr-x\r\n"))
+        await c.exec._on_stream_event(("live", "total 8\r\n"))
+        await c.exec._on_stream_event(("prompt", "[root@host ~]# "))
+        await c.exec._on_stream_event(("live", "drwxr-xr-x\r\n"))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert c._hook_ok()
+        assert c.hook._hook_ok()
 
     asyncio.run(main())
 
@@ -859,9 +859,9 @@ def test_hook_watch_not_armed_at_password_prompt():
 
     async def main():
         await c._on_keys(b"\r")
-        await c._on_stream_event(("live", "\r\nroot@host:~# "))
+        await c.exec._on_stream_event(("live", "\r\nroot@host:~# "))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert c._hook_ok(), "密码回车不得触发陈旧判定"
+        assert c.hook._hook_ok(), "密码回车不得触发陈旧判定"
 
     asyncio.run(main())
 
@@ -877,9 +877,9 @@ def test_hook_watch_not_armed_while_tool_command_running():
 
     async def main():
         await c._on_keys(b"\r")
-        await c._on_stream_event(("live", "drwxr-xr-x\r\n"))
+        await c.exec._on_stream_event(("live", "drwxr-xr-x\r\n"))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
-        assert c._hook_ok(), "工具命令在途不得据用户回车判陈旧"
+        assert c.hook._hook_ok(), "工具命令在途不得据用户回车判陈旧"
 
     asyncio.run(main())
 
@@ -899,9 +899,9 @@ def test_probe_buf_collects_live_text_without_killing_pump():
 
     async def main():
         # 裸壳回显探测行 + 它的真实输出，全是 live 纯文本
-        await c._on_stream_event(
+        await c.exec._on_stream_event(
             ("live", ' _ot_inj=""; v=""; ... echo "__OTPROBE__${v:-none}|$d"\r\n'))
-        await c._on_stream_event(("live", "__OTPROBE__bash5.1.8(1)-release|-d\r\n"))
+        await c.exec._on_stream_event(("live", "__OTPROBE__bash5.1.8(1)-release|-d\r\n"))
         got = parse_probe(c._probe_buf.decode("utf-8", "replace"))
         assert got == ("bash", "-d"), "探测输出没被收全：%r" % (got,)
 
@@ -920,9 +920,9 @@ def test_cs_prompt_identity_falls_back_to_router_prompt():
     → 换壳判定被短路（changed=False）→ sudo su - 打进裸壳，回显白色不青。
     """
     c = _bare_core(_cs_tail=None, _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu"
+    assert c.cs._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu"
     c2 = _bare_core(_cs_tail=bytearray(), _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c2._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu", "空尾窗同样要退回"
+    assert c2.cs._cs_prompt_identity() == "ubuntu@VM-0-5-ubuntu", "空尾窗同样要退回"
 
 
 def test_cs_prompt_identity_prefers_tail_over_router_prompt():
@@ -930,7 +930,7 @@ def test_cs_prompt_identity_prefers_tail_over_router_prompt():
     tail = ("[xiaojian@VM-0-11-centos ~]$ " + chr(13) + chr(10)).encode()
     c = _bare_core(_cs_tail=bytearray(tail),
                    _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c._cs_prompt_identity() == "xiaojian@VM-0-11-centos"
+    assert c.cs._cs_prompt_identity() == "xiaojian@VM-0-11-centos"
 
 
 def test_cs_prompt_identity_no_fallback_when_tail_has_output():
@@ -943,4 +943,4 @@ def test_cs_prompt_identity_no_fallback_when_tail_has_output():
             + "Last login: Thu Oct  8 23:12:52 2026" + chr(13) + chr(10)).encode()
     c = _bare_core(_cs_tail=bytearray(tail),
                    _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c._cs_prompt_identity() is None
+    assert c.cs._cs_prompt_identity() is None

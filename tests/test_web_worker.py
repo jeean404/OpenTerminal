@@ -337,12 +337,12 @@ async def test_worker_cmd_accounting_and_forward(monkeypatch, tmp_path):
     w._interactive = True
 
     w._pending_report = (1, "CMD", "ls -la /tmp")
-    await w._on_exec_start(1)
+    await w.exec._on_exec_start(1)
     assert w._open_cmds == {1: "ls -la /tmp"}
     assert not w._exec_stack                       # 用户命令不进栈
-    await w._on_exec_text("file1\nfile2\n")        # 输出直通前端
+    await w.exec._on_exec_text("file1\nfile2\n")        # 输出直通前端
     await _wait(lambda: b"file1\nfile2\n" in _sink_bytes(sink))
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_end(1, 0, "/tmp")
     assert 1 not in w._open_cmds
 
     got = [(r["source"], r["command"])
@@ -360,13 +360,13 @@ async def test_worker_suppressed_echo_swallowed_then_newline(monkeypatch, tmp_pa
     w._interactive = True
 
     w._suppress_live = True
-    await w._on_stream_event(("live", "eval base64注入行\r\n"))
+    await w.exec._on_stream_event(("live", "eval base64注入行\r\n"))
     assert _sink_bytes(sink) == b""                # 回显吞掉
     w._pending_report = (1, "CMD", "ls")
-    await w._on_exec_start(1)
+    await w.exec._on_exec_start(1)
     await _wait(lambda: _sink_bytes(sink) == b"\r\n")   # 补换行收束
     w._suppress_live = False
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_end(1, 0, "/tmp")
 
 
 # --- 集成模式：AI 工具命令（agent ctx）与 ai_collapse ---
@@ -404,10 +404,10 @@ async def test_worker_agent_exec_flow_and_ai_collapse_once(monkeypatch, tmp_path
         w._exec_future = fut
         w._suppress_live = True
         w._pending_report = (i + 1, "EXEC", "eval 注入 " + cmd)
-        await w._on_exec_start(i + 1)
+        await w.exec._on_exec_start(i + 1)
         assert w._exec_stack[-1]["ctx"] == "agent"
-        await w._on_exec_text("out-of-" + cmd + "\n")
-        await w._on_exec_end(i + 1, 0, "/tmp")
+        await w.exec._on_exec_text("out-of-" + cmd + "\n")
+        await w.exec._on_exec_end(i + 1, 0, "/tmp")
         res = await asyncio.wait_for(fut, timeout=1)
         assert res.exit_code == 0
         assert cmd in res.output
@@ -441,15 +441,15 @@ async def test_worker_agent_history_recorded(monkeypatch, tmp_path):
     loop = asyncio.get_running_loop()
 
     w._pending_report = (1, "CMD", "ls -la /tmp")
-    await w._on_exec_start(1)
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_start(1)
+    await w.exec._on_exec_end(1, 0, "/tmp")
 
     w.backend.on_start("df -h")
     fut = loop.create_future()
     w._exec_future = fut
     w._pending_report = (2, "EXEC", "df -h")
-    await w._on_exec_start(2)
-    await w._on_exec_end(2, 0, "/tmp")
+    await w.exec._on_exec_start(2)
+    await w.exec._on_exec_end(2, 0, "/tmp")
     await fut
 
     got = [(r["source"], r["command"])
@@ -473,10 +473,10 @@ async def test_worker_probe_exec_hidden(monkeypatch, tmp_path):
     fut = loop.create_future()
     w._exec_future = fut
     w._pending_report = (1, "EXEC", "compgen -c gi")
-    await w._on_exec_start(1)
+    await w.exec._on_exec_start(1)
     assert w._exec_stack[-1]["ctx"] == "probe"
-    await w._on_exec_text("git\n")
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_text("git\n")
+    await w.exec._on_exec_end(1, 0, "/tmp")
     res = await asyncio.wait_for(fut, timeout=1)
     w._hidden_exec = False
     w._exec_future = None
@@ -493,11 +493,11 @@ async def test_worker_silent_exec_swallowed(monkeypatch):
     w._interactive = True
 
     w._pending_report = (1, "EXEC", "__ot_off=1")
-    await w._on_exec_start(1)
+    await w.exec._on_exec_start(1)
     assert w._exec_stack[-1]["ctx"] == "silent"
-    await w._on_exec_text("toggle noise\r\n")
+    await w.exec._on_exec_text("toggle noise\r\n")
     assert _sink_bytes(sink) == b""
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_end(1, 0, "/tmp")
     assert not w._exec_stack
 
 
@@ -514,18 +514,18 @@ async def test_worker_injection_lines_silent_no_blank(monkeypatch):
     w._suppress_live = True
     w._suppressed_echo = True
     w._pending_report = (1, "CMD", '__ot_inj="$__ot_inj"\'b3RfcHJvbXB0\'')
-    await w._on_exec_start(1)
+    await w.exec._on_exec_start(1)
     assert w._exec_stack[-1]["ctx"] == "silent"
-    await w._on_exec_text("-bash: export: fake: not a function\n")
+    await w.exec._on_exec_text("-bash: export: fake: not a function\n")
     assert _sink_bytes(sink) == b""          # 报错不外显
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_end(1, 0, "/tmp")
     assert not w._exec_stack
     assert _sink_bytes(sink) == b""          # 也不补收束换行
 
     w._pending_report = (1, "CMD", 'eval "$(echo "$__ot_inj" | base64 -d)"')
-    await w._on_exec_start(1)
+    await w.exec._on_exec_start(1)
     assert w._exec_stack[-1]["ctx"] == "silent"
-    await w._on_exec_end(1, 0, "/tmp")
+    await w.exec._on_exec_end(1, 0, "/tmp")
     assert _sink_bytes(sink) == b""
 
 
@@ -534,7 +534,7 @@ async def test_worker_orphan_exec_end_ignored(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
-    await w._on_exec_end(9, 0, "/tmp")     # 从未开帧
+    await w.exec._on_exec_end(9, 0, "/tmp")     # 从未开帧
     assert not w._exec_stack
 
 
@@ -612,7 +612,7 @@ async def test_worker_task_flow_events(monkeypatch):
     await _install_fake_runner(monkeypatch)
     _wire_presenter(w)
 
-    w._start_ai("看看磁盘占用")
+    w.ai._start_ai("看看磁盘占用")
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
         and x["event"]["text"] == "看看磁盘占用" for x in m))
@@ -636,7 +636,7 @@ async def test_worker_tool_card_events(monkeypatch):
     await _install_fake_runner(monkeypatch, FakeToolRunner)
     _wire_presenter(w)
 
-    w._start_ai("读一下 notes.txt")
+    w.ai._start_ai("读一下 notes.txt")
     await _wait(lambda: w._ai_task is None)
     kinds = _event_kinds(sink)
     assert kinds == ["task_start", "ai_collapse", "ai_tool", "ai_tool",
@@ -661,9 +661,9 @@ async def test_worker_tool_card_ids_unique_across_tasks(monkeypatch):
     await _install_fake_runner(monkeypatch, FakeToolRunner)
     _wire_presenter(w)
 
-    w._start_ai("第一读")
+    w.ai._start_ai("第一读")
     await _wait(lambda: w._ai_task is None)
-    w._start_ai("第二读")
+    w.ai._start_ai("第二读")
     await _wait(lambda: w._ai_task is None)
     starts = [x["event"] for x in sink.json()
               if x.get("event", {}).get("kind") == "ai_tool"
@@ -678,7 +678,7 @@ async def test_worker_usage_estimated_fallback(monkeypatch):
     await _install_fake_runner(monkeypatch, FakeEstRunner)
     _wire_presenter(w)
 
-    w._start_ai("看看磁盘占用")
+    w.ai._start_ai("看看磁盘占用")
     await _wait(lambda: w._ai_task is None)
     usage = await _wait_json(sink, lambda m: any(
         x["type"] == "usage" and x.get("tokens_in") == 640 for x in m))
@@ -686,7 +686,7 @@ async def test_worker_usage_estimated_fallback(monkeypatch):
     assert any(x.get("estimated") for x in usage)
 
     # 第二个任务继续累计（估算口径逐任务叠加）
-    w._start_ai("再看内存")
+    w.ai._start_ai("再看内存")
     await _wait(lambda: w._ai_task is None)
     usage2 = await _wait_json(sink, lambda m: any(
         x["type"] == "usage" and x.get("tokens_in") == 1280 for x in m))
@@ -702,8 +702,8 @@ async def test_worker_ai_lines_queue_when_busy(monkeypatch):
 
     blocker = asyncio.create_task(asyncio.Event().wait())
     w._ai_task = blocker
-    await w._on_ai_line("第一句")
-    await w._on_ai_line("第二句")
+    await w.ai._on_ai_line("第一句")
+    await w.ai._on_ai_line("第二句")
     assert w._ai_queue == [("第一句", False), ("第二句", False)]
 
     blocker.cancel()
@@ -713,7 +713,7 @@ async def test_worker_ai_lines_queue_when_busy(monkeypatch):
         pass
     w._ai_task = None
     _q = w._ai_queue.pop(0)
-    w._start_ai(_q[0], _q[1])             # 触发回放；后续由 finally 链式接续
+    w.ai._start_ai(_q[0], _q[1])             # 触发回放；后续由 finally 链式接续
     # 等收据不等账本：_ai_task/queue 清零时最后一个 task_start 可能还在
     # outbox 在途（windows CI 实录过），按 sink 收到两单才算回放完
     await _wait_json(sink, lambda msgs: sum(
@@ -730,7 +730,7 @@ async def test_worker_ai_line_strips_question_prefix(monkeypatch):
     await _install_fake_runner(monkeypatch)
     _wire_presenter(w)
 
-    w._start_ai("?df -h 是干嘛的")
+    w.ai._start_ai("?df -h 是干嘛的")
     await _wait(lambda: w._ai_task is None)
     ts = _events(sink, "task_start")[0]
     assert ts["text"] == "df -h 是干嘛的"
@@ -746,7 +746,7 @@ async def test_worker_unknown_slash_falls_through_to_task(monkeypatch):
     await _install_fake_runner(monkeypatch)
     _wire_presenter(w)
 
-    w._start_ai("/tmp/no_such_script.sh --prod")
+    w.ai._start_ai("/tmp/no_such_script.sh --prod")
     await _wait(lambda: w._ai_task is None)
     ts = _events(sink, "task_start")
     assert [e["text"] for e in ts] == ["/tmp/no_such_script.sh --prod"]
@@ -758,7 +758,7 @@ async def test_worker_slash_clear_resets_transcript(monkeypatch):
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
     old = w.transcript
-    await w._handle_slash("/clear")
+    await w.ai._handle_slash("/clear")
     await _wait_json(sink, lambda m: any(
         x["type"] == "status" and "已开启新任务" in x.get("text", "")
         for x in m))
@@ -771,8 +771,8 @@ async def test_worker_slash_clear_resets_transcript(monkeypatch):
 async def test_worker_slash_model_and_target_listing(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
-    await w._handle_slash("/model")
-    await w._handle_slash("/target")
+    await w.ai._handle_slash("/model")
+    await w.ai._handle_slash("/target")
     await _wait_json(sink, lambda m: any(
         x["type"] == "status" and "base_url" in x.get("text", "")
         or x["type"] == "status" and "可用目标" in x.get("text", "")
@@ -817,7 +817,7 @@ async def test_runner_timeout_force_returns_130(monkeypatch):
     # \x19 接回半行——「不 yank」是 hook 不在位的口径，见 P2-5 用例
     raws = [d for k, d in w.session.calls if k == "raw"]
     assert b"\x03" in raws and raws[-1] == b"\x19"
-    assert await asyncio.wait_for(w._wait_exec_idle(0.1), timeout=2)
+    assert await asyncio.wait_for(w.ai._wait_exec_idle(0.1), timeout=2)
 
 
 async def test_runner_sends_yank_restore_when_hook_ok(monkeypatch):
@@ -937,7 +937,7 @@ async def test_shell_exit_during_approval_blocks_later_inject(monkeypatch):
     w._pending_approval = ServerMsg(type="status", text="审批卡")
     w._exit_tail.clear()
 
-    await w._detect_shell_exit(b"timed out waiting for input: auto-logout\r\n")
+    await w.hook._detect_shell_exit(b"timed out waiting for input: auto-logout\r\n")
 
     assert w._hook_stale is True, "stale 置位：_hook_ok 转假，注入/健康全降级"
     assert w._last_mark_at == 0.0, "死壳留下的旧时间戳不得再当活凭据"
@@ -979,7 +979,7 @@ async def test_shell_exit_resolves_pending_exec_without_approval(monkeypatch):
     w._exec_future = fut
     w._exit_tail.clear()
 
-    await w._detect_shell_exit(
+    await w.hook._detect_shell_exit(
         b"Connection to 10.0.0.20 closed by remote host.\r\n")
     assert w._hook_stale is True and fut.done()
     assert fut.result().exit_code == CHANNEL_DEAD_EC
@@ -994,7 +994,7 @@ async def test_shell_exit_not_fired_on_buried_log_line(monkeypatch):
     w._interactive = True
     w._last_mark_at = 1.0
     w._exit_tail.clear()
-    await w._detect_shell_exit(
+    await w.hook._detect_shell_exit(
         b"2026-10-08T10:00:00+08:00 web01 app[12345]: WARN history says: "
         b"timed out waiting for input: auto-logout\r\n")
     assert w._hook_stale is False and w._last_mark_at == 1.0
@@ -1007,7 +1007,7 @@ async def test_shell_exit_prompt_prefixed_tmout_is_detected(monkeypatch):
     w._interactive = True
     w._last_mark_at = 1.0
     w._exit_tail.clear()
-    await w._detect_shell_exit(
+    await w.hook._detect_shell_exit(
         b"[root@web01 ~]# timed out waiting for input: auto-logout\r\n")
     assert w._hook_stale is True and w._last_mark_at == 0.0
 
@@ -1021,7 +1021,7 @@ async def test_shell_exit_real_prompt_redraw_bytes_are_detected(monkeypatch):
     w._interactive = True
     w._last_mark_at = 1.0
     w._exit_tail.clear()
-    await w._detect_shell_exit(
+    await w.hook._detect_shell_exit(
         b"\x1b[?2004l\r\x07timed out waiting for input: auto-logout\r\n")
     assert w._hook_stale is True and w._last_mark_at == 0.0
 
@@ -1033,7 +1033,7 @@ async def test_shell_exit_trailing_junk_log_line_not_fired(monkeypatch):
     w._interactive = True
     w._last_mark_at = 1.0
     w._exit_tail.clear()
-    await w._detect_shell_exit(
+    await w.hook._detect_shell_exit(
         b"[root@web01 ~]# grep -R 'timed out waiting for input: auto-logout' "
         b"/var/log | head\r\n")
     assert w._hook_stale is False and w._last_mark_at == 1.0
@@ -1051,14 +1051,14 @@ async def test_shell_exit_bare_logout_approval_window_only(monkeypatch):
 
     w._pending_approval = ServerMsg(type="status", text="审批卡")
     w._exit_tail.clear()
-    await w._detect_shell_exit(b"logout\r\n")
+    await w.hook._detect_shell_exit(b"logout\r\n")
     assert w._hook_stale is True, "审批窗口内行首 logout 只可能是壳在告别"
 
     w._hook_stale = False
     w._last_mark_at = 1.0
     w._pending_approval = None
     w._exit_tail.clear()
-    await w._detect_shell_exit(b"logout\r\n")
+    await w.hook._detect_shell_exit(b"logout\r\n")
     assert w._hook_stale is False, "窗口外不得认裸 logout"
 
 
@@ -1075,9 +1075,9 @@ async def test_dead_shell_first_submit_never_hits_bare_shell(monkeypatch):
     _wire_presenter(w)
 
     w._pending_approval = ServerMsg(type="status", text="审批卡")
-    await w._detect_shell_exit(b"timed out waiting for input: auto-logout\r\n")
+    await w.hook._detect_shell_exit(b"timed out waiting for input: auto-logout\r\n")
     w._pending_approval = None
-    assert w._hook_stale is True and not w._hook_ok()
+    assert w._hook_stale is True and not w.hook._hook_ok()
 
     async def _fail():
         return False
@@ -1112,14 +1112,14 @@ async def test_probe_failure_reports_status_once(monkeypatch):
     w._interactive = True
     w._last_mark_at = 1.0
 
-    assert await w._ensure_integrated() is False
+    assert await w.hook._ensure_integrated() is False
     assert w._hook_gone is True
     await _wait_json(sink, lambda m: any(
         x.get("type") == "status" and "无法集成" in x.get("text", "")
         for x in m))
     before = _count_unusable()
 
-    assert await w._ensure_integrated() is False
+    assert await w.hook._ensure_integrated() is False
     await asyncio.sleep(0.05)
     assert _count_unusable() == before, "同一 shell 不重复播报"
 
@@ -1145,7 +1145,7 @@ async def test_worker_stop_pump_propagates_outer_cancel(monkeypatch):
     任务变成杀不死的僵尸——asyncio teardown 的 cancel_all gather 挂死。"""
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
-    await w._stop_pump()                 # 停掉真泵，换可控的假泵
+    await w.pump._stop_pump()                 # 停掉真泵，换可控的假泵
 
     # 假泵：被 cancel 后拖 0.3s 才死（外层的第二次取消会打断休眠立即死），
     # 给外层任务留出"挂在等泵退出上被取消"的窗口
@@ -1165,7 +1165,7 @@ async def test_worker_stop_pump_propagates_outer_cancel(monkeypatch):
 
     async def stopper():
         try:
-            await w._stop_pump()
+            await w.pump._stop_pump()
             outcome["r"] = "returned"
         except asyncio.CancelledError:
             outcome["r"] = "cancelled"
@@ -1333,7 +1333,7 @@ async def test_worker_submit_ai_report_starts_task(monkeypatch):
     _skip_reintegrate(w, monkeypatch)
 
     await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
-    await w._on_stream_event(("report", 1, "AI", "帮我查询系统资源"))
+    await w.exec._on_stream_event(("report", 1, "AI", "帮我查询系统资源"))
     assert w._hook_report_pending is None
     await asyncio.wait_for(w._ai_task, timeout=2)
     await _wait_json(sink, lambda m: any(
@@ -1358,7 +1358,7 @@ async def test_worker_submit_cmd_report_cancels_fallback(monkeypatch):
 
     await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
     assert w._hook_report_pending == "帮我查询系统资源"
-    await w._on_stream_event(("report", 1, "CMD", "帮我查询系统资源"))
+    await w.exec._on_stream_event(("report", 1, "CMD", "帮我查询系统资源"))
     assert w._hook_report_pending is None
     await _drain_fallback(w)
     assert w._ai_task is None      # CMD 上报即兜底撤销，不起 AI 任务
@@ -1368,10 +1368,10 @@ async def test_worker_submit_cmd_report_cancels_fallback(monkeypatch):
 
 async def _run_failed_user_cmd(w, line, ec, output="boom: command not found"):
     """模拟 hook 在位的用户命令完整帧：CMD 上报 → C → 输出 → D(ec)。"""
-    await w._on_stream_event(("report", 1, "CMD", line))
-    await w._on_stream_event(("exec_start", 1))
-    await w._on_stream_event(("exec", output))
-    await w._on_stream_event(("exec_end", 1, ec, "/root"))
+    await w.exec._on_stream_event(("report", 1, "CMD", line))
+    await w.exec._on_stream_event(("exec_start", 1))
+    await w.exec._on_stream_event(("exec", output))
+    await w.exec._on_stream_event(("exec_end", 1, ec, "/root"))
 
 
 async def test_worker_rescue_on_failed_user_command(monkeypatch):
@@ -1485,7 +1485,7 @@ async def test_worker_submit_dirty_hook_alive_routes_through_hook(monkeypatch):
     assert w._fallback_task is None
     assert w._ai_task is None      # 等 hook 真行上报才启动
     real = '帮我把ll设置为"ls -al"的别名'
-    await w._on_stream_event(("report", 1, "AI", real))
+    await w.exec._on_stream_event(("report", 1, "AI", real))
     assert w._hook_report_pending is None
     await asyncio.wait_for(w._ai_task, timeout=2)
     await _wait_json(sink, lambda m: any(
@@ -1574,9 +1574,9 @@ class _BareHookShell(FakeSession):
         if data in (b"\x15", b"\x19", b"\x03"):
             return
         line = data.decode("utf-8", "replace").rstrip("\r")
-        await self.w._on_stream_event(("live", line + "\r\n"))
-        await self.w._on_stream_event(("prompt_start", 1))
-        await self.w._on_stream_event(("live", self.PROMPT))
+        await self.w.exec._on_stream_event(("live", line + "\r\n"))
+        await self.w.exec._on_stream_event(("prompt_start", 1))
+        await self.w.exec._on_stream_event(("live", self.PROMPT))
 
 
 async def test_reinject_into_bare_shell_no_prompt_wall(monkeypatch):
@@ -1601,9 +1601,9 @@ async def test_reinject_into_bare_shell_no_prompt_wall(monkeypatch):
     monkeypatch.setattr(w.hook, "_probe_shell_kind", _probe)
     w._ai_task = _fake_ai_task(w)   # 任务在跑：prompt_start 会关帘
 
-    assert await w._ensure_integrated()
+    assert await w.hook._ensure_integrated()
     await asyncio.sleep(0.1)
-    await w._curtain_open()
+    await w.exec._curtain_open()
     await asyncio.sleep(0.1)
 
     text = _sink_bytes(sink).decode("utf-8", "replace")
@@ -1631,7 +1631,7 @@ async def test_degraded_submit_repaints_nl_line_blue(monkeypatch):
     _skip_reintegrate(w, monkeypatch)
 
     # 用户已把自然语言敲在提示符上（shell 自己回显的）
-    await w._on_stream_event(("live", "[root@x /tmp]# 查看正在运行的容器"))
+    await w.exec._on_stream_event(("live", "[root@x /tmp]# 查看正在运行的容器"))
     await w.handle_client(ClientMsg(type="submit", text="查看正在运行的容器"))
     await asyncio.sleep(0.8)                # 后台清场（0.12+0.4s）落地
 
@@ -1649,8 +1649,8 @@ async def test_curtain_gate_holds_during_inject_window(monkeypatch):
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     t = _fake_ai_task(w)
     w._suppress_live = True
-    await w._on_stream_event(("prompt_start", 1))
-    await w._on_stream_event(("live", "[root@x ~]# "))
+    await w.exec._on_stream_event(("prompt_start", 1))
+    await w.exec._on_stream_event(("live", "[root@x ~]# "))
     await w.session.send_raw(b"__ot_inj='xx'\r")
     await asyncio.sleep(0.05)
     assert w._curtain, "注入窗内开帘 = 提示符段成排泄漏"
@@ -1834,11 +1834,11 @@ async def test_worker_exec_text_swallowed_in_injection_window(monkeypatch):
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
     w._suppress_live = True
-    await w._on_exec_text("__ot_inj=\"$__ot_inj\"'5a+5562W'")
+    await w.exec._on_exec_text("__ot_inj=\"$__ot_inj\"'5a+5562W'")
     await asyncio.sleep(0.02)
     assert not [m for m in sink.messages if m[0] == "bytes"], "窗口内 exec 直漏主屏"
     w._suppress_live = False
-    await w._on_exec_text("root")
+    await w.exec._on_exec_text("root")
     await asyncio.sleep(0.02)
     assert ("bytes", b"root") in sink.messages, "窗口外用户输出照常直通"
 
@@ -1889,7 +1889,7 @@ async def test_worker_submit_fallback_fires_when_report_lost(monkeypatch):
     await _wait(lambda: w._ai_task is None)
 
     # 迟到的重复上报：吞掉，不再启动第二个任务
-    await w._on_stream_event(("report", 1, "AI", "帮我查询系统资源"))
+    await w.exec._on_stream_event(("report", 1, "AI", "帮我查询系统资源"))
     await asyncio.sleep(0.05)
     assert w._suppress_ai_report is None
     starts = await _wait_json(sink, lambda m: sum(
@@ -2007,9 +2007,9 @@ def _wire_pad_lying_shell(w):
         await base(data)
         if b"__ot_pad" in data:
             # 真实泵序：报错文本先到，嵌套壳的提示符标记后到
-            await w._on_stream_event(
+            await w.exec._on_stream_event(
                 ("live", "bash: __ot_pad: command not found"))
-            await w._on_stream_event(("prompt_start", (1,)))
+            await w.exec._on_stream_event(("prompt_start", (1,)))
     sess.send_raw = _raw
 
 
@@ -2138,11 +2138,11 @@ async def test_probe_shell_kind_parses_probe_output(monkeypatch):
         async def _send(data, _base=base):
             await _base(data)
             # 探测行回显 + 执行输出一起喂（真实流里回显在前）
-            await w._on_stream_event(("exec", data.decode()[:40]))
-            await w._on_stream_event(("exec", out + "\r\n"))
+            await w.exec._on_stream_event(("exec", data.decode()[:40]))
+            await w.exec._on_stream_event(("exec", out + "\r\n"))
 
         w.session.send_raw = _send
-        got = await w._probe_shell_kind()
+        got = await w.hook._probe_shell_kind()
         assert got == want, out
         assert w._probe_buf is None, "探测结束必须清 _probe_buf"
 
@@ -2153,7 +2153,7 @@ async def test_probe_shell_kind_timeout_returns_none(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     monkeypatch.setattr(wmod, "_PROBE_TIMEOUT", 0.05)
-    shell, flag = await w._probe_shell_kind()
+    shell, flag = await w.hook._probe_shell_kind()
     assert (shell, flag) == (None, "-d")
 
 
@@ -2168,10 +2168,10 @@ async def test_ensure_integrated_foreign_shell_no_inject(monkeypatch):
     w._shell_kind = "zsh"
     monkeypatch.setattr(wmod, "_PROBE_TIMEOUT", 0.05)
 
-    ok = await w._ensure_integrated()
+    ok = await w.hook._ensure_integrated()
     assert ok is False
     assert w._hook_gone is True
-    assert not w._hook_ok(), "标记流不足以证明 hook 在位（外族 PS1 也发标记）"
+    assert not w.hook._hook_ok(), "标记流不足以证明 hook 在位（外族 PS1 也发标记）"
     raws = [d for k, d in w.session.calls if k == "raw"]
     assert not any(b"__ot_inj" in d for d in raws), "外族 shell 不注入脚本"
     assert not any(b"__ot_pad" in d for d in raws)
@@ -2200,7 +2200,7 @@ async def test_ensure_integrated_reinjects_matching_shell(monkeypatch):
             w._ev_prompt.set()   # 模拟注入落地后的提示符重画
     w.session.send_raw = _raw
 
-    ok = await w._ensure_integrated()
+    ok = await w.hook._ensure_integrated()
     assert ok is True
     assert (w._shell_kind, w._b64flag) == ("bash", "-d")
     assert w._hook_gone is False
@@ -2217,18 +2217,18 @@ async def test_hook_gone_clears_when_nested_shell_exits(monkeypatch):
     w._last_mark_at = 1.0
     w._open_cmds[7] = "sudo su -"
     w._hook_gone = True
-    assert not w._hook_ok()
+    assert not w.hook._hook_ok()
 
-    await w._on_exec_end(7, 0, "/tmp")
+    await w.exec._on_exec_end(7, 0, "/tmp")
     assert w._hook_gone is False
-    assert w._hook_ok()
+    assert w.hook._hook_ok()
     # 嵌套 shell 未退出（还有别的命令帧开着）不复位
     w._hook_gone = True
     w._open_cmds[8] = "sudo su -"
     w._open_cmds[9] = "echo hi"
-    await w._on_exec_end(9, 0, "/tmp")
+    await w.exec._on_exec_end(9, 0, "/tmp")
     assert w._hook_gone is True
-    await w._on_exec_end(8, 0, "/tmp")
+    await w.exec._on_exec_end(8, 0, "/tmp")
     assert w._hook_gone is False
 
 
@@ -2243,11 +2243,11 @@ async def test_hooked_flag_threads_through_start_ai(monkeypatch):
         seen.append((line, hooked))
 
     w.ai._ai_flow = fake_flow
-    w._start_ai("甲", True)
+    w.ai._start_ai("甲", True)
     await asyncio.sleep(0)
     assert seen == [("甲", True)]
     w._ai_task = None
-    w._start_ai("乙")
+    w.ai._start_ai("乙")
     await asyncio.sleep(0)
     assert seen[-1] == ("乙", False)
 
@@ -2396,7 +2396,7 @@ async def test_cmdset_reconnect_cancels_previous_runner(monkeypatch):
     w._target = SimpleNamespace(commands=["echo x"])
     w._shell_kind = None        # 历史注入跳过(种类未知)
     w._b64flag = "-d"
-    old = asyncio.create_task(w._run_command_set())
+    old = asyncio.create_task(w.cs._run_command_set())
     w._cs_task = old
     await w._on_session_reconnect()
     await asyncio.sleep(0.05)
@@ -2463,7 +2463,7 @@ async def test_switch_display_reinforces_integration_before_toggle(monkeypatch):
         return True
 
     w.hook._ensure_integrated = _fake_ensure
-    await w._switch_display("ssh")
+    await w.ai._switch_display("ssh")
     assert called, "切换前未补注入集成脚本"
     assert w._display == "ssh"
     assert any(c[0] == "raw" and b"__ot_off=1" in c[1]
@@ -2659,15 +2659,15 @@ async def test_prompt_curtain_holds_prompt_during_task(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     t = _fake_ai_task(w)
-    await w._on_stream_event(("prompt_start", 1))
+    await w.exec._on_stream_event(("prompt_start", 1))
     assert w._curtain, "任务期 A 标记应关帘"
-    await w._on_stream_event(("live", "[root@x ~]# "))
-    await w._on_stream_event(("live", " 杂散回显"))
+    await w.exec._on_stream_event(("live", "[root@x ~]# "))
+    await w.exec._on_stream_event(("live", " 杂散回显"))
     await _wait(lambda: len(sink.messages) > 0 or True)   # 让 outbox 排空一拍
     await asyncio.sleep(0.05)
     assert b"root@x" not in _sink_bytes(sink), "扣留期提示符不得外发"
     assert w._curtain_parts == ["[root@x ~]# ", " 杂散回显"]
-    await w._curtain_open()
+    await w.exec._curtain_open()
     assert not w._curtain and w._curtain_parts == []
     await _wait(lambda: b"root@x" in _sink_bytes(sink))
     assert " 杂散回显".encode() in _sink_bytes(sink), "放行须按原序完整"
@@ -2680,8 +2680,8 @@ async def test_prompt_curtain_opens_on_pty_write(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     t = _fake_ai_task(w)
-    await w._on_stream_event(("prompt_start", 1))
-    await w._on_stream_event(("live", "[root@x ~]# "))
+    await w.exec._on_stream_event(("prompt_start", 1))
+    await w.exec._on_stream_event(("live", "[root@x ~]# "))
     await w.session.send_raw(b"ls -la\r")
     await _wait(lambda: b"root@x" in _sink_bytes(sink))
     assert not w._curtain, "写入应开帘"
@@ -2694,9 +2694,9 @@ async def test_prompt_curtain_idle_no_hold(monkeypatch):
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     assert w._ai_task is None
-    await w._on_stream_event(("prompt_start", 1))
+    await w.exec._on_stream_event(("prompt_start", 1))
     assert not w._curtain
-    await w._on_stream_event(("live", "[root@x ~]# "))
+    await w.exec._on_stream_event(("live", "[root@x ~]# "))
     await _wait(lambda: b"root@x" in _sink_bytes(sink))
 
 
@@ -2709,14 +2709,14 @@ async def test_prompt_curtain_released_at_task_end(monkeypatch):
         return
 
     monkeypatch.setattr(w.ai, "_run_task", _fake_run)
-    w._start_ai("查资源")
+    w.ai._start_ai("查资源")
     await _wait(lambda: w._ai_task is None or w._ai_task.done(), timeout=5)
     t = _fake_ai_task(w)   # 幕帘再次关上（模拟下一任务中段）
-    await w._on_stream_event(("prompt_start", 1))
-    await w._on_stream_event(("live", "[root@x ~]# "))
+    await w.exec._on_stream_event(("prompt_start", 1))
+    await w.exec._on_stream_event(("live", "[root@x ~]# "))
     assert w._curtain
     # 模拟任务收尾路径本身的开帘（_ai_flow finally 同款调用）
-    await w._curtain_open()
+    await w.exec._curtain_open()
     await _wait(lambda: b"root@x" in _sink_bytes(sink))
     t.cancel()
 
@@ -2893,9 +2893,9 @@ async def test_worker_exec_end_cross_instance_collapses_injection_frame(monkeypa
     w._interactive = True
     w._exec_stack.append({"ctx": "silent", "inst": 1, "inj": True,
                           "line": 'eval "$(echo "$__ot_inj" | base64 -d)"'})
-    await w._on_exec_end(100000, 0, "/root")
+    await w.exec._on_exec_end(100000, 0, "/root")
     assert w._exec_stack == [], "注入帧未跨实例收束（此后 exec 字节全被吞）"
-    await w._on_exec_text("Last login: Thu Oct  8 23:12:52 CST 2026 on pts/2")
+    await w.exec._on_exec_text("Last login: Thu Oct  8 23:12:52 CST 2026 on pts/2")
     await asyncio.sleep(0.02)
     assert any(m[0] == "bytes" and b"Last login" in m[1] for m in sink.messages),         "收束后 exec 字节仍被吞（真机整屏只剩回显的根因）"
 
@@ -2907,5 +2907,5 @@ async def test_worker_exec_end_mismatch_keeps_non_injection_frame(monkeypatch):
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     w._interactive = True
     w._exec_stack.append({"ctx": "silent", "inst": 7, "line": "ssh x@h"})
-    await w._on_exec_end(9, 0, None)
+    await w.exec._on_exec_end(9, 0, None)
     assert [f["inst"] for f in w._exec_stack] == [7], "非注入帧被跨实例弹出"

@@ -20,7 +20,7 @@ import asyncio
 import time
 from dataclasses import replace
 
-from .. import _core_impl as _impl
+from . import pipeline as _impl
 from .messages import ServerMsg, _dbg
 from ..shell_integration import toggle_line
 
@@ -174,7 +174,7 @@ class AiFlow:
             # 否则密码行被当任务挂起，\r 被 ^C/重注入链吞掉，登录失败。
             # 字符已原样透传（echo 关闭），这里只补发回车提交密码；
             # CJK/IME 整行路径的回车同时冻结手输捕获的候选（P1-3）。
-            self.core._pw_capture_submit()
+            self.core.auth._pw_capture_submit()
             await self.core.session.send_raw(b"\r")
             return
         if self.core._interactive and self.core.hook._hook_ok() and (
@@ -287,7 +287,7 @@ class AiFlow:
                 _dbg("pt-reset: done")
             finally:
                 self.core._suppress_live = False
-                await self.core._repaint_line(text)
+                await self.core.exec._repaint_line(text)
         except Exception as e:  # noqa: BLE001 - 清理失败不追责：任务已起跑
             _dbg("pt-reset: exc", repr(e))
 

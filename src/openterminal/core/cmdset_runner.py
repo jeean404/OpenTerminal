@@ -17,7 +17,7 @@ import asyncio
 import re
 import time
 
-from .. import _core_impl as _impl
+from . import pipeline as _impl
 from .. import cmdset
 from ..shell_session import _needs_password_prompt
 from .messages import PasswordCancelled, ServerMsg, _ANSI_RE, _dbg

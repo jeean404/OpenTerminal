@@ -121,7 +121,7 @@ class InteractiveRunner:
         w = self.w
         to = timeout or w.cfg.shell.timeout_default
         async with w._runner_lock:
-            if not await w._wait_exec_idle(to):
+            if not await w.ai._wait_exec_idle(to):
                 return CommandResult(
                     output="[ot] 目标 shell 正忙（命令或 AI 执行中），请稍后重试",
                     exit_code=124, truncated=False, cwd=self.cwd)
@@ -147,7 +147,7 @@ class InteractiveRunner:
                 try:
                     res = await asyncio.wait_for(asyncio.shield(fut), to)
                 except asyncio.TimeoutError:
-                    if w._hook_ok():
+                    if w.hook._hook_ok():
                         # hook 不在位时 \x03 也是落进裸壳的垃圾（P2-5）
                         await w.session.send_raw(b"\x03")  # 中断工具命令
                     try:
@@ -163,7 +163,7 @@ class InteractiveRunner:
                 # 任务期用户打字与注入交错时打字内容原样接回行首（真机「任务
                 # 跑着打字只剩尾巴」根因）。原生 ^Y 会复活 kill ring 旧内容，
                 # hook 不在位（su - 重置）时不发，保持旧的原生丢弃语义。
-                if w._hook_ok():
+                if w.hook._hook_ok():
                     await w.session.send_raw(b"\x19")
             if res.cwd:
                 self.cwd = res.cwd
@@ -178,14 +178,14 @@ class InteractiveRunner:
         保证该路径下 PTY 输入流一个字节都不发。
         """
         w = self.w
-        if w._hook_ok():
+        if w.hook._hook_ok():
             w._hook_seen = True
             return True
         if w._hook_gone:
             return False
         try:
-            await w._ensure_integrated_locked()
+            await w.hook._ensure_integrated_locked()
         except Exception:  # noqa: BLE001 - 重注入失败即通道不可用
             return False
-        return w._hook_ok()
+        return w.hook._hook_ok()
 

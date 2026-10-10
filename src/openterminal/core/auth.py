@@ -18,7 +18,7 @@ import asyncio
 import re
 import time
 
-from .. import _core_impl as _impl
+from . import pipeline as _impl
 from ..shell_integration import is_internal_line
 from ..shell_session import _PASSWORD_PROMPT_RE, _needs_password_prompt
 from .messages import PasswordCancelled, ServerMsg, _dbg
@@ -123,7 +123,7 @@ class AuthFlow:
             if not at_end and self.core.nested.innermost_ssh_frame() is not None:
                 # 嵌套 ssh 登录成功：后台主动注入 hook——首条自然语言到达时
                 # hook 已在位走健康路径，免当场探测+分片注入的秒级代价
-                asyncio.get_running_loop().create_task(self.core._proactive_reinject())
+                asyncio.get_running_loop().create_task(self.core.exec._proactive_reinject())
         if not at_end:
             self.core._pw_prompt_seen = False
             if self.core._pw_capture_key is not None:
@@ -220,7 +220,7 @@ class AuthFlow:
             if item[0] == "raw":
                 await self.core.session.send_raw(item[1])
             else:
-                await self.core._on_frontend_line(item[1], item[2], typed=False)
+                await self.core.ai._on_frontend_line(item[1], item[2], typed=False)
 
     # --- 陈旧密码模态代关 ---
 

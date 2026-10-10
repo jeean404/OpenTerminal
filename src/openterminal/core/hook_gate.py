@@ -20,7 +20,7 @@ import asyncio
 import re
 import time
 
-from .. import _core_impl as _impl
+from . import pipeline as _impl
 from .messages import CHANNEL_DEAD_EC, CommandResult, ServerMsg, _dbg
 from ..shell_integration import (history_quiet_line, injection_lines,
                                  is_internal_line, parse_probe, probe_command)

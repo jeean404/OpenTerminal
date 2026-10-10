@@ -86,7 +86,7 @@ def test_authflow_armed_false_when_no_prompt():
 def test_core_lazy_auth_property():
     """PipelineCore.auth 惰性属性：裸构造实例首次访问即建 AuthFlow，
     且同一实例复用（状态归属唯一）。"""
-    from openterminal._core_impl import PipelineCore
+    from openterminal.core.pipeline import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     a = core.auth
     assert a is core.auth
@@ -119,7 +119,7 @@ def test_strip_intr_echo_passthrough_normal():
 
 
 def test_core_lazy_exec_property():
-    from openterminal._core_impl import PipelineCore
+    from openterminal.core.pipeline import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     assert core.exec is core.exec
 
@@ -190,7 +190,7 @@ def test_aiflow_owns_state():
 
 
 def test_core_lazy_ai_property():
-    from openterminal._core_impl import PipelineCore
+    from openterminal.core.pipeline import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     assert core.ai is core.ai
 
@@ -202,6 +202,6 @@ def test_outputpump_owns_state():
 
 
 def test_core_lazy_pump_property():
-    from openterminal._core_impl import PipelineCore
+    from openterminal.core.pipeline import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     assert core.pump is core.pump

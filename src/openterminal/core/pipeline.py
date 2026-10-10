@@ -36,14 +36,14 @@ def _dbg(*a) -> None:
     if _OT_DBG:
         print(f"[otdbg +{time.monotonic() - _OT_T0:7.3f}s]", *a, flush=True)
 
-from . import cmdset
-from . import history_db
-from .config import Config, TargetConfig, app_dir
-from .connections import (
+from .. import cmdset
+from .. import history_db
+from ..config import Config, TargetConfig, app_dir
+from ..connections import (
     PW_STORE_FAIL_HINT, display_name, open_session, parse_user_at_host)
-from .history_db import HISTORY_RECALL_LIMIT
-from .policy import Policy
-from .core.messages import (
+from ..history_db import HISTORY_RECALL_LIMIT
+from ..policy import Policy
+from .messages import (
     CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG, ClientMsg, InteractiveRunner,
     PasswordCancelled, ServerMsg, _ANSI_RE, _ansi_free, _dbg,
     _PROBE_TIMEOUT,
@@ -103,20 +103,20 @@ def _looks_ai(text: str) -> bool:
     # 首词不像命令名（引号、波浪号、空格切分出的奇怪 token）→ 交给模型
     return not all(
         c.isalnum() or c in "./@%+:=_,-" for c in first)
-from .secrets_store import load_password, store_password
-from .shell_integration import (
+from ..secrets_store import load_password, store_password
+from ..shell_integration import (
     StreamRouter, agent_exec_line, history_inject_line, history_quiet_line,
     injection_lines, is_internal_line,
     parse_probe, probe_command, toggle_line,
 )
-from .shell_session import (
+from ..shell_session import (
     _PASSWORD_PROMPT_RE, CommandResult, _needs_password_prompt)
-from .sysprobe import (
+from ..sysprobe import (
     LOCAL_PROFILE, MANUAL_PRESETS, load_host_cache, probe_profile,
     save_host_cache,
 )
-from .transcript import open_transcript
-from .secrets_store import load_password_alias as _load_password_alias_impl
+from ..transcript import open_transcript
+from ..secrets_store import load_password_alias as _load_password_alias_impl
 
 
 def load_password_alias(host: str, user: str | None, port: int | None) -> str | None:
@@ -148,10 +148,10 @@ def _load_agent_stack() -> None:
     monkeypatch 覆盖（非 None）的名字原样保留，不触发 deepagents 真导入。"""
     global build_agent, build_chat_model
     if build_agent is None:
-        from .agent import build_agent as _build_agent
+        from ..agent import build_agent as _build_agent
         build_agent = _build_agent
     if build_chat_model is None:
-        from .agent import build_chat_model as _build_chat_model
+        from ..agent import build_chat_model as _build_chat_model
         build_chat_model = _build_chat_model
 
 
@@ -231,7 +231,7 @@ class PipelineCore:
     @property
     def nested(self) -> "NestedSshTracker":
         """嵌套 SSH 帧解析组件（无状态，惰性建以兼容裸构造测试实例）。"""
-        from .core.nested_ssh import NestedSshTracker  # 局部导入：core/__init__ 反向转发本模块，模块级导入成环
+        from .nested_ssh import NestedSshTracker  # 局部导入：core/__init__ 反向转发本模块，模块级导入成环
         n = self.__dict__.get("_nested")
         if n is None:
             n = NestedSshTracker(self)
@@ -243,7 +243,7 @@ class PipelineCore:
         """密码状态机组件（Task 3）：惰性建以兼容裸构造测试实例。"""
         a = self.__dict__.get("_auth")
         if a is None:
-            from .core.auth import AuthFlow
+            from .auth import AuthFlow
             a = AuthFlow(self)
             self.__dict__["_auth"] = a
         return a
@@ -253,7 +253,7 @@ class PipelineCore:
         """标记流/注入/幕帘组件（Task 4）：惰性建以兼容裸构造测试实例。"""
         e = self.__dict__.get("_exec_events")
         if e is None:
-            from .core.exec_events import ExecEvents
+            from .exec_events import ExecEvents
             e = ExecEvents(self)
             self.__dict__["_exec_events"] = e
         return e
@@ -263,7 +263,7 @@ class PipelineCore:
         """hook 集成/验活组件（Task 5）：惰性建以兼容裸构造测试实例。"""
         h = self.__dict__.get("_hook_gate")
         if h is None:
-            from .core.hook_gate import HookGate
+            from .hook_gate import HookGate
             h = HookGate(self)
             self.__dict__["_hook_gate"] = h
         return h
@@ -273,7 +273,7 @@ class PipelineCore:
         """连接后命令集组件（Task 6）：惰性建以兼容裸构造测试实例。"""
         c = self.__dict__.get("_cmdset_runner")
         if c is None:
-            from .core.cmdset_runner import CmdsetRunner
+            from .cmdset_runner import CmdsetRunner
             c = CmdsetRunner(self)
             self.__dict__["_cmdset_runner"] = c
         return c
@@ -283,7 +283,7 @@ class PipelineCore:
         """AI 行处理/任务组件（Task 7）：惰性建以兼容裸构造测试实例。"""
         a = self.__dict__.get("_ai_flow")
         if a is None:
-            from .core.ai_flow import AiFlow
+            from .ai_flow import AiFlow
             a = AiFlow(self)
             self.__dict__["_ai_flow"] = a
         return a
@@ -293,7 +293,7 @@ class PipelineCore:
         """输出泵组件（Task 8）：惰性建以兼容裸构造测试实例。"""
         p = self.__dict__.get("_output_pump")
         if p is None:
-            from .core.pump import OutputPump
+            from .pump import OutputPump
             p = OutputPump(self)
             self.__dict__["_output_pump"] = p
         return p
@@ -302,7 +302,7 @@ class PipelineCore:
     @staticmethod
     def _parse_ssh_cmd_target(line: str
                               ) -> tuple[str | None, str | None, int | None] | None:
-        from .core.nested_ssh import NestedSshTracker
+        from .nested_ssh import NestedSshTracker
         return NestedSshTracker.parse_ssh_cmd_target(line)
 
     def _innermost_ssh_frame(self) -> int | None:
@@ -332,11 +332,11 @@ class PipelineCore:
     def attach(self, sink) -> None:
         self._sink = sink
         if self._sender is None:
-            self._sender = asyncio.create_task(self._sender_loop())
+            self._sender = asyncio.create_task(self.pump._sender_loop())
         if self._task is None:
             self._task = asyncio.create_task(self._run())
         if self._hb is None:
-            self._hb = asyncio.create_task(self._heartbeat())
+            self._hb = asyncio.create_task(self.pump._heartbeat())
         self._flush_offline()
         if self._pending_approval is not None:
             # 重连/刷新重挂：补发未决审批（首挂时必为 None，不会重复投）
@@ -359,7 +359,7 @@ class PipelineCore:
         if time.monotonic() - self._ai_ping_at < _AI_ZOMBIE_T:
             return
         _dbg("ai zombie reap: ai_task 静默 >", _AI_ZOMBIE_T, "s")
-        await self._maybe_cancel_ai()
+        await self.ai._maybe_cancel_ai()
         await self.emit_msg(ServerMsg(
             type="status",
             text="AI 任务长时间无响应，已自动停止；提示符已恢复。如需继续请重发。"))
@@ -447,7 +447,7 @@ class PipelineCore:
             # ⏹/Ctrl+C：直接给 PTY 发 Ctrl+C（不经过 _inbox——命令执行期间
             # 消息会排队到命令结束才处理）；shell 空闲时顺带取消 AI 任务。
             if self._interactive:
-                await self._maybe_cancel_ai()
+                await self.ai._maybe_cancel_ai()
             if self.session is not None:
                 await self.session.send_raw(b"\x03")
         elif msg.type == "pad":
@@ -485,10 +485,10 @@ class PipelineCore:
             # 外部触发链：前端拦截的自然语言整行（不再经 shell hook 分类，
             # su - 等 login shell 重置 hook 后依然可用）
             if self.session is not None and msg.text:
-                await self._on_frontend_line(msg.text, msg.dirty)
+                await self.ai._on_frontend_line(msg.text, msg.dirty)
         elif msg.type == "rescue":
             # 失败救援卡决策（accept = 交给 AI）
-            await self._on_rescue_decision(msg.accept)
+            await self.ai._on_rescue_decision(msg.accept)
         else:
             await self._inbox.put(msg)
 
@@ -524,87 +524,11 @@ class PipelineCore:
 
     # --- 密码状态机过渡委托（实现已拆 core/auth.py；src 内部已直呼
     # self.auth.*，委托仅供 tests/ 旧名过渡，Task 9 随 _core_impl 删除）---
-    def _detect_password_prompt(self, data: bytes) -> None:
-        self.auth._detect_password_prompt(data)
 
-    def _begin_pw_verify(self) -> None:
-        self.auth._begin_pw_verify()
-
-    def _end_pw_verify(self) -> None:
-        self.auth._end_pw_verify()
-
-    def _schedule_pw_verify_expiry(self) -> None:
-        self.auth._schedule_pw_verify_expiry()
-
-    async def _pw_verify_expiry(self) -> None:
-        await self.auth._pw_verify_expiry()
-
-    def _schedule_pw_hold_release(self) -> None:
-        self.auth._schedule_pw_hold_release()
-
-    def _cancel_pw_hold_release(self) -> None:
-        self.auth._cancel_pw_hold_release()
-
-    async def _pw_hold_release(self) -> None:
-        await self.auth._pw_hold_release()
-
-    async def _flush_pw_hold(self) -> None:
-        await self.auth._flush_pw_hold()
-
-    def _schedule_pw_dismiss(self) -> None:
-        self.auth._schedule_pw_dismiss()
-
-    def _cancel_pw_dismiss(self) -> None:
-        self.auth._cancel_pw_dismiss()
-
-    async def _pw_dismiss_release(self) -> None:
-        await self.auth._pw_dismiss_release()
-
-    def _pw_prompt_host(self) -> tuple[str | None, str | None]:
-        return self.auth._pw_prompt_host()
-
-    def _pw_armed(self) -> bool:
-        return self.auth.armed
-
-    def _load_nested_password(self, host: str, user: str | None,
-                              port: int | None) -> str | None:
-        return self.auth._load_nested_password(host, user, port)
-
-    async def _on_nested_password_prompt(self) -> None:
-        await self.auth._on_nested_password_prompt()
-
-    async def _on_nested_password(self, pw: str, remember: bool) -> None:
-        await self.auth._on_nested_password(pw, remember)
-
-    def _arm_typed_capture(self, key) -> None:
-        self.auth._arm_typed_capture(key)
-
-    def _pw_typed_capture(self, data: bytes) -> None:
-        self.auth._pw_typed_capture(data)
-
-    def _pw_capture_submit(self) -> None:
-        self.auth._pw_capture_submit()
-
-    def _pw_result_tail(self) -> bytes:
-        return self.auth._pw_result_tail()
-
-    def _pw_auth_result(self) -> None:
-        self.auth._pw_auth_result()
-
-    async def _pw_remember_offer(self, cand) -> None:
-        await self.auth._pw_remember_offer(cand)
-
-    async def _finish_remember(self, store: bool) -> None:
-        await self.auth._finish_remember(store)
 
     async def ask_password(self, label: str, auth_kind: str = "") -> str:
         return await self.auth.ask_password(label, auth_kind)
 
-    def _store_auth_password(self, password: str) -> bool:
-        return self.auth.store_auth_password(password)
-
-
-    # --- \x03 后 ^C 回显吞除（降级重注入的视觉残迹）---
 
     async def close(self) -> None:
         if self._closed:
@@ -618,7 +542,7 @@ class PipelineCore:
         if self._cs_task is not None:
             self._cs_task.cancel()
         # 密码 hold/验证窗口的定时器一并撤掉：不然会话关了它们还空转到点
-        self._cancel_pw_hold_release()
+        self.auth._cancel_pw_hold_release()
         self.hook._cancel_hook_watch()
         t = getattr(self, "_pw_verify_timer", None)
         if t is not None:
@@ -629,7 +553,7 @@ class PipelineCore:
             q.put_nowait(None)
         # 先等泵真正退出再关 session：只 cancel 不等的话，泵可能正压在
         # _read_some 上，fd 被关掉后抛 ValueError 成为未取回异常
-        await self._stop_pump()
+        await self.pump._stop_pump()
         if self.session is not None:
             await self.session.close()
         await self.emit_msg(ServerMsg(type="closed", text="已关闭"))
@@ -732,7 +656,7 @@ class PipelineCore:
             #（ready 已先入 outbox，顺序有保证）
             await self.session.send_raw(b"\x0c")
         if self._target is not None and self._target.commands:
-            self._spawn_cmdset()
+            self.cs._spawn_cmdset()
         while not self._closed:
             msg = await self._inbox.get()
             try:
@@ -831,42 +755,11 @@ class PipelineCore:
         # shell 种类重新灌历史；种类未知（探测失败过的批处理）跳过
         await self._inject_shell_history(self._shell_kind, self._b64flag)
         if self._target is not None and self._target.commands:
-            self._spawn_cmdset()
+            self.cs._spawn_cmdset()
 
     # --- 连接后命令集过渡委托（实现已拆 core/cmdset_runner.py；委托仅供
     # tests/ 旧名过渡，Task 9 随 _core_impl 删除）---
-    def _spawn_cmdset(self) -> None:
-        self.cs.spawn()
 
-    async def _run_command_set(self) -> None:
-        await self.cs._run_command_set()
-
-    def _cs_text(self) -> str:
-        return self.cs._cs_text()
-
-    def _cs_lastline(self) -> str:
-        return self.cs._cs_lastline()
-
-    async def _cs_pause_for_input(self) -> None:
-        await self.cs._cs_pause_for_input()
-
-    async def _cs_command(self, cmd: str) -> None:
-        await self.cs._cs_command(cmd)
-
-    async def _cs_wait_pw_verify(self) -> None:
-        await self.cs._cs_wait_pw_verify()
-
-    def _cs_prompt_identity(self) -> str | None:
-        return self.cs._cs_prompt_identity()
-
-    async def _cs_hook_gate(self) -> None:
-        await self.cs._cs_hook_gate()
-
-    async def _cs_watch_prompt(self) -> None:
-        await self.cs._cs_watch_prompt()
-
-    async def _cs_answer(self, ref: str) -> None:
-        await self.cs._cs_answer(ref)
 
     async def _setup_interactive(self) -> None:
         """探测 shell 能力并注入集成脚本（单管线）。
@@ -992,7 +885,7 @@ class PipelineCore:
             self._interactive = True
             # 后台预热 AI 栈：首条自然语言不再在 _run_task 里付秒级导入
             # （真机分析卡延迟根因之二）；导入走线程池不堵事件循环
-            asyncio.get_running_loop().create_task(self._prewarm_agent())
+            asyncio.get_running_loop().create_task(self.ai._prewarm_agent())
         except Exception:  # noqa: BLE001 - 探测/注入任何失败都回退直通
             import traceback
             _dbg("setup: 异常回退纯终端直通", traceback.format_exc())
@@ -1002,12 +895,12 @@ class PipelineCore:
         if msg.type == "raw":
             await self._on_keys(msg.data)
         elif msg.type == "mode":
-            await self._switch_display(msg.text)
+            await self.ai._switch_display(msg.text)
         elif msg.type == "resize":
             if self.session is not None:
                 await self.session.resize(msg.rows, msg.cols)
         elif msg.type == "change_model":
-            await self._change_model(msg.model)
+            await self.ai._change_model(msg.model)
         elif msg.type == "close":
             await self.close()
         elif msg.type == "new_session":
@@ -1027,7 +920,7 @@ class PipelineCore:
             return
         _dbg("keys=", repr(data[:60]))
         if self._interactive and b"\x03" in data:
-            await self._maybe_cancel_ai()
+            await self.ai._maybe_cancel_ai()
         await self.session.send_raw(data)
         # 回车看门狗：用户敲的回车是「hook 还在不在」最自然的验活点。命令行
         # 回车**不经** _on_frontend_line——前端只对自然语言发 submit，
@@ -1079,7 +972,7 @@ class PipelineCore:
 
 
     async def _switch_target(self, line: str) -> None:
-        from .connections import list_ssh_hosts, load_saved_targets
+        from ..connections import list_ssh_hosts, load_saved_targets
 
         names = list(dict.fromkeys(
             ["local"] + [t.name for t in load_saved_targets()] + list_ssh_hosts()))
@@ -1119,8 +1012,8 @@ class PipelineCore:
             await self.session.send_raw(b"\x0c")
 
     def _register_target(self, text: str) -> str:
-        from .config import TargetConfig
-        from .connections import load_saved_targets, parse_user_at_host
+        from ..config import TargetConfig
+        from ..connections import load_saved_targets, parse_user_at_host
 
         if text in self.cfg.targets or text in {"local", "default"}:
             return text
@@ -1137,7 +1030,7 @@ class PipelineCore:
         return name
 
     async def _manual_system(self, line: str) -> None:
-        from .sysprobe import MANUAL_PRESETS
+        from ..sysprobe import MANUAL_PRESETS
 
         parts = line.split()
         if len(parts) < 2 or parts[1] not in MANUAL_PRESETS:
@@ -1146,23 +1039,13 @@ class PipelineCore:
             return
         self.profile = replace(self.profile, **MANUAL_PRESETS[parts[1]])
         if self.agent is not None:
-            self._build_agent_now()   # 已建才重建；未建由 _ensure_agent 用新画像
+            self.ai._build_agent_now()   # 已建才重建；未建由 _ensure_agent 用新画像
         await self.emit_msg(ServerMsg(
             type="status", text=f"系统方言已手动设为 {parts[1]}"))
 
 
     # --- 输出泵过渡委托（实现已拆 core/pump.py；src 内部
     # 调用点暂经委托，Task 9 随 _core_impl 删除）---
-    async def _pump_guard(self) -> None:
-        return await self.pump._pump_guard()
-    async def _pump_loop(self) -> None:
-        return await self.pump._pump_loop()
-    async def _stop_pump(self) -> None:
-        return await self.pump._stop_pump()
-    async def _heartbeat(self) -> None:
-        return await self.pump._heartbeat()
-    async def _sender_loop(self) -> None:
-        return await self.pump._sender_loop()
 
     async def _pump_eof(self, text: str) -> None:
         if self._ai_task is not None:
@@ -1174,146 +1057,10 @@ class PipelineCore:
     # --- 集成模式：标记流事件 ---
     # --- 标记流/注入/幕帘过渡委托（实现已拆 core/exec_events.py；src 内部
     # 已直呼 self.exec.*，委托仅供 tests/ 旧名过渡，Task 9 随 _core_impl 删除）---
-    def _install_curtain_gate(self) -> None:
-        self.exec._install_curtain_gate()
 
-    async def _curtain_open(self) -> None:
-        await self.exec._curtain_open()
 
-    def _curtain_close(self) -> None:
-        self.exec._curtain_close()
-
-    async def _shell_pad(self, rows: int, mirror: str | None = None) -> None:
-        await self.exec._shell_pad(rows, mirror)
-
-    def _reinject_inst_base(self) -> int:
-        return self.exec._reinject_inst_base()
-
-    def _arm_intr_swallow(self) -> None:
-        self.exec._arm_intr_swallow()
-
-    def _strip_intr_echo(self, data: bytes) -> bytes:
-        return self.exec._strip_intr_echo(data)
-
-    async def _proactive_reinject(self) -> None:
-        await self.exec._proactive_reinject()
-
-    async def _on_stream_event(self, ev: tuple) -> None:
-        await self.exec._on_stream_event(ev)
-
-    async def _on_exec_start(self, inst: int) -> None:
-        await self.exec._on_exec_start(inst)
-
-    @staticmethod
     def _disp_width(s: str) -> int:
         return self.exec._disp_width(s)
-
-    async def _repaint_line(self, text: str | None, echoed: bool = True) -> None:
-        await self.exec._repaint_line(text, echoed)
-
-    async def _resync_after_suppress(self) -> None:
-        await self.exec._resync_after_suppress()
-
-    async def _close_suppressed_line(self) -> None:
-        await self.exec._close_suppressed_line()
-
-    async def _on_exec_text(self, text: str) -> None:
-        await self.exec._on_exec_text(text)
-
-    async def _on_exec_end(self, inst: int, ec, cwd) -> None:
-        await self.exec._on_exec_end(inst, ec, cwd)
-
-
-    async def _ensure_integrated(self) -> bool:
-        return await self.hook._ensure_integrated()
-
-    async def _ensure_integrated_locked(self) -> bool:
-        return await self.hook._ensure_integrated_locked()
-
-    async def _probe_shell_kind(self) -> tuple[str | None, str]:
-        return await self.hook._probe_shell_kind()
-
-    async def _drain_quiet(self, quiet: float = 0.12,
-                           router: "StreamRouter | None" = None,
-                           raw_sink: "Callable[[bytes], None] | None" = None
-                           ) -> int:
-        return await self.hook._drain_quiet(quiet, router, raw_sink)
-
-    def _hook_ok(self) -> bool:
-        return self.hook._hook_ok()
-
-    def _note_hook_mark(self) -> None:
-        self.hook._note_hook_mark()
-
-    def _note_hook_text(self) -> None:
-        self.hook._note_hook_text()
-
-    def _arm_hook_watch(self) -> None:
-        self.hook._arm_hook_watch()
-
-    def _cancel_hook_watch(self) -> None:
-        self.hook._cancel_hook_watch()
-
-    async def _hook_liveness(self) -> None:
-        await self.hook._hook_liveness()
-
-    async def _detect_shell_exit(self, data: bytes) -> None:
-        await self.hook._detect_shell_exit(data)
-
-    def _match_shell_exit(self, tail: bytes) -> str | None:
-        return self.hook._match_shell_exit(tail)
-
-    def _shell_exit_window(self) -> bool:
-        return self.hook._shell_exit_window()
-
-    async def _note_shell_dead(self, why: str) -> None:
-        await self.hook._note_shell_dead(why)
-
-
-    # --- AI 行处理/任务过渡委托（实现已拆 core/ai_flow.py；src 内部
-    # 调用点暂经委托，Task 9 随 _core_impl 删除）---
-    def _agent_session(self):
-        return self.ai._agent_session()
-    def _build_agent_now(self) -> None:
-        return self.ai._build_agent_now()
-    def _ensure_agent(self) -> None:
-        return self.ai._ensure_agent()
-    async def _prewarm_agent(self) -> None:
-        return await self.ai._prewarm_agent()
-    def _start_ai(self, line: str, hooked: bool = False) -> None:
-        return self.ai._start_ai(line, hooked)
-    async def _ai_flow(self, line: str, hooked: bool = False) -> None:
-        return await self.ai._ai_flow(line, hooked)
-    async def _on_ai_line(self, line: str, hooked: bool = False) -> None:
-        return await self.ai._on_ai_line(line, hooked)
-    async def _on_frontend_line(self, text: str, dirty: bool = False, typed: bool = True) -> None:
-        return await self.ai._on_frontend_line(text, dirty, typed)
-    async def _degraded_reset(self, text: str | None = None) -> None:
-        return await self.ai._degraded_reset(text)
-    async def _passthrough_reset(self, text: str | None = None) -> None:
-        return await self.ai._passthrough_reset(text)
-    async def _maybe_rescue(self, line: str, ec) -> None:
-        return await self.ai._maybe_rescue(line, ec)
-    async def _on_rescue_decision(self, accept: bool) -> None:
-        return await self.ai._on_rescue_decision(accept)
-    async def _submit_fallback(self, t: str) -> None:
-        return await self.ai._submit_fallback(t)
-    async def _handle_slash(self, line: str) -> bool:
-        return await self.ai._handle_slash(line)
-    async def _run_task(self, text: str, hooked: bool = False) -> None:
-        return await self.ai._run_task(text, hooked)
-    async def _change_model(self, model_id: str) -> None:
-        return await self.ai._change_model(model_id)
-    async def _handle_events(self, runner, events) -> None:
-        return await self.ai._handle_events(runner, events)
-    async def _switch_display(self, mode: str) -> None:
-        return await self.ai._switch_display(mode)
-    async def _maybe_cancel_ai(self) -> None:
-        return await self.ai._maybe_cancel_ai()
-    def _ai_cancellable(self) -> bool:
-        return self.ai._ai_cancellable()
-    async def _wait_exec_idle(self, timeout: float) -> bool:
-        return await self.ai._wait_exec_idle(timeout)
 
 
 class CorePresenter:
@@ -1344,12 +1091,12 @@ def __getattr__(name: str):
     # __setattr__ → 拉起本模块 → 再回头要半初始化 hook_gate 的符号），
     # 改惰性再导出供 core 包桥 getattr 读取（tests/test_nested_session.py）
     if name == "_HOOK_LIVENESS":
-        from .core.hook_gate import _HOOK_LIVENESS
+        from .hook_gate import _HOOK_LIVENESS
         return _HOOK_LIVENESS
     if name in ("CMDSET_ECHO_TIMEOUT", "CMDSET_QUIET", "CMDSET_PROMPT_TIMEOUT",
                 "CMDSET_RESUME_QUIET", "CMDSET_HOOK_WAIT", "_CMDSET_PROMPT_RE",
                 "_CMDSET_SECRET_RE", "_CMDSET_CONFIRM_RE", "_CMDSET_DONE_RE",
                 "_CS_PROMPT_ID_RE"):
-        from .core import cmdset_runner as _cs
+        from . import cmdset_runner as _cs
         return getattr(_cs, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

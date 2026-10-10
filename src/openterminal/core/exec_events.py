@@ -115,7 +115,7 @@ class ExecEvents:
         _dbg("shell_pad enter rows=", rows, "interactive=", self.core._interactive)
         async with self.core._runner_lock:
             _dbg("shell_pad locked")
-            if self.core._hook_ok():
+            if self.core.hook._hook_ok():
                 self.core._hook_seen = True
             elif (self.core._hook_seen and
                     time.monotonic() - self.core._pad_reinject_at > 60
@@ -132,12 +132,12 @@ class ExecEvents:
                 try:
                     # 已持 _runner_lock：走无锁实现（经 _ensure_integrated
                     # 取锁会重入死锁）
-                    await self.core._ensure_integrated_locked()
+                    await self.core.hook._ensure_integrated_locked()
                 except Exception:  # noqa: BLE001 - 补注入失败不碍降级
                     pass
-                if self.core._hook_ok():
+                if self.core.hook._hook_ok():
                     self.core._hook_seen = True
-            if not self.core._hook_ok() or self.core._reinject_pending:
+            if not self.core.hook._hook_ok() or self.core._reinject_pending:
                 # 两类都不往壳里敲 pad：①hook 不在位（判死/探测失败）——敲
                 # 进去必撞裸壳；②任务起跑的重注入在途（外部触发链必有，至
                 # _run_task 重注入落地才清位）——窗口内壳还没痊愈，敲进去
@@ -153,7 +153,7 @@ class ExecEvents:
                 return
             remaining = max(1, rows)
             first = True
-            hook = self.core._hook_ok()
+            hook = self.core.hook._hook_ok()
             # 指纹扫描窗：pad 行已敲进 PTY，回显若带「__ot_pad: command not
             # found」即壳里没有 hook 函数（_hook_ok 标记流假阳性，su - 换壳
             # 主因），泵侧当场置 _hook_gone——本循环下一轮条件即断，不再把
@@ -250,7 +250,7 @@ class ExecEvents:
         if time.monotonic() - self.core._last_live_at < 0.4:
             return   # 目标提示符上有回显（用户敲字中）：放弃主动注入
         try:
-            await self.core._ensure_integrated()
+            await self.core.hook._ensure_integrated()
         except Exception:  # noqa: BLE001 - 主动注入失败不阻断，submit 降级自愈
             pass
 
@@ -261,7 +261,7 @@ class ExecEvents:
              if kind in ("live", "exec", "prompt") else ev[1:])
         if kind == "live":
             self.core._ev_stream.set()   # 回显到达：重注入分片的逐片应答凭据
-            self.core._note_hook_text()
+            self.core.hook._note_hook_text()
             if self.core._pad_inflight and "__ot_pad: command not found" in ev[1]:
                 # pad 行敲进了没有 hook 函数的壳：su - 换壳后嵌套壳的 PS1/
                 # PROMPT_COMMAND 照发 OSC 标记，_hook_ok 靠标记流假阳性，
@@ -302,21 +302,21 @@ class ExecEvents:
                 await self.core.emit_bytes(ev[1].encode("utf-8", "replace"))
         elif kind == "exec":
             self.core._ev_stream.set()
-            self.core._note_hook_text()
+            self.core.hook._note_hook_text()
             if self.core._probe_buf is not None:
                 self.core._probe_buf.extend(ev[1].encode("utf-8", "replace"))
             await self._on_exec_text(ev[1])
         elif kind == "prompt_start":
             self.core._ev_prompt.set()   # 模式切换等提示符重画
-            self.core._note_hook_mark()
+            self.core.hook._note_hook_mark()
             # 任务运行期关帘：这段提示符重绘扣住不发——前端流式卡期间底部
             # 不出现空提示符（用户诉求：对话完全结束才显示命令提示符）
             self._curtain_close()
         elif kind == "prompt":
             self.core._cur_prompt = ev[1]
-            self.core._note_hook_mark()
+            self.core.hook._note_hook_mark()
         elif kind == "report":
-            self.core._note_hook_mark()
+            self.core.hook._note_hook_mark()
             inst, k, line = ev[1], ev[2], ev[3]
             if k == "AI":
                 # 外部触发链健康路径：本行是补发 \r 后 hook 的原地蓝色重绘上报
@@ -332,7 +332,7 @@ class ExecEvents:
                     # hooked=True：hook 上报即 hook 在位的凭据，任务启动
                     # 跳过重注入——其吞窗口会吃掉在途的蓝色重绘字节
                     # （真机「提交行消失」根因：stty 快照后重绘慢几 ms 落进窗口）
-                    await self.core._on_ai_line(line, hooked=True)
+                    await self.core.ai._on_ai_line(line, hooked=True)
             else:
                 # hook 把这行分类成了命令（CMD/EXEC）并会就地执行：清掉等 AI
                 # 上报的兜底挂起，否则 _submit_fallback 会在 1.2s 后对同一行
@@ -343,10 +343,10 @@ class ExecEvents:
                     self.core._hook_report_pending = None
                 self.core._pending_report = (inst, k, line)
         elif kind == "exec_start":
-            self.core._note_hook_mark()
+            self.core.hook._note_hook_mark()
             await self._on_exec_start(ev[1])
         elif kind == "exec_end":
-            self.core._note_hook_mark()
+            self.core.hook._note_hook_mark()
             await self._on_exec_end(ev[1], ev[2], ev[3])
 
     async def _on_exec_start(self, inst: int) -> None:
@@ -514,7 +514,7 @@ class ExecEvents:
                 # 复位换壳判定，健康路径/pad 恢复
                 self.core._hook_gone = False
                 self.core._hook_stale = False
-            await self.core._maybe_rescue(line, ec)
+            await self.core.ai._maybe_rescue(line, ec)
         if not self.core._exec_stack:
             return    # 孤儿 D：无帧的执行周期，忽略
         top = self.core._exec_stack[-1]
