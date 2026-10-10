@@ -901,6 +901,33 @@ class PipelineCore:
     async def _run_command_set(self) -> None:
         await self.cs._run_command_set()
 
+    def _cs_text(self) -> str:
+        return self.cs._cs_text()
+
+    def _cs_lastline(self) -> str:
+        return self.cs._cs_lastline()
+
+    async def _cs_pause_for_input(self) -> None:
+        await self.cs._cs_pause_for_input()
+
+    async def _cs_command(self, cmd: str) -> None:
+        await self.cs._cs_command(cmd)
+
+    async def _cs_wait_pw_verify(self) -> None:
+        await self.cs._cs_wait_pw_verify()
+
+    def _cs_prompt_identity(self) -> str | None:
+        return self.cs._cs_prompt_identity()
+
+    async def _cs_hook_gate(self) -> None:
+        await self.cs._cs_hook_gate()
+
+    async def _cs_watch_prompt(self) -> None:
+        await self.cs._cs_watch_prompt()
+
+    async def _cs_answer(self, ref: str) -> None:
+        await self.cs._cs_answer(ref)
+
     async def _setup_interactive(self) -> None:
         """探测 shell 能力并注入集成脚本（单管线）。
 
