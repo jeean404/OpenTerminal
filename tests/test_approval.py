@@ -1,6 +1,6 @@
 import pytest
 
-from openterminal.approval import (
+from openterminal.frontend.approval import (
     decision_for_choice, edit_decision, reclassify_edited,
 )
 from openterminal.policy import Policy

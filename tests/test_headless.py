@@ -8,7 +8,7 @@ import io
 import json
 
 from openterminal.config import Config, PolicyConfig, TargetConfig
-from openterminal.headless import (
+from openterminal.frontend.headless import (
     EXIT_APPROVAL_REQUIRED,
     EXIT_DENIED,
     EXIT_TARGET_NOT_FOUND,
@@ -63,7 +63,7 @@ def test_all_targets_config_alias_survives_same_host_saved(monkeypatch):
     仅同名时跳过（修复：曾按 host 键把 config 手写目标整个吃掉，
     `ot exec -t prod` 报目标不存在）。"""
     import openterminal.connections as conn_mod
-    from openterminal.headless import all_targets
+    from openterminal.frontend.headless import all_targets
 
     monkeypatch.setattr(conn_mod, "load_saved_targets", lambda *a, **k: [
         TargetConfig(name="root@10.0.0.1", mode="ssh", host="10.0.0.1",
@@ -158,7 +158,7 @@ def test_exec_host_key_unknown_blocked_before_connect():
 def test_exec_remote_code_in_tool_band_squashed(monkeypatch):
     """远程退出码撞上 64~69 工具保留段：进程码收敛为 63（保住「≥64 必是
     工具问题」契约），真实值仍在 JSON 的 exit_code 里。"""
-    import openterminal.headless as hl
+    import openterminal.frontend.headless as hl
     from openterminal.session.base import CommandResult
 
     async def fake_exec(target, command, *, timeout):

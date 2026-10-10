@@ -22,11 +22,11 @@ if sys.platform == "win32":
 import pty  # noqa: E402
 
 import openterminal.core as cmod
-import openterminal.term_frontend as tmod
+import openterminal.frontend.term as tmod
 from openterminal.config import Config, TargetConfig
 from openterminal.core import ClientMsg, ServerMsg
 from openterminal.agent.sysprobe import SystemProfile
-from openterminal.term_frontend import CliCore, TermFrontend
+from openterminal.frontend.term import CliCore, TermFrontend
 
 
 class FakeSession:

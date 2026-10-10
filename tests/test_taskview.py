@@ -2,7 +2,7 @@
 
 import io
 
-from openterminal.taskview import TaskPresenter
+from openterminal.frontend.taskview import TaskPresenter
 
 
 class FakeStream:
@@ -151,7 +151,7 @@ def test_pause_halts_stream_keeps_segment():
 def test_thinking_stream_nontty_show_noop_box_prints():
     from rich.console import Console
 
-    from openterminal.taskview import ThinkingStream
+    from openterminal.frontend.taskview import ThinkingStream
 
     buf = io.StringIO()
     con = Console(file=buf, force_terminal=False, width=60)
@@ -166,7 +166,7 @@ def test_thinking_stream_nontty_show_noop_box_prints():
 def test_thinking_stream_render_wraps_long_text():
     from rich.console import Console
 
-    from openterminal.taskview import ThinkingStream
+    from openterminal.frontend.taskview import ThinkingStream
 
     buf = io.StringIO()
     con = Console(file=buf, force_terminal=False, width=40)
@@ -180,7 +180,7 @@ def test_live_view_tails_long_text():
     # 直播帧只显示尾部：帧高永远很小，避免在屏幕底部滚动导致刷新错位
     from rich.console import Console
 
-    from openterminal.taskview import ThinkingStream
+    from openterminal.frontend.taskview import ThinkingStream
 
     con = Console(file=io.StringIO(), width=100)
     s = ThinkingStream(con)
@@ -197,7 +197,7 @@ def test_box_shows_full_text_even_when_live_tails():
     # 定格框（段落结束/总结）始终完整，不截断
     from rich.console import Console
 
-    from openterminal.taskview import ThinkingStream
+    from openterminal.frontend.taskview import ThinkingStream
 
     buf = io.StringIO()
     con = Console(file=buf, force_terminal=False, width=100)

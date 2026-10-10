@@ -26,10 +26,10 @@ def main() -> None:
     # ot exec -t <目标> -c <命令> / ot list targets —— 无头执行面（headless.py）
     # 输出要保持纯净供脚本消费，不打印欢迎横幅
     if len(sys.argv) >= 2 and sys.argv[1] in {"exec", "list"}:
-        from .headless import run_headless
+        from .frontend.headless import run_headless
 
         raise SystemExit(run_headless(sys.argv[1:], cfg=cfg))
-    from .banner import print_banner
+    from .frontend.banner import print_banner
 
     print_banner()
     # ot connect <ssh配置别名> / ot ssh user@host:port

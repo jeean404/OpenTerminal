@@ -16,7 +16,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import D
 from prompt_toolkit.styles import Style
 
-from . import render
+from .frontend import render
 from .config import Config, TargetConfig
 from .connections import (
     RenameConflictError, TargetList, build_target_list, cred_alias_eq,
@@ -26,7 +26,7 @@ from .connections import (
 )
 from .policy import Policy
 from .connections.secrets import delete_password, store_password
-from .term_frontend import CliCore, TermFrontend
+from .frontend.term import CliCore, TermFrontend
 
 # 全屏/会话接管不再需要 CLI 白名单：单管线前端是整条真终端直通
 # （PTY 字节原样进出），vim/top/tmux 等全屏程序天然原生，零登记。

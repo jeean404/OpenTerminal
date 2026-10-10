@@ -21,7 +21,7 @@ from ..connections import (
     rename_saved_target, upsert_saved_target,
 )
 from ..connections.secrets import delete_password, store_password
-from ..render import console
+from ..frontend.render import console
 from .protocol import parse_client
 from .worker import TabWorker
 

@@ -14,10 +14,10 @@ import sys
 
 import pytest
 
-import openterminal.term_frontend as tmod
+import openterminal.frontend.term as tmod
 from openterminal.core import ClientMsg
 from openterminal.policy import Policy
-from openterminal.term_frontend import TermFrontend
+from openterminal.frontend.term import TermFrontend
 
 
 class FakeCore:

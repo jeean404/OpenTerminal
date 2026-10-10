@@ -17,7 +17,7 @@ from io import StringIO
 from rich.console import Console
 
 from openterminal.core import ClientMsg, ServerMsg
-from openterminal.term_frontend import CliRenderer, TermFrontend
+from openterminal.frontend.term import CliRenderer, TermFrontend
 
 
 class FakeCapture:
@@ -210,7 +210,7 @@ async def test_think_stream_dim():
 
 async def test_think_box_lines_full_width():
     """框内每行 pad 到 console.width：左右边框始终对齐成矩形。"""
-    from openterminal.term_frontend import _display_width
+    from openterminal.frontend.term import _display_width
     r, sink, _ = _make_renderer()
     await r.render(_ev("ai_think", text="第一行"))
     await r.render(_ev("ai_think", text="，第二行更长一点\n"))
@@ -224,7 +224,7 @@ async def test_think_box_lines_full_width():
 
 async def test_think_box_wraps_long_line():
     """超内宽行软折行（CJK 计 2 列），折后仍封右边框。"""
-    from openterminal.term_frontend import _display_width
+    from openterminal.frontend.term import _display_width
     r, sink, _ = _make_renderer()
     await r.render(_ev("ai_think", text="汉" * 80 + "\n"))
     await r.render(_ev("ai_collapse", command=""))
@@ -294,7 +294,7 @@ async def test_approval_panel_closes_think_box_first():
 async def test_think_strips_model_ansi_and_tabs():
     """模型文本自带字面 ANSI/Tab：入盒前净化——曾击穿盒内 dim 样式，
     且转义序列被计宽导致 pad 几何崩坏、右边框错位。"""
-    from openterminal.term_frontend import _display_width
+    from openterminal.frontend.term import _display_width
     r, sink, _ = _make_renderer()
     await r.render(_ev("ai_think", text="\x1b[31m红字\x1b[0m\t尾巴"))
     await r.render(_ev("ai_collapse", command=""))
@@ -310,7 +310,7 @@ async def test_think_strips_model_ansi_and_tabs():
 def test_display_width_rich_cells_geometry():
     """宽度口径换 rich.cells：组合符计 0 列（旧 east_asian_width 逐字符
     口径算 1 列 → pad 行超宽折行错位）、全角计 2、折行点与终端一致。"""
-    from openterminal.term_frontend import _display_width, _wrap_display
+    from openterminal.frontend.term import _display_width, _wrap_display
 
     assert _display_width("e\u0301") == 1        # e + 组合重音符：显示 1 列
     assert _display_width("漢") == 2
@@ -383,7 +383,7 @@ async def test_progress_cr_frames_never_overwritten():
 
 async def test_status_truncated_to_terminal_width(monkeypatch):
     """窄终端：状态行按显示列宽截断（CJK 计 2 列），单行不折行。"""
-    import openterminal.term_frontend as tmod
+    import openterminal.frontend.term as tmod
     monkeypatch.setattr(tmod, "_term_size", lambda: (40, 10))
     fe, written = _frontend_env()
     fe.status.activate("任务进行中")            # 文本约 15 显示列 > 9
@@ -396,7 +396,7 @@ async def test_status_truncated_to_terminal_width(monkeypatch):
 async def test_winch_refreshes_console_width(monkeypatch):
     """SIGWINCH：core feed_msg(resize) 之外同步刷新 console.width
     （_WriterFile 非 tty，rich 无法自探）。"""
-    import openterminal.term_frontend as tmod
+    import openterminal.frontend.term as tmod
     monkeypatch.setattr(tmod, "_term_size", lambda: (40, 120))
     fe, _ = _frontend_env()
 

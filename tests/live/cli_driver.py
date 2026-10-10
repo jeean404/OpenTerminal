@@ -79,7 +79,7 @@ load_dotenv(app_dir() / ".env")
 import openterminal.agent.runner as agent_mod  # noqa: E402
 
 from openterminal.agent.runner import TaskEvent  # noqa: E402
-from openterminal.term_frontend import CliCore, TermFrontend  # noqa: E402
+from openterminal.frontend.term import CliCore, TermFrontend  # noqa: E402
 
 TOUCH_TARGET = os.environ.get("OT_LIVE_TOUCH_TARGET",
                                "/tmp/ot_live_ok")   # 测试经 env 传 pid 隔离路径
