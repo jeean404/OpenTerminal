@@ -584,6 +584,86 @@ def test_sudo_autofill_stored_key_no_ask(monkeypatch):
     asyncio.run(main())
 
 
+def test_nested_ssh_typed_password_offers_remember_prompt_key(monkeypatch):
+    """P1-4：嵌套 ssh 无凭据、用户在终端手输 → 验证成功（登录横幅）→
+    询问「记住」→ 同意后按 _nested_pw_ctx 键（提示符 user@host）落库，
+    替代已停用的模态代答记忆。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150"})
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"pe@172.25.105.150's password: ")
+        await asyncio.sleep(0)
+        assert c._pw_capture_key == ("172.25.105.150", "pe", None)
+        await c._on_keys(b"s3cret\r")
+        assert sent == [b"s3cret\r"]
+        c._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
+                                  b"[pe@inner ~]$ ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        asks = [m for m in msgs if m.type == "ask_remember"]
+        assert len(asks) == 1
+        assert "pe@172.25.105.150" in asks[0].text
+        await c._finish_remember(True)
+        assert stored == [("172.25.105.150", "pe", None, "s3cret")]
+    asyncio.run(main())
+
+
+def test_nested_ssh_remember_decline_stores_nothing(monkeypatch):
+    """P1-4 拒绝「不记住」：不写库（下次仍手输）。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150"})
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"pe@172.25.105.150's password: ")
+        await asyncio.sleep(0)
+        await c._on_keys(b"s3cret\r")
+        c._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        assert any(m.type == "ask_remember" for m in msgs)
+        await c._finish_remember(False)
+        assert stored == []
+    asyncio.run(main())
+
+
+def test_nested_ssh_unparseable_key_never_asks(monkeypatch):
+    """「记住」没有可靠的键（提示符无主机、帧目标解析不出且无会话主机）
+    ：不捕获不询问——宁缺勿错键。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh -v"}, target_host="")
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"Password: ")
+        await asyncio.sleep(0)
+        assert c._pw_capture_key is None
+        await c._on_keys(b"s3cret\r")
+        c._detect_password_prompt(b"\r\n[pe@inner ~]$ ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        assert not any(m.type == "ask_remember" for m in msgs)
+        assert stored == []
+    asyncio.run(main())
+
+
 def test_inner_ssh_prompt_live_relaxes_latch():
     """嵌套 ssh 帧开着但内层提示符标记在位 → 健康路径放行（秒级降级是
     分析卡延迟根因）；su - / 未登录 / 内层前台命令仍锁降级。"""

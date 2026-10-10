@@ -1326,7 +1326,7 @@ class PipelineCore:
         **无凭据不弹模态**——提示符本来就在终端里（真实 ssh/sudo 行为），
         用户直接手输；旧实现弹窗代答，手输消费提示符后模态被防抖代关，
         表现为弹框一闪而过（真机 2026-10-08）。手输的密码经捕获留档
-        （_arm_typed_capture），验证成功后弹一次「记住」询问（P1-3）。"""
+        （_arm_typed_capture），验证成功后弹一次「记住」询问（P1-3/P1-4）。"""
         if self._closed or self.session is None:
             return
         attempt = self._nested_pw_attempts
@@ -1352,10 +1352,10 @@ class PipelineCore:
                     type="status",
                     text=f"已用记住的密码自动填充 {display_name(*key)}"))
                 return
-        # 无凭据/自动填充未命中：武装手输捕获（sudo 键；ssh 键的手输记忆
-        # 由 P1-4 接入），用户在终端手输密码（提示符已可见），验证成功后
-        # 询问一次「记住」。模态代答路径（_on_nested_password）保留但不再触发。
-        self._arm_typed_capture(key if key and key[1] == "sudo" else None)
+        # 无凭据/自动填充未命中：武装手输捕获——用户在终端手输密码（提示符
+        # 已可见），验证成功后询问一次「记住」（P1-3 sudo/su 键 + P1-4 嵌套
+        # ssh 键）。模态代答路径（_on_nested_password）保留但不再触发。
+        self._arm_typed_capture(key)
 
     async def _on_nested_password(self, pw: str, remember: bool) -> None:
         """模态提交的嵌套密码：整行打进 PTY（远端 echo 关闭，不回显）。"""
