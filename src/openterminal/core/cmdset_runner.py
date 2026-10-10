@@ -7,8 +7,11 @@ hook 门禁等待、「继续」按钮强制放行。状态**物理存 core 实�
 __init__ 以 hasattr 守卫补建，预置值不覆盖），方法体经 self.core 读写。
 
 CMDSET_* 时限常量物理在本模块；运行期经 _impl.CMDSET_* 解析——
-tests 从 web.worker 经双跳补丁桥落到 _core_impl dict，裸读模块全局
+tests 从 web.worker 经双跳补丁桥落到 pipeline dict，裸读模块全局
 会漏补丁（auth/_PROBE_TIMEOUT 缝先例）；正则常量无补丁方，裸读。
+**唯一合法 patch 落点是 wmod/cmod（web.worker / shell.cmdset 经桥）**：
+首个补丁周期后 pipeline.__dict__ 永久持有该常量影子，直接 patch
+本模块的 CMDSET_* 实现端看不到。
 """
 
 from __future__ import annotations

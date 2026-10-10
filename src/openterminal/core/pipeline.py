@@ -298,7 +298,7 @@ class PipelineCore:
             self.__dict__["_output_pump"] = p
         return p
 
-    # --- 过渡委托（tests/ 引用旧名；Task 9/10 迁移测试后删除）---
+    # --- 委托（tests/ 引用旧名，长期保留——勿删）---
     @staticmethod
     def _parse_ssh_cmd_target(line: str
                               ) -> tuple[str | None, str | None, int | None] | None:
@@ -522,8 +522,8 @@ class PipelineCore:
 
     # --- 嵌套密码提示符（ssh/sudo 前台讨密码）---
 
-    # --- 密码状态机过渡委托（实现已拆 core/auth.py；src 内部已直呼
-    # self.auth.*，委托仅供 tests/ 旧名过渡，Task 9 随 _core_impl 删除）---
+    # --- 密码状态机委托（实现在 core/auth.py；tests/ 与组件仍经此引用，
+    # 长期保留——勿删）---
 
 
     async def ask_password(self, label: str, auth_kind: str = "") -> str:
@@ -757,8 +757,8 @@ class PipelineCore:
         if self._target is not None and self._target.commands:
             self.cs._spawn_cmdset()
 
-    # --- 连接后命令集过渡委托（实现已拆 core/cmdset_runner.py；委托仅供
-    # tests/ 旧名过渡，Task 9 随 _core_impl 删除）---
+    # --- 连接后命令集委托（实现在 core/cmdset_runner.py；tests/ 仍经此
+    # 引用旧名，长期保留——勿删）---
 
 
     async def _setup_interactive(self) -> None:
@@ -1044,8 +1044,8 @@ class PipelineCore:
             type="status", text=f"系统方言已手动设为 {parts[1]}"))
 
 
-    # --- 输出泵过渡委托（实现已拆 core/pump.py；src 内部
-    # 调用点暂经委托，Task 9 随 _core_impl 删除）---
+    # --- 输出泵委托（实现在 core/pump.py；core 内部仍经此引用，
+    # 长期保留——勿删）---
 
     async def _pump_eof(self, text: str) -> None:
         if self._ai_task is not None:
@@ -1055,12 +1055,8 @@ class PipelineCore:
         await self.emit_msg(ServerMsg(type="closed", text=f"{text}；敲键自动重连"))
 
     # --- 集成模式：标记流事件 ---
-    # --- 标记流/注入/幕帘过渡委托（实现已拆 core/exec_events.py；src 内部
-    # 已直呼 self.exec.*，委托仅供 tests/ 旧名过渡，Task 9 随 _core_impl 删除）---
-
-
-    def _disp_width(s: str) -> int:
-        return self.exec._disp_width(s)
+    # --- 标记流/注入/幕帘委托（实现在 core/exec_events.py；tests/ 与
+    # ai_flow 仍经此引用旧名，长期保留——勿删）---
 
 
 class CorePresenter:
