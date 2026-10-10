@@ -26,7 +26,7 @@ if sys.platform == "win32":
 
 import termios  # noqa: E402
 
-from openterminal.shell_integration import build_script
+from openterminal.shell.integration import build_script
 
 
 def _drain(fd, seconds):

@@ -131,7 +131,7 @@ def test_api_saved_stores_password_not_in_db(monkeypatch):
 
 def test_saved_commands_extract_and_roundtrip(monkeypatch):
     stored = {}
-    monkeypatch.setattr("openterminal.cmdset.store_password",
+    monkeypatch.setattr("openterminal.shell.cmdset.store_password",
                         lambda key, u, p, pw: stored.__setitem__(key, pw) or True)
     app = create_app(Config.load())
     with TestClient(app) as client:
@@ -147,7 +147,7 @@ def test_saved_commands_extract_and_roundtrip(monkeypatch):
 
 
 def test_saved_commands_absent_keeps_old(monkeypatch):
-    monkeypatch.setattr("openterminal.cmdset.store_password",
+    monkeypatch.setattr("openterminal.shell.cmdset.store_password",
                         lambda *a: True)
     app = create_app(Config.load())
     with TestClient(app) as client:
@@ -164,7 +164,7 @@ def test_saved_commands_absent_keeps_old(monkeypatch):
 
 
 def test_saved_commands_keyring_failure_warns(monkeypatch):
-    monkeypatch.setattr("openterminal.cmdset.store_password",
+    monkeypatch.setattr("openterminal.shell.cmdset.store_password",
                         lambda *a: False)
     app = create_app(Config.load())
     with TestClient(app) as client:
@@ -179,7 +179,7 @@ def test_saved_commands_keyring_failure_warns(monkeypatch):
 def test_saved_edit_invalidates_cached_target(monkeypatch):
     # 编辑已保存主机必须失效内存缓存:cfg.targets 里缓存旧配置(含命令集),
     # 不弹出的话下次连接仍用旧命令集(真机:改了命令集连了却没生效)
-    monkeypatch.setattr("openterminal.cmdset.store_password", lambda *a: True)
+    monkeypatch.setattr("openterminal.shell.cmdset.store_password", lambda *a: True)
     cfg = Config.load()
     app = create_app(cfg)
     with TestClient(app) as client:

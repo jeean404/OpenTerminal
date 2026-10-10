@@ -29,7 +29,7 @@ async def test_cmdset_serial_order_and_events(monkeypatch):
 
 
 async def test_cmdset_answer_on_password_prompt(monkeypatch):
-    import openterminal.cmdset as cmod
+    import openterminal.shell.cmdset as cmod
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.05)
     monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.01)
@@ -50,7 +50,7 @@ async def test_cmdset_answer_on_password_prompt(monkeypatch):
 
 
 async def test_cmdset_answer_first_time_asks_and_remembers(monkeypatch):
-    import openterminal.cmdset as cmod
+    import openterminal.shell.cmdset as cmod
     import openterminal.web.worker as wmod
     from openterminal.web.protocol import ClientMsg
     monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.05)
@@ -78,7 +78,7 @@ async def test_cmdset_answer_first_time_asks_and_remembers(monkeypatch):
 
 
 async def test_cmdset_answer_empty_submit_skips(monkeypatch):
-    import openterminal.cmdset as cmod
+    import openterminal.shell.cmdset as cmod
     import openterminal.web.worker as wmod
     from openterminal.web.protocol import ClientMsg
     monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.05)
@@ -97,7 +97,7 @@ async def test_cmdset_answer_empty_submit_skips(monkeypatch):
 
 
 async def test_cmdset_answer_prompt_timeout_skips(monkeypatch):
-    import openterminal.cmdset as cmod
+    import openterminal.shell.cmdset as cmod
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.05)
     monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.01)
@@ -127,7 +127,7 @@ async def test_cmdset_comments_and_blank_skipped(monkeypatch):
 async def test_cmdset_answer_prompt_with_echo_fast_network(monkeypatch):
     # 快网络:密码提示随命令回显同批到达(命令阶段内)——不得因缓冲重置
     # 而丢弃,应答仍须发出(C1:旧实现在命令阶段结束清空 tail)
-    import openterminal.cmdset as cmod
+    import openterminal.shell.cmdset as cmod
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.5)
     monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.05)
@@ -202,7 +202,7 @@ async def test_cmdset_resume_button_forces_continue(monkeypatch):
 async def test_cmdset_secret_answer_skips_confirm_prompt(monkeypatch):
     # @引用(密码)不得应答 yes/no 类确认提示:那类提示回显输入,密码会
     # 明文漏进终端(真机:跳转时 host key 确认先弹,密码被打进该提示)
-    import openterminal.cmdset as cmod
+    import openterminal.shell.cmdset as cmod
     import openterminal.web.worker as wmod
     monkeypatch.setattr(wmod, "CMDSET_ECHO_TIMEOUT", 0.05)
     monkeypatch.setattr(wmod, "CMDSET_QUIET", 0.01)

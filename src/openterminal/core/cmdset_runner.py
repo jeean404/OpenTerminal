@@ -18,7 +18,7 @@ import re
 import time
 
 from . import pipeline as _impl
-from .. import cmdset
+from ..shell import cmdset
 from ..session.base import _needs_password_prompt
 from .messages import PasswordCancelled, ServerMsg, _ANSI_RE, _dbg
 

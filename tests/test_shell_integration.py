@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from openterminal.shell_integration import (
+from openterminal.shell.integration import (
     EXEC_PREFIX,
     PROBE_TAG,
     StreamRouter,
@@ -353,7 +353,7 @@ def test_history_inject_line_empty():
 
 def test_is_internal_line_filters_injection_junk():
     """注入内部行判定：分片装配/回显包装不入历史，普通命令不误杀。"""
-    from openterminal.shell_integration import is_internal_line
+    from openterminal.shell.integration import is_internal_line
 
     assert is_internal_line("__ot_inj='X19vdF9pPTEK'")
     assert is_internal_line('__ot_inj="$__ot_inj"\'MSDK…\'')
@@ -398,7 +398,7 @@ def test_bash_pad_branch_erases_echo_line():
     根因）。分支只补 N 个换行：光标行（readline 已自清）+ N 个换行恰得 N 行
     占位。zsh 的 zle 进 widget 前不换行、无自擦，zsh 分支保持同行 \\r\\033[2K
     （parity 基准）。"""
-    from openterminal.shell_integration import _BASH_SCRIPT, _ZSH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT, _ZSH_SCRIPT
     branch = _BASH_SCRIPT.split("'__ot_pad '*)", 1)[1].split("return 0 ;;", 1)[0]
     assert "\\033[1A\\033[2K" not in branch, \
         "bash pad 分支不得 CUU 上移擦行（bash 5.x 光标在回显行上，上移吃掉上一行）"
@@ -418,7 +418,7 @@ def test_bash_run_restores_readline_tty_mode():
     """__ot_run eval 后必须还回 readline 裸模式快照：eval 前按 __ot_tty_save 恢复
     正常态供子命令，eval 后不还裸模式则下个提示符跑 canonical——Tab 补全/↑ 历史
     /Ctrl+R 字面回显全失效（真机：首条命令后 ↑ 打出 ^[[A）。"""
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     run = _BASH_SCRIPT.split("__ot_run() {", 1)[1].split("__ot_exec_run() {", 1)[0]
     assert "__ot_rl_tty" in run, "__ot_run 缺 readline 裸模式还原"
     assert run.index('eval "$1"') < run.index('__ot_rl_tty')
@@ -486,7 +486,7 @@ def test_history_quiet_line_snapshot_and_enable():
     assert '__ot_his="$options[hist_ignore_space]"' in s  # zsh 快照
     assert s.index("__ot_hc=") < s.index("HISTCONTROL=ignorespace")
     assert "setopt hist_ignore_space 2>/dev/null" in s
-    from openterminal.shell_integration import is_internal_line
+    from openterminal.shell.integration import is_internal_line
     assert is_internal_line(s)
 
 
@@ -661,7 +661,7 @@ def test_bash_repaint_same_row_erase_on_bash5():
     行、上一条命令的青色行逐条消失，屏幕逐命令上塌）。bash 4 及更早按旧实测
     （C-m 已画换行、光标在回显行下一行行首）保留 k 次上移擦，未在真机复核。
     """
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     repaint = _BASH_SCRIPT.split("__ot_repaint() {", 1)[1].split("__ot_run() {", 1)[0]
     assert "BASH_VERSINFO" in repaint, "重绘未按 bash 大版本分流擦行几何"
     v5, v4 = repaint.split("BASH_VERSINFO", 1)[1].split("else", 1)
@@ -681,7 +681,7 @@ BS = chr(92)
 
 
 def _bash_prompt_cmd() -> str:
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     return _BASH_SCRIPT.split("__ot_prompt_cmd() {", 1)[1].split("\n}", 1)[0]
 
 
@@ -692,7 +692,7 @@ def test_bash_enter_is_two_stage_macro():
     bind -x 经 eval 注入时 keymap 关联丢失。中间键用 \\C-o（单字节）而非
     \\e[44~（多字节 CSI）——bash 4.2 的 bind -x 在宏展开时对多字节序列的
     keymap 查找失败。"""
-    from openterminal.shell_integration import injection_lines
+    from openterminal.shell.integration import injection_lines
     lines = injection_lines("bash", 1)
     joined = b"\n".join(lines).decode()
     assert "bind -x '\"" + BS + "C-o\": __ot_submit'" in joined
@@ -733,7 +733,7 @@ def test_bash_stale_erase_is_fork_free():
 def test_bash_p0_mirrors_ps1_shape():
     """__ot_p0 必须与 PS1 展开同形，否则擦行按错宽度算折行数 k（多擦吃真实
     输出、少擦留残行）。"""
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     assert "[" + BS + "u@" + BS + "H " + BS + "w]" + BS + "$ " in _BASH_SCRIPT
     pc = _bash_prompt_cmd()
     assert 'p0="[${USER:-$(id -un)}@$HOSTNAME $d]$c "' in pc
@@ -746,7 +746,7 @@ def test_bash_run_pads_partial_line_after_d_marker():
     推到纯空白行：否则提示符接在输出尾巴后画（真机 printf abc → "abc[root@… ~]# "），
     收尾擦行就连真实输出一起擦。补白必须在 D 标记之后——否则空格进 exec 缓冲，
     污染 run() 返回值与转录。"""
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     run = _BASH_SCRIPT.split("__ot_run() {", 1)[1].split("__ot_exec_run() {", 1)[0]
     fill = "printf '%*s" + BS + "r' \"${COLUMNS:-80}\" ''"
     assert fill in run, "缺半行补白"
@@ -756,7 +756,7 @@ def test_bash_run_pads_partial_line_after_d_marker():
 def test_bash_empty_branch_clears_buffer_for_macro_accept():
     """宏尾 accept-line 收的必须是空行：纯空白行留着会被 bash 当命令收下并进史
     （HISTCONTROL=ignorespace 不保证处处开着，且前导空格行仍会执行）。"""
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     empty = _BASH_SCRIPT.split('if [ -z "$t" ]; then', 1)[1].split("return 0", 1)[0]
     assert 'READLINE_LINE=""; READLINE_POINT=0' in empty
 
@@ -765,7 +765,7 @@ def test_bash_clr_flag_survives_reinjection():
     """重注入是 eval 新脚本，而 __ot_clr 由本轮提交回调先置位——init 用普通赋值
     就把这轮收尾擦行清了，注入链每片净多占一行（抑制窗内前端看不见，PTY 与前端
     就此错行）。故三个收尾状态只能「未定义时兜底赋空」。"""
-    from openterminal.shell_integration import _BASH_SCRIPT
+    from openterminal.shell.integration import _BASH_SCRIPT
     head = _BASH_SCRIPT.split("__ot_prompt_cmd() {", 1)[0]
     for v in ("__ot_clr", "__ot_p0", "__ot_w0"):
         assert ': "${%s:=}"' % v in head, "%s 须用 := 兜底初始化" % v

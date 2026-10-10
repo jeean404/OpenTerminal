@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 
 from ..connections import parse_user_at_host
-from ..shell_integration import is_internal_line
+from ..shell.integration import is_internal_line
 
 
 class NestedSshTracker:

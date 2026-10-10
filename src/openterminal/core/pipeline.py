@@ -36,7 +36,7 @@ def _dbg(*a) -> None:
     if _OT_DBG:
         print(f"[otdbg +{time.monotonic() - _OT_T0:7.3f}s]", *a, flush=True)
 
-from .. import cmdset
+from ..shell import cmdset
 from .. import history_db
 from ..config import Config, TargetConfig, app_dir
 from ..connections import (
@@ -104,7 +104,7 @@ def _looks_ai(text: str) -> bool:
     return not all(
         c.isalnum() or c in "./@%+:=_,-" for c in first)
 from ..connections.secrets import load_password, store_password
-from ..shell_integration import (
+from ..shell.integration import (
     StreamRouter, agent_exec_line, history_inject_line, history_quiet_line,
     injection_lines, is_internal_line,
     parse_probe, probe_command, toggle_line,

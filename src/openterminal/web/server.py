@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..cmdset import extract_inline_secrets
+from ..shell.cmdset import extract_inline_secrets
 from ..config import Config, TargetConfig
 from ..connections import (
     RenameConflictError, build_target_list, cred_alias_eq,

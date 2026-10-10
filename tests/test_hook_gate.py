@@ -4,7 +4,7 @@ import asyncio
 import openterminal.core as cmod
 from openterminal.web.protocol import ClientMsg
 from openterminal.core import PipelineCore
-from openterminal.shell_integration import parse_probe, probe_command
+from openterminal.shell.integration import parse_probe, probe_command
 from tests.web_fakes import (FakeSession, _install_fake_runner, _make_worker, _wait, _wait_json, _wire_presenter)
 from tests.core_fakes import FakeCore, _bare_core
 

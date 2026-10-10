@@ -247,7 +247,7 @@ async def test_worker_setup_injection_ps2_selfheal(monkeypatch):
     """setup 注入竞态自愈：回显流出现续行提示符指纹（quote> = 输入字节被行
     规程丢弃、引号失配）→ \\x15\\x03 清行整链重灌一次 → 拿到提示符标记
     （不再烧满 8s 兜底才回退直通，真机 8s 死等根因）。"""
-    from openterminal.shell_integration import injection_lines
+    from openterminal.shell.integration import injection_lines
     from openterminal.session.base import CommandResult
     w, sink = await _make_worker(monkeypatch, session=PassthroughSession())
     await asyncio.wait_for(w.connected.wait(), timeout=2)

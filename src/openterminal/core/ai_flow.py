@@ -22,7 +22,7 @@ from dataclasses import replace
 
 from . import pipeline as _impl
 from .messages import ServerMsg, _dbg
-from ..shell_integration import toggle_line
+from ..shell.integration import toggle_line
 
 
 class AiFlow:

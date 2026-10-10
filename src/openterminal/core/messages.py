@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import dataclass
 
-from ..shell_integration import agent_exec_line
+from ..shell.integration import agent_exec_line
 from ..session.base import CommandResult
 
 _OT_DBG = bool(os.environ.get("OT_WEB_DEBUG"))

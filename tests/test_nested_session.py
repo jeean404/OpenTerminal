@@ -16,7 +16,7 @@ import asyncio
 import openterminal.core as cmod
 from openterminal.core import PipelineCore
 from openterminal.core.nested_ssh import NestedSshTracker
-from openterminal.shell_integration import parse_probe, probe_command
+from openterminal.shell.integration import parse_probe, probe_command
 from openterminal.session.base import _PASSWORD_PROMPT_RE
 
 from tests.core_fakes import FakeCore, _bare_core

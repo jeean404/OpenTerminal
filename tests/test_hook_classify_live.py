@@ -28,7 +28,7 @@ if sys.platform == "win32":
 
 import pty  # noqa: E402
 
-from openterminal.shell_integration import build_script, injection_lines
+from openterminal.shell.integration import build_script, injection_lines
 
 REPORT_RE = re.compile(rb"\x1b\]6337;\d+;(CMD|AI|EXEC);([^\x07]*)\x07")
 
