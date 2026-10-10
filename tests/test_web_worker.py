@@ -1264,7 +1264,7 @@ class _HungAgent:
 async def test_task_stall_emits_error_and_ends(monkeypatch):
     """astream 无超时 → 任务永不收束 → 「AI 正在思考」永久不收（真机截图二）。
     静默看门狗必须把任务收成 error 事件。"""
-    import openterminal.agent as amod
+    import openterminal.agent.runner as amod
     monkeypatch.setattr(amod, "AGENT_STALL_TIMEOUT", 0.25)
     runner = amod.TaskRunner(_HungAgent(), "th-stall", max_tool_turns=10)
     events = await asyncio.wait_for(runner.run("x"), timeout=5)
@@ -1273,7 +1273,7 @@ async def test_task_stall_emits_error_and_ends(monkeypatch):
 
 async def test_task_stall_not_triggered_while_tool_pending(monkeypatch):
     """有在途工具＝命令真在跑（长构建合法）：短阈值不得误杀，只按工具阈值判。"""
-    import openterminal.agent as amod
+    import openterminal.agent.runner as amod
     monkeypatch.setattr(amod, "AGENT_STALL_TIMEOUT", 0.05)
     monkeypatch.setattr(amod, "AGENT_TOOL_TIMEOUT", 5.0)
     runner = amod.TaskRunner(_HungAgent(), "th-tool", max_tool_turns=10)

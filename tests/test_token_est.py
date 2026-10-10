@@ -1,6 +1,6 @@
 """token_est：tiktoken 估算与启发式兜底。"""
 
-import openterminal.token_est as te
+import openterminal.agent.token_est as te
 
 
 def test_empty_text_is_zero():

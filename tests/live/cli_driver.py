@@ -76,9 +76,9 @@ from openterminal.config import Config, app_dir  # noqa: E402
 
 load_dotenv(app_dir() / ".env")
 
-import openterminal.agent as agent_mod  # noqa: E402
+import openterminal.agent.runner as agent_mod  # noqa: E402
 
-from openterminal.agent import TaskEvent  # noqa: E402
+from openterminal.agent.runner import TaskEvent  # noqa: E402
 from openterminal.term_frontend import CliCore, TermFrontend  # noqa: E402
 
 TOUCH_TARGET = os.environ.get("OT_LIVE_TOUCH_TARGET",

@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from openterminal.sysprobe import SystemProfile
+from openterminal.agent.sysprobe import SystemProfile
 from openterminal.web.worker import TabWorker
 from openterminal.config import Config
 
@@ -180,7 +180,7 @@ class FakeRunner:
 
 
 async def _install_fake_runner(monkeypatch, runner_cls=FakeRunner):
-    import openterminal.agent as amod
+    import openterminal.agent.runner as amod
     monkeypatch.setattr(amod, "TaskRunner", runner_cls)
 
 

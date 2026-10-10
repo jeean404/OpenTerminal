@@ -10,13 +10,13 @@ if sys.platform == "win32":
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
-from openterminal.agent import (
+from openterminal.agent.runner import (
     DenyMiddleware, TaskRunner, build_agent, build_system_prompt,
 )
 from openterminal.config import Config
 from openterminal.session.local_posix import LocalPtySession
 from openterminal.policy import Policy
-from openterminal.sysprobe import MANUAL_PRESETS, SystemProfile
+from openterminal.agent.sysprobe import MANUAL_PRESETS, SystemProfile
 from tests.fakes import scripted, tool_call
 
 
@@ -243,7 +243,7 @@ async def test_tool_end_failure_flag_from_tool_message_status():
 
 
 async def test_tool_summary_prefers_keyed_arg_and_truncates():
-    from openterminal.agent import _tool_args_summary
+    from openterminal.agent.runner import _tool_args_summary
 
     assert _tool_args_summary("read_file", {"path": "a/b.txt"}) == "a/b.txt"
     assert _tool_args_summary("glob", {"pattern": "**/*.py"}) == "**/*.py"
@@ -261,7 +261,7 @@ def test_system_prompt_contains_dialect():
 def test_message_text_extracts_text_blocks_only():
     from langchain_core.messages import AIMessageChunk
 
-    from openterminal.agent import message_text
+    from openterminal.agent.runner import message_text
 
     m = AIMessage(content=[
         {"type": "thinking", "thinking": "内部推理，不应展示"},

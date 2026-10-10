@@ -1,4 +1,4 @@
-from openterminal.sysprobe import SysFacts, profile_from_facts, MANUAL_PRESETS
+from openterminal.agent.sysprobe import SysFacts, profile_from_facts, MANUAL_PRESETS
 
 
 def facts(id_="ubuntu", version="22.04", pretty="Ubuntu 22.04 LTS",
@@ -52,7 +52,7 @@ def test_manual_presets_complete():
 
 
 def test_host_cache_roundtrip(tmp_path):
-    from openterminal.sysprobe import load_host_cache, save_host_cache
+    from openterminal.agent.sysprobe import load_host_cache, save_host_cache
     p = profile_from_facts("prod-web", facts())
     path = tmp_path / "hosts.toml"
     save_host_cache(path, "prod-web", p)
@@ -70,7 +70,7 @@ def test_probe_command_is_valid_posix():
 
     import pytest
 
-    from openterminal.sysprobe import _PROBE_STATEMENTS
+    from openterminal.agent.sysprobe import _PROBE_STATEMENTS
 
     if sys.platform == "win32":
         pytest.skip("POSIX shell 语法检查")
@@ -83,7 +83,7 @@ def test_probe_profile_parses_fake_session():
     import asyncio
 
     from openterminal.session.base import CommandResult
-    from openterminal.sysprobe import probe_profile
+    from openterminal.agent.sysprobe import probe_profile
 
     class FakeSession:
         def __init__(self):

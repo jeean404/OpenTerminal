@@ -111,7 +111,7 @@ from ..shell.integration import (
 )
 from ..session.base import (
     _PASSWORD_PROMPT_RE, CommandResult, _needs_password_prompt)
-from ..sysprobe import (
+from ..agent.sysprobe import (
     LOCAL_PROFILE, MANUAL_PRESETS, load_host_cache, probe_profile,
     save_host_cache,
 )
@@ -148,10 +148,10 @@ def _load_agent_stack() -> None:
     monkeypatch 覆盖（非 None）的名字原样保留，不触发 deepagents 真导入。"""
     global build_agent, build_chat_model
     if build_agent is None:
-        from ..agent import build_agent as _build_agent
+        from ..agent.runner import build_agent as _build_agent
         build_agent = _build_agent
     if build_chat_model is None:
-        from ..agent import build_chat_model as _build_chat_model
+        from ..agent.runner import build_chat_model as _build_chat_model
         build_chat_model = _build_chat_model
 
 
@@ -1030,7 +1030,7 @@ class PipelineCore:
         return name
 
     async def _manual_system(self, line: str) -> None:
-        from ..sysprobe import MANUAL_PRESETS
+        from ..agent.sysprobe import MANUAL_PRESETS
 
         parts = line.split()
         if len(parts) < 2 or parts[1] not in MANUAL_PRESETS:

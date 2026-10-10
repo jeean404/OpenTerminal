@@ -69,7 +69,7 @@ class AiFlow:
         def _import_stack() -> None:
             _impl._load_agent_stack()
             from .. import agent  # noqa: F401 - 预导入模块本体，_run_task
-            # 调用点 `from ..agent import TaskRunner` 命中 sys.modules 零成本
+            # 调用点 `from ..agent.runner import TaskRunner` 命中 sys.modules 零成本
         try:
             await asyncio.to_thread(_import_stack)
         except Exception:  # noqa: BLE001 - 预热失败不阻断，首任务按需导入
@@ -466,7 +466,7 @@ class AiFlow:
 
         # 调用点取 TaskRunner：预热已导入 agent 模块（sys.modules 命中零
         # 成本）；测试桩打 amod.TaskRunner，缓存进 core 会跨测试串味
-        from ..agent import TaskRunner
+        from ..agent.runner import TaskRunner
         runner = TaskRunner(
             self.core.agent, f"{self.core.tab_id}#c{self.core._ctx_epoch}",
             max_tool_turns=self.core.cfg.shell.max_tool_turns,

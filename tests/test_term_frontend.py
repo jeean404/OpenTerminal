@@ -25,7 +25,7 @@ import openterminal.core as cmod
 import openterminal.term_frontend as tmod
 from openterminal.config import Config, TargetConfig
 from openterminal.core import ClientMsg, ServerMsg
-from openterminal.sysprobe import SystemProfile
+from openterminal.agent.sysprobe import SystemProfile
 from openterminal.term_frontend import CliCore, TermFrontend
 
 

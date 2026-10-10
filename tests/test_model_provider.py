@@ -2,7 +2,7 @@
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
-from openterminal.agent import build_chat_model
+from openterminal.agent.runner import build_chat_model
 from openterminal.config import ModelConfig
 
 

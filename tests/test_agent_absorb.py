@@ -6,7 +6,7 @@ docs/card_duplicate.md P0-1 验收落点。无 PTY 依赖，Windows/POSIX 都能
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from openterminal.agent import TaskRunner
+from openterminal.agent.runner import TaskRunner
 
 
 def _ai_two_calls() -> AIMessage:
