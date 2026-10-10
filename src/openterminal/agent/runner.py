@@ -20,9 +20,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 
 from .backend import PtyShellBackend
-from .config import Config, ModelConfig
-from .policy import Policy
-from .skills import skill_routes, skill_sources
+from ..config import Config, ModelConfig
+from ..policy import Policy
+from ..skills import skill_routes, skill_sources
 from .sysprobe import SystemProfile
 
 _DIALECT_TABLE = """
