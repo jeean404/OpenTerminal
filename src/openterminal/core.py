@@ -2105,9 +2105,7 @@ class PipelineCore:
         deadline = time.monotonic() + CMDSET_ECHO_TIMEOUT
         while time.monotonic() < deadline and cmd not in self._cs_text():
             await asyncio.sleep(0.02)
-        if cmd not in self._cs_text():
-            # 回显始终没到(TTY 还在无回显窗口/被吞):补画命令行,否则用户
-            # 根本看不到这条执行了什么(真机「只显示第 1 条命令的执行记录」)
+        if cmd not in self._cs_text() and not self._cs_tail:
             await self.emit_bytes(cmd.encode() + bytes([13, 10]))
         quiet_deadline = time.monotonic() + CMDSET_ECHO_TIMEOUT
         last = -1

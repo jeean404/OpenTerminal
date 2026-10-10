@@ -426,7 +426,7 @@ __ot_submit() {
   __ot_run "$exp"
   return 0
 }
-# Enter 双段宏（真机 2026-10-09 字节级验证，CentOS bash 5.1.8）：\e[44~ 先跑
+# Enter 双段宏（真机 2026-10-09 字节级验证，CentOS bash 5.1.8）：\C-o 先跑
 # hook（分类/重绘/执行；readline 进 bind -x 回调前自发的 CR+EL 预擦回显行照旧
 # 发生，重绘几何不变），\e[45~ 再 accept 一条空行让 readline() 真的返回——
 # bash 主循环这才重跑 PROMPT_COMMAND 并重展开 PS1。只 bind -x 吞 Enter 时
@@ -434,13 +434,14 @@ __ot_submit() {
 # （cd /etc 后仍显示 ~），且用户自己的 PROMPT_COMMAND、bracketed paste 开关等
 # 原生提示符周期动作全部不跑。空行不入史也不执行（bash 对空命令两者都跳；
 # 实测 history 号连续无空洞）；PROMPT_COMMAND 补发的 D 与 __ot_run 那份同 inst
-# 同 ec，core 按孤儿 D 忽略（栈已空）。私有 CSI 键位终端不会自发发送；宏体不含
-# \C-m，无递归。\C-j 同绑（发 LF 的终端走同一条路径）。zsh 侧 widget 本就
-# zle .accept-line，无此结构问题。
-bind -x '"\e[44~": __ot_submit'
-bind '"\e[45~": accept-line'
-bind '"\C-m": "\e[44~\e[45~"'
-bind '"\C-j": "\e[44~\e[45~"'
+# 同 ec，core 按孤儿 D 忽略（栈已空）。\C-o 是单字节键（0x0F），bash 4.2 的
+# bind -x 在宏展开时对多字节 CSI 序列（如 \e[44~）的 keymap 查找失败，
+# 单字节键无此问题。宏体不含 \C-m，无递归。\C-j 同绑（发 LF 的终端走同一条
+# 路径）。zsh 侧 widget 本就 zle .accept-line，无此结构问题。
+# bind 命令由 injection_lines 在 eval 之后独立注入（不进 base64 块）——
+# bind -x 经 eval 注入时 keymap 关联丢失（真机：bash_execute_unix_command
+# cannot find keymap for command，按键触发时才报，注册时返回 0 无法预检），
+# 在正常 shell 上下文执行则无此问题。
 # 子 shell 继承（bug 修复：su 不带 - 切 root 后集成与主题色丢失）：非 login
 # 子 shell 继承导出的变量/函数/PROMPT_COMMAND/PS1；su - 等 login shell 会被
 # root 的 profile 重置，无法覆盖
@@ -971,6 +972,19 @@ def injection_lines(shell: str, instance: int,
     for p in parts[1:]:
         lines.append(f"__ot_inj=\"$__ot_inj\"'{p}'")
     lines.append(f'eval "$(echo "$__ot_inj" | base64 {b64flag})"')
+    if shell == "bash":
+        # bind 命令在 eval 之后独立注入：bind -x 经 eval 注入时 keymap
+        # 关联丢失（真机：bash_execute_unix_command cannot find keymap
+        # for command），在正常 shell 上下文执行则无此问题。__ot_submit
+        # 已由 eval 定义，此处直接绑定即可。
+        # 中间键用 \C-o（单字节 0x0F）而非 \e[44~（多字节 CSI 序列）——
+        # bash 4.2 的 bind -x 在宏展开时对多字节序列的 keymap 查找失败，
+        # 单字节键无此问题（真机 RHEL 7.9 bash 4.2.46 验证）。
+        lines.append(
+            "bind -x '\"\\C-o\": __ot_submit'"
+            " 2>/dev/null; bind '\"\\e[45~\": accept-line'"
+            " 2>/dev/null; bind '\"\\C-m\": \"\\C-o\\e[45~\"'"
+            " 2>/dev/null; bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null")
     # 前导空格：配合 history_quiet_line 的静默窗口（bash ignorespace / zsh
     # hist_ignore_space）让分片原生跳过入史——用户报障「↑ 召回的全是
     # __ot_inj base64 分片」的根修。hook 在位时首词剥离不受影响，

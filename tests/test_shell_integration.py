@@ -163,17 +163,19 @@ def test_probe_command_families():
 # --- 注入行构造 ---
 
 def test_injection_line_posix_and_ps():
-    # 分片注入：每片是完整 shell 行（\r 结尾），末片 eval 还原执行
+    # 分片注入：每片是完整 shell 行（\r 结尾），eval 后跟 bind 独立行
     chunks = injection_lines("bash", 3, "-d")
     assert all(c.endswith(b"\r") for c in chunks)
     assert all(len(c) < 1024 for c in chunks), "单片不得超 tty canonical 缓冲"
     # 前导空格：静默窗口（history_quiet_line）内原生入史被整体跳过
     assert all(c.startswith(b" ") for c in chunks)
-    assert chunks[-1].decode().lstrip().startswith("eval")
+    # eval 是倒数第二行，bind 是最后一行（bind 不进 base64 块）
+    assert chunks[-2].decode().lstrip().startswith("eval")
+    assert "bind -x" in chunks[-1].decode()
     b64 = "".join(
-        c.decode().split("'")[1] for c in chunks[:-1])
+        c.decode().split("'")[1] for c in chunks[:-2])
     script = base64.b64decode(b64).decode()
-    assert "__ot_i=3" in script and "bind -x" in script
+    assert "__ot_i=3" in script
 
     # 单行版本内容与分片一致（拼接后等价）
     line = injection_line("bash", 3, "-d")
@@ -684,15 +686,22 @@ def _bash_prompt_cmd() -> str:
 
 
 def test_bash_enter_is_two_stage_macro():
-    """Enter 必须是「bind -x hook + accept-line」双段宏，不得回到直接吞。"""
-    s = build_script("bash", 1)
-    assert "bind -x '\"" + BS + "e[44~\": __ot_submit'" in s
-    assert "bind '\"" + BS + "e[45~\": accept-line'" in s
-    assert "bind '\"" + BS + "C-m\": \"" + BS + "e[44~" + BS + "e[45~\"'" in s
-    assert "bind '\"" + BS + "C-j\": \"" + BS + "e[44~" + BS + "e[45~\"'" in s
+    """Enter 必须是「bind -x hook + accept-line」双段宏，不得回到直接吞。
+
+    bind 命令由 injection_lines 在 eval 之后独立注入（不进 base64 块）——
+    bind -x 经 eval 注入时 keymap 关联丢失。中间键用 \\C-o（单字节）而非
+    \\e[44~（多字节 CSI）——bash 4.2 的 bind -x 在宏展开时对多字节序列的
+    keymap 查找失败。"""
+    from openterminal.shell_integration import injection_lines
+    lines = injection_lines("bash", 1)
+    joined = b"\n".join(lines).decode()
+    assert "bind -x '\"" + BS + "C-o\": __ot_submit'" in joined
+    assert "bind '\"" + BS + "e[45~\": accept-line'" in joined
+    assert "bind '\"" + BS + "C-m\": \"" + BS + "C-o" + BS + "e[45~\"'" in joined
+    assert "bind '\"" + BS + "C-j\": \"" + BS + "C-o" + BS + "e[45~\"'" in joined
     # 旧形态（bind -x 直接吃 Enter）不得复活：那等于 readline() 永不返回
-    assert "bind -x '\"" + BS + "C-m\"" not in s
-    assert "bind -x '\"" + BS + "C-j\"" not in s
+    assert "bind -x '\"" + BS + "C-m\"" not in joined
+    assert "bind -x '\"" + BS + "C-j\"" not in joined
 
 
 def test_bash_prompt_cmd_erases_stale_readline_redraw():
