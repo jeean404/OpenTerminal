@@ -194,3 +194,112 @@ def test_saved_edit_invalidates_cached_target(monkeypatch):
         assert "jumpbox" not in cfg.targets
         assert _resolve_target_name(cfg, "jumpbox") == "jumpbox"
         assert cfg.targets["jumpbox"].commands == ["echo v2"]
+
+
+# --- 共享凭据防误删 + 「留空不修改」（P0-2 回归，任务书 P2-6）---
+
+
+def _patch_secret_ops(monkeypatch):
+    """keyring 读写清全部打桩留痕（web/server 的模块级名字）。"""
+    import openterminal.web.server as wmod
+
+    deleted, stored = [], []
+    monkeypatch.setattr(wmod, "delete_password",
+                        lambda h, u, p: deleted.append((h, u, p)) or True)
+    monkeypatch.setattr(wmod, "store_password",
+                        lambda h, u, p, pw: stored.append((h, u, p, pw)) or True)
+    return deleted, stored
+
+
+def test_remove_saved_keeps_credential_shared_with_siblings(monkeypatch):
+    # 三条连接共享同一凭据键（跳板形态 pe@跳板）：删其一不清凭据，
+    # 删到无引用才清（旧实现删一毁三，其余条目全部重弹密码）
+    deleted, _ = _patch_secret_ops(monkeypatch)
+    save_saved_targets([
+        TargetConfig(name="a", mode="ssh", host="10.0.0.5", user="pe"),
+        TargetConfig(name="b", mode="ssh", host="10.0.0.5", user="pe"),
+        TargetConfig(name="c", mode="ssh", host="10.0.0.5", user="pe"),
+    ])
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        assert client.delete("/api/saved/a").status_code == 200
+        assert deleted == []          # 仍有 b/c 共享：凭据不许误删
+        assert client.delete("/api/saved/b").status_code == 200
+        assert deleted == []
+        assert client.delete("/api/saved/c").status_code == 200
+        assert deleted == [("10.0.0.5", "pe", None)]   # 无引用才清
+
+
+def test_remove_saved_shared_credential_port_alias(monkeypatch):
+    # 共享判定按别名语义：port None 与 22 视同同一凭据键
+    deleted, _ = _patch_secret_ops(monkeypatch)
+    save_saved_targets([
+        TargetConfig(name="a", mode="ssh", host="10.0.0.5", user="pe", port=22),
+        TargetConfig(name="b", mode="ssh", host="10.0.0.5", user="pe"),
+    ])
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        assert client.delete("/api/saved/a").status_code == 200
+        assert deleted == []          # b（port=None）与 a 的 :22 键互为别名
+
+
+def test_edit_saved_address_change_empty_password_keeps_credential(monkeypatch):
+    # 改地址 + 表单密码留空：「留空不修改」——旧凭据原样保留
+    # （旧实现删了不写，静默丢；任务书 P0-2-2 选定语义）
+    deleted, stored = _patch_secret_ops(monkeypatch)
+    save_saved_targets([
+        TargetConfig(name="a", mode="ssh", host="10.0.0.5", user="pe"),
+    ])
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        r = client.put("/api/saved/a", json={
+            "name": "a", "host": "10.0.0.9", "user": "pe"})
+        assert r.status_code == 200
+    assert deleted == []              # 旧凭据不删
+    assert stored == []               # 留空不写新
+
+
+def test_edit_saved_address_change_with_password_cleans_unreferenced(monkeypatch):
+    # 改地址 + 带新密码：旧键无其他引用才清，新键按新地址写
+    deleted, stored = _patch_secret_ops(monkeypatch)
+    save_saved_targets([
+        TargetConfig(name="a", mode="ssh", host="10.0.0.5", user="pe"),
+    ])
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        r = client.put("/api/saved/a", json={
+            "name": "a", "host": "10.0.0.9", "user": "pe", "password": "np"})
+        assert r.status_code == 200
+    assert deleted == [("10.0.0.5", "pe", None)]
+    assert stored == [("10.0.0.9", "pe", None, "np")]
+
+
+def test_edit_saved_shared_credential_survives_address_change(monkeypatch):
+    # 改地址 + 带新密码，但旧键仍被兄弟条目共享：旧键不删，只写新键
+    deleted, stored = _patch_secret_ops(monkeypatch)
+    save_saved_targets([
+        TargetConfig(name="a", mode="ssh", host="10.0.0.5", user="pe"),
+        TargetConfig(name="b", mode="ssh", host="10.0.0.5", user="pe"),
+    ])
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        r = client.put("/api/saved/a", json={
+            "name": "a", "host": "10.0.0.9", "user": "pe", "password": "np"})
+        assert r.status_code == 200
+    assert deleted == []              # b 还在用旧键
+    assert stored == [("10.0.0.9", "pe", None, "np")]
+
+
+def test_edit_saved_port_alias_is_not_address_change(monkeypatch):
+    # port 22→None 只是端口写法变化（凭据键别名）：不算改地址，不删旧凭据
+    deleted, stored = _patch_secret_ops(monkeypatch)
+    save_saved_targets([
+        TargetConfig(name="a", mode="ssh", host="10.0.0.5", user="pe", port=22),
+    ])
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        r = client.put("/api/saved/a", json={
+            "name": "a", "host": "10.0.0.5", "user": "pe"})
+        assert r.status_code == 200
+    assert deleted == []
+    assert stored == []
