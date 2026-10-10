@@ -716,12 +716,15 @@ class PipelineCore:
                 # （password_remember 不携明文，避免密码再回流一遍）
                 self._pw_last_entered = msg.text
                 await self._pws.put(msg.text)
-                if msg.remember:
-                    self._store_auth_password(msg.text)
+                if msg.remember and not self._store_auth_password(msg.text):
+                    await self.emit_msg(ServerMsg(
+                        type="status", text=PW_STORE_FAIL_HINT))
             elif msg.auth_kind == "password_remember":
                 # 手输密码登录成功后的「记住」确认：与弹窗勾选记住同键写 keyring
-                if getattr(self, "_pw_last_entered", ""):
-                    self._store_auth_password(self._pw_last_entered)
+                if getattr(self, "_pw_last_entered", "") and \
+                        not self._store_auth_password(self._pw_last_entered):
+                    await self.emit_msg(ServerMsg(
+                        type="status", text=PW_STORE_FAIL_HINT))
             elif msg.auth_kind == "password_cancel":
                 # 终端内联密码输入的 Ctrl+C：中止认证等待（等同连接关闭），
                 # ask_password 抛 PasswordCancelled → 前端显示「连接已取消」
@@ -1685,16 +1688,22 @@ class PipelineCore:
             raise ConnectionError("连接已关闭")
         return val
 
-    def _store_auth_password(self, password: str) -> None:
-        """认证弹窗勾选「记住」→ 密码写入 keyring（与重连时 load_password 同一键）。"""
+    def _store_auth_password(self, password: str) -> bool:
+        """认证弹窗勾选「记住」→ 密码写入 keyring（与重连时 load_password 同一键）。
+
+        键 = 目标的 display_name 三元组——ad-hoc 临时目标（
+        _resolve_target_name 重建）同样按它落键（P2-5：确认后写 keyring，
+        未确认不写由 ready 后确认框把关）。返回是否落库成功：凭据库不可用
+        返回 False，由调用方给可见提示（「以为记住了其实没记住」不再静默）。
+        """
         target = self.cfg.targets.get(self.target_name, self.cfg.targets["default"])
         if target.mode != "ssh" or not target.host:
-            return
+            return True   # 无键可写（local 等）：不算失败
         try:
-            store_password(target.host, target.user, target.port, password)
-        except Exception:
-            # 记住失败不阻断本次连接（密码已进 _pws 继续认证）
-            pass
+            return bool(store_password(target.host, target.user, target.port,
+                                       password))
+        except Exception:  # noqa: BLE001 - 记住失败不阻断本次连接（密码已进 _pws 继续认证）
+            return False
 
     # 审批理由中属「无害」的白名单：仅命中这些 → normal（蓝框），其余高危（红框）
     _BENIGN_APPROVE_REASONS = frozenset({"重定向覆盖文件", "用户 approve_extra 规则"})
