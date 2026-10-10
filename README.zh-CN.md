@@ -307,7 +307,7 @@ ot exec -t prod-web -c "df -h /" --output json
 显示走**单管线**:PTY 字节流原样直达终端,shell 集成 hook 用带内 OSC 标记
 记账(历史/退出码/AI 上下文),AI 工具命令经 `__ot_exec__` 注入同一个 PTY,
 输出天然归位;单会话内命令严格串行——一个 PTY 就是一条交互 shell,Agent
-并发发起的 execute 会排队。哨兵切分(`shell_session.py`)只保留给无头
+并发发起的 execute 会排队。哨兵切分(`session/base.py`)只保留给无头
 `ot exec` 与能力探测等非显示路径。
 
 项目**没有模型级长期记忆**——Agent 的 checkpointer 在内存里,重启即清空。

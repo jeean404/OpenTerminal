@@ -351,7 +351,7 @@ exit codes / AI context), and agent tool commands are injected into the
 same PTY via `__ot_exec__`, so their output lands in place. A per-session
 lock keeps commands strictly serial — one PTY is one interactive shell, so
 concurrent agent `execute` calls queue up. BEGIN/END sentinel slicing
-(`shell_session.py`) remains only for non-display paths such as headless
+(`session/base.py`) remains only for non-display paths such as headless
 `ot exec` and capability probes.
 
 There is **no model-level long-term memory** — the agent's checkpointer is
