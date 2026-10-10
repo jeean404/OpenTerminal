@@ -251,6 +251,34 @@ def test_autofill_hits_default_port_alias_key():
     assert seen[:2] == [("1.2.3.4", "wujian", None), ("1.2.3.4", "wujian", 22)]
 
 
+def test_first_hop_load_password_alias_matches_nested():
+    """首跳（_connect 的 stored_pw）与嵌套共用 load_password_alias：
+    同一密码落在 None 或 22 任一键上，另一侧读取也命中（P0-1——旧首跳
+    _connect 直查单键，档案流存 :22、连接解析 None 时永远 miss，首跳
+    每次重讨密码）。"""
+    orig = cmod.load_password
+
+    def _fake(host, user, port):
+        return "pw-at-22" if port == 22 else None
+
+    cmod.load_password = _fake
+    try:
+        assert cmod.load_password_alias("h", "u", None) == "pw-at-22"
+        assert cmod.load_password_alias("h", "u", 22) == "pw-at-22"
+    finally:
+        cmod.load_password = orig
+
+    def _fake2(host, user, port):
+        return "pw-at-none" if port is None else None
+
+    cmod.load_password = _fake2
+    try:
+        assert cmod.load_password_alias("h", "u", 22) == "pw-at-none"
+        assert cmod.load_password_alias("h", "u", None) == "pw-at-none"
+    finally:
+        cmod.load_password = orig
+
+
 def test_no_modal_on_prompt_cycle():
     """无凭据的密码提示符全程不弹模态、不代关（真实终端语义：提示符已在
     终端里，用户手输）。旧实现弹窗代答、手输消费提示符后再防抖代关——

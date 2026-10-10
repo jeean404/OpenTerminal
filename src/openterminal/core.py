@@ -153,6 +153,18 @@ from .sysprobe import (
     save_host_cache,
 )
 from .transcript import open_transcript
+from .secrets_store import load_password_alias as _load_password_alias_impl
+
+
+def load_password_alias(host: str, user: str | None, port: int | None) -> str | None:
+    """首跳（_connect）与嵌套（_load_nested_password）共用的凭据读取：
+    None/22 端口别名互查，规范实现在 secrets_store.load_password_alias。
+
+    这里只做透传并把本模块的 load_password 全局当读函数传入——读取永远
+    走 core.load_password 这个名字，wmod 桥转发的测试 monkeypatch
+    （test_web_worker/test_term_frontend）语义不变。
+    """
+    return _load_password_alias_impl(host, user, port, load=load_password)
 
 
 # AI 栈（deepagents/langchain/anthropic，导入约 4s——启动耗时实测大头）与
@@ -1215,11 +1227,9 @@ class PipelineCore:
         target.port=22 存 ``user@host:22``，嵌套 ssh 命令无 -p 解析出
         port=None 查 ``user@host``：同一密码两个键、自动填充永远 miss
         （真机：档案登录成功过、嵌套 ssh 仍弹窗重讨）。两键互为别名，
-        已落在任一键下的旧条目都读得到。"""
-        pw = load_password(host, user, port)
-        if pw is not None or port not in (None, 22):
-            return pw
-        return load_password(host, user, 22 if port is None else None)
+        已落在任一键下的旧条目都读得到。规范实现在
+        secrets_store.load_password_alias（首跳 _connect 共用）。"""
+        return load_password_alias(host, user, port)
 
     async def _on_nested_password_prompt(self) -> None:
         """密码提示符上升沿：凭据库自动填充一次，否则交给终端手输。
@@ -1603,7 +1613,7 @@ class PipelineCore:
         self._target = target
         host = target.host or ("local" if target.mode == "local" else target.name)
         self._target_host = host
-        stored_pw = (load_password(target.host, target.user, target.port)
+        stored_pw = (load_password_alias(target.host, target.user, target.port)
                      if target.mode == "ssh" and target.host else None)
         self.session = await open_session(
             target,
@@ -1612,6 +1622,9 @@ class PipelineCore:
             max_output_bytes=self.cfg.shell.max_output_bytes,
             password_prompt=self.ask_password,
             host_key_prompt=self.ask_host_key,
+            # 补存失败经 status 可见（P0-1）：同步 _emit_nowait 不阻塞建连
+            notify=lambda text: self._emit_nowait(
+                ServerMsg(type="status", text=text)),
         )
         # 断线自动重连成功后把历史命令重新灌进新 shell（裸 shell 阶段，
         # 回调内不可走 run()——彼时 _runner_lock 被恢复流程持有）

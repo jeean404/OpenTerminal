@@ -136,11 +136,12 @@ def _gate(command: str, cfg: Config) -> tuple[int, dict] | None:
 
 async def _exec_async(target: TargetConfig, command: str, *, timeout: int) -> int:
     from .connections import open_session
-    from .secrets_store import load_password
+    from .secrets_store import load_password_alias
 
     # 只有 SSH 目标才查凭据库：local 目标 host=None，按 None 拼 keyring
-    # 键纯属噪音（还可能撞上 keyring 后端的空键校验）
-    password = (load_password(target.host, target.user, target.port)
+    # 键纯属噪音（还可能撞上 keyring 后端的空键校验）。别名互查与
+    # _connect 首跳同语义（None/22 同键）。
+    password = (load_password_alias(target.host, target.user, target.port)
                 if target.mode == "ssh" and target.host else None)
     session = await open_session(
         target,

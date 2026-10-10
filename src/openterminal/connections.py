@@ -17,6 +17,23 @@ def display_name(host: str, user: str | None, port: int | None) -> str:
     return f"{name}:{port}" if port else name
 
 
+# 补存/记住失败的可见提示（keyring 不可用等降级场景；文案全链路统一）
+PW_STORE_FAIL_HINT = "密码未能写入系统凭据库，下次连接仍需手输"
+
+
+def cred_alias_eq(a: tuple[str | None, str | None, int | None],
+                  b: tuple[str | None, str | None, int | None]) -> bool:
+    """凭据三元组按 keyring 键别名语义比较：port None/22 视同相等。
+
+    display_name 只在 port 真值时拼 :port——None 与 22 会落成两个键名，
+    但指向同一凭据（ssh 默认端口）。补存去重（_backfill_password）与
+    共享凭据防误删（credential_referenced）都按此语义判「同一个凭据」。
+    """
+    (h1, u1, p1), (h2, u2, p2) = a, b
+    return (h1 == h2 and u1 == u2
+            and (p1 == p2 or (p1 in (None, 22) and p2 in (None, 22))))
+
+
 def saved_targets_path() -> Path:
     """记住的连接存储位置（SQLite，用户主目录，不在 git 仓库内）。"""
     return connections_db.db_path()
@@ -180,33 +197,49 @@ def parse_user_at_host(text: str) -> tuple[str, str | None, int | None]:
     return host, user, port
 
 
-def _backfill_password(target: TargetConfig, session) -> None:
+def _backfill_password(target: TargetConfig, session) -> bool:
     """连接已记住但凭据缺失时，把本次实际使用的密码补进系统凭据库。
 
     记住的连接（connections.db）意味着用户已同意「记住该连接含密码」；
     缺失来自上次存库失败或凭据库当时不可用。CLI / Web / Picker 全路径
     都经 open_session，补存放这里一处生效。未记住的连接不动——那由
     _maybe_remember 的 y/n 询问把关。
+
+    已有凭据按端口别名去重（None/22 视同同一键，见
+    secrets_store.load_password_alias）：档案流按 port=22 存
+    ``user@host:22``、本次连接解析出 port=None 时，单键直查看不到别名
+    键会再存一个 ``user@host``——同一密码两个键、读取侧永远错位。saved
+    匹配同样按别名语义（cred_alias_eq）：port None/22 视同一条连接。
+
+    返回 True = 本该补存但写库失败（调用方给出可见提示，不再静默——
+    「以为记住了其实没记住」是每次重讨密码的隐形根因）；补存成功或
+    无需补存均返回 False。
     """
     if target.mode != "ssh" or not target.host:
-        return
-    from .secrets_store import load_password, store_password
+        return False
+    from .secrets_store import load_password_alias, store_password
 
     used = getattr(session, "last_password", None)
     if used is None:
-        return  # 本次没用密码（密钥认证）或未记录
-    if load_password(target.host, target.user, target.port) is not None:
-        return  # 已有凭据（旧 CLI 的失效写回路径已随换心退场）
-    if not any(t.host == target.host and t.user == target.user
-               and t.port == target.port for t in load_saved_targets()):
-        return  # 连接未记住：不替用户做主存密码
-    store_password(target.host, target.user, target.port, used)
+        return False  # 本次没用密码（密钥认证）或未记录
+    if load_password_alias(target.host, target.user, target.port) is not None:
+        return False  # 已有凭据（含 None/22 别名键；旧 CLI 的失效写回路径已随换心退场）
+    if not any(cred_alias_eq((t.host, t.user, t.port),
+                             (target.host, target.user, target.port))
+               for t in load_saved_targets()):
+        return False  # 连接未记住：不替用户做主存密码
+    return not store_password(target.host, target.user, target.port, used)
 
 
 async def open_session(target: TargetConfig, password: str | None = None,
-                       **kwargs_session):
+                       *, notify=None, **kwargs_session):
     """按 TargetConfig 创建会话。password 为记住的密码（可为 None）；
-    kwargs_session 透传给会话构造器（超时/截断）。"""
+    kwargs_session 透传给会话构造器（超时/截断）。
+
+    notify：降级提示的可见化通道（同步回调，收一句文案），如 core 的
+    _emit_nowait(status)。补存失败经它转发 PW_STORE_FAIL_HINT——不设
+    则维持旧的静默降级（headless 等无 UI 通道的调用方）。
+    """
     # 认证回调只属于 SSH 会话；本地 PTY 构造器不接受，需先剥离再路由
     prompt_kwargs = {k: kwargs_session.pop(k)
                      for k in ("password_prompt", "host_key_prompt")
@@ -236,5 +269,8 @@ async def open_session(target: TargetConfig, password: str | None = None,
             **kwargs_session,
         )
     await s.start()
-    _backfill_password(target, s)
+    if _backfill_password(target, s) and notify is not None:
+        # 补存失败不再静默：凭据库不可用时「以为记住了其实没记住」，
+        # 用户只能以为密码丢了反复手输（任务书 §2-5）
+        notify(PW_STORE_FAIL_HINT)
     return s

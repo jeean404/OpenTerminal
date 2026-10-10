@@ -23,6 +23,28 @@ def load_password(host: str, user: str | None, port: int | None) -> str | None:
         return None
 
 
+def load_password_alias(host: str, user: str | None, port: int | None,
+                        load=None) -> str | None:
+    """读取记住的密码：无端口与 ssh 默认端口 22 视同同一键（别名互查）。
+
+    凭据键 display_name 在端口非空时附 :port——同一密码可能落在
+    ``user@host`` 或 ``user@host:22`` 任一键下（档案流按 target.port=22 存、
+    嵌套 ssh 无 -p 解析出 port=None 来查），单键直查永远 miss（真机：档案
+    登录成功过、嵌套 ssh 仍弹窗重讨）。先查本键，miss 且 port∈(None, 22)
+    再查另一键；非默认端口（2222 等）不互查。首跳（_connect）与嵌套
+    （_load_nested_password）共用此实现，消灭两处漂移。只读——写入仍按
+    调用方给的原样键（不隐式写双键，删除路径才不会删一漏一）。
+
+    load：读函数注入点（默认本模块 load_password）——core 侧把模块全局
+    load_password 传进来，测试 monkeypatch（wmod 桥）语义不变。
+    """
+    get = load or load_password
+    pw = get(host, user, port)
+    if pw is not None or port not in (None, 22):
+        return pw
+    return get(host, user, 22 if port is None else None)
+
+
 def store_password(host: str, user: str | None, port: int | None,
                    password: str) -> bool:
     """保存密码；凭据库不可用返回 False（调用方降级，不视为错误）。"""

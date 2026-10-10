@@ -322,6 +322,75 @@ async def test_open_session_no_backfill_for_key_auth(monkeypatch):
         TargetConfig(name="root@a", mode="ssh", host="a", user="root"))  # 不抛即通过
 
 
+async def test_open_session_backfill_dedupes_port_alias(monkeypatch):
+    # None/22 别名键已有凭据：不补存第二个键（同一密码两键=读取侧永远错位）
+    import openterminal.connections as conn_mod
+
+    save_saved_targets([
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root", port=22)])
+    secrets_mod = _open_with_password(monkeypatch)
+    monkeypatch.setattr(secrets_mod, "load_password",
+                        lambda h, u, p: "stored-at-22" if p == 22 else None)
+    monkeypatch.setattr(secrets_mod, "store_password",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("别名键已有凭据不应重复存")))
+
+    await conn_mod.open_session(
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root"))  # 不抛即通过
+
+
+async def test_open_session_backfill_saved_match_port_alias(monkeypatch):
+    # saved 表 port=22、本次连接解析出 port=None：别名语义视同一条连接，
+    # 照常补存（旧三元组精确匹配会静默跳过 = 首跳密码永不落库）
+    import openterminal.connections as conn_mod
+
+    save_saved_targets([
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root", port=22)])
+    secrets_mod = _open_with_password(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(secrets_mod, "load_password", lambda h, u, p: None)
+    monkeypatch.setattr(secrets_mod, "store_password",
+                        lambda h, u, p, pw: seen.update(host=h, user=u, port=p, pw=pw) or True)
+
+    await conn_mod.open_session(
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root"))
+    assert seen == {"host": "a", "user": "root", "port": None, "pw": "s3cret"}
+
+
+async def test_open_session_backfill_store_failure_visible(monkeypatch):
+    # store_password 返回 False：补存失败不再静默——经 notify 给出可见提示
+    import openterminal.connections as conn_mod
+
+    save_saved_targets([
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root")])
+    secrets_mod = _open_with_password(monkeypatch)
+    monkeypatch.setattr(secrets_mod, "load_password", lambda h, u, p: None)
+    monkeypatch.setattr(secrets_mod, "store_password", lambda h, u, p, pw: False)
+
+    notes = []
+    await conn_mod.open_session(
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root"),
+        notify=notes.append)
+    assert notes == [conn_mod.PW_STORE_FAIL_HINT]
+
+
+async def test_open_session_backfill_store_success_no_notice(monkeypatch):
+    # 补存成功：不打扰（notify 只为失败可见而生）
+    import openterminal.connections as conn_mod
+
+    save_saved_targets([
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root")])
+    secrets_mod = _open_with_password(monkeypatch)
+    monkeypatch.setattr(secrets_mod, "load_password", lambda h, u, p: None)
+    monkeypatch.setattr(secrets_mod, "store_password", lambda h, u, p, pw: True)
+
+    notes = []
+    await conn_mod.open_session(
+        TargetConfig(name="root@a", mode="ssh", host="a", user="root"),
+        notify=notes.append)
+    assert notes == []
+
+
 # --- 连接后命令集:commands 列迁移与存取 ---
 
 
