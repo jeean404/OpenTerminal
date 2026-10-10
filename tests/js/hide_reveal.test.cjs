@@ -165,18 +165,77 @@ test("熔断（_padFused）豁免：fused 后 reserved 永不增长，隐藏=永
   assert.strictEqual(s._slotHidden(makeSlot(s, 1)), false);
 });
 
-test("_reanchor 盖帽分支：夹紧截断的同时放行（宁藏不盖只遮等 pad 的过渡期）", () => {
+test("_reanchor 盖帽零垫分支：夹紧钉高但不放行（零空白档整卡隐藏，P1-2）", () => {
+  // 契约修订（docs/card_duplicate.md P1-2）：旧契约「盖帽即放行、露出已垫
+  // 部分」在零空白档会露出被输出切半行的细条（输出字从卡上切过＝遮挡）。
+  // 新契约：盖帽且区内一行空白都没有的非审批卡不放行，整卡藏到定格/冻结阀；
+  // 钉高算法不动（仍 max(1, reserved)），只改放行与显隐
   const s = makeSession();
   const slot = makeSlot(s, 1, {rows: 4});
   s._fitNeed = () => {};
-  s._blankSpan = () => 0;          // 下方被输出占住，空白 run 断
+  s._blankSpan = () => 0;          // 下方被输出占住，区内一行空白都没有
   s._capped = () => true;
   s._followBottom = () => {};
   s._reanchor(slot);
   assert.strictEqual(slot.clamped, true);
+  assert.strictEqual(slot.pinnedRows, 1, "垫高算法不动：钉高仍 max(1, reserved)");
+  assert.strictEqual(slot.revealed, false,
+    "盖帽零垫不得走「盖帽即放行」——露出必被输出切成半行细条");
+  assert.strictEqual(slot.host.style.visibility, "hidden",
+    "零空白档整卡隐藏；徽标陪跑好过被输出切半行的细条");
+});
+
+test("_reanchor 盖帽但 blankSpan ≥ 1：维持现状放行，露出已垫部分", () => {
+  const s = makeSession();
+  const slot = makeSlot(s, 1, {rows: 4});
+  s._fitNeed = () => {};
+  s._blankSpan = () => 1;          // 还剩 1 行空白：露出已垫部分（维持现状）
+  s._capped = () => true;
+  s._followBottom = () => {};
+  s._reanchor(slot);
   assert.strictEqual(slot.pinnedRows, 1);
-  assert.strictEqual(slot.revealed, true, "盖帽卡应立即放行为夹紧截断态");
+  assert.strictEqual(slot.revealed, true, "≥1 行档照旧走盖帽放行");
   assert.strictEqual(slot.host.style.visibility, "visible");
+});
+
+test("零空白钉死细条也整卡隐藏：钉高 1 行但预留区被输出吃掉", () => {
+  // 钉高只保证钉那一刻的 run；输出随后把 run 吃掉后钉高就压在活文本上
+  // （工具卡「✓ 完成」细条被输出切半行＝bug 现场的「遮挡」）
+  const s = makeSession();
+  const slot = makeSlot(s, 1, {rows: 4, revealed: true, clamped: true,
+                               pinnedRows: 1});
+  s._blankSpan = () => 0;
+  s._fixHostVisibility(slot, slot.host);
+  assert.strictEqual(slot.host.style.visibility, "hidden",
+    "钉死态零空白同样不得露细条");
+});
+
+test("任务定格（frozen）后零空白不再藏：收束档不留隐形卡", () => {
+  // 冻结阀/收束结账是「不留隐形卡」的放出档：藏到定格才放出，放出后就显示
+  const s = makeSession();
+  const slot = makeSlot(s, 1, {rows: 4, revealed: true, pinnedRows: 1,
+                               frozen: true});
+  s._blankSpan = () => 0;
+  s._fixHostVisibility(slot, slot.host);
+  assert.strictEqual(slot.host.style.visibility, "visible");
+});
+
+test("_ensurePad 盖帽零垫：不走「盖帽即放行」；≥1 行照旧放行", async () => {
+  const s = makeSession();
+  const realEnsurePad = Object.getPrototypeOf(s)._ensurePad;
+  s._drainHeld = async () => {};
+  s._stealBlankBelow = async () => false;
+  const slot = makeSlot(s, 1, {rows: 4});
+  s._blankSpan = () => 0;
+  s._capped = () => true;
+  await realEnsurePad.call(s, slot);
+  assert.strictEqual(slot.clamped, true);
+  assert.strictEqual(slot.revealed, false, "零垫盖帽卡保持未放行（徽标陪跑）");
+
+  const slot2 = makeSlot(s, 2, {rows: 4, marker: {line: 5, onDispose() {}}});
+  s._blankSpan = () => 2;
+  await realEnsurePad.call(s, slot2);
+  assert.strictEqual(slot2.revealed, true, "blankSpan ≥ 1 维持现状放行");
 });
 
 test("_reanchor 未盖帽且未 fund：保持隐藏（真机细条期），徽标接班", () => {

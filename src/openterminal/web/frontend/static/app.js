@@ -1227,12 +1227,13 @@ class Session {
         return;
       }
       // 零空白盖帽：区内连一行空白都没有（回显/输出把预留区整段插死）——露出
-      // 必压活文本，先藏（宁藏不盖）；pad 落地/空白出现后 top 与 maxHeight 自
-      // 然放行。已钉死态按钉高走（钉者已保证不越 run）；熔断态不藏（保活优先）。
-      // 审批卡豁免：藏了=按钮不可点=决策死锁（agent 等审批、审批等 pad 互为
-      // 因果），改由 _floorRows 底线保按钮行可见（宁可短暂压提示符行）
-      if (slot.revealed && slot.pinnedRows == null && slot.marker &&
-          slot.kind !== "approval" &&
+      // 必压活文本/被输出切成半行细条，整卡藏（宁藏不盖）；pad 落地/空白出现后
+      // top 与 maxHeight 自然放行。钉死态同样按零空白藏：钉高只保证钉那一刻的
+      // run，输出随后把 run 吃掉后钉高就压在活文本上（工具卡「✓ 完成」细条被
+      // 输出切半行的根因）；blankSpan ≥ 1 维持现状露出已垫部分。任务定格
+      // （collapse/final/fail，frozen）后不再藏：冻结阀/收束结账是「不留隐形卡」
+      // 的放出档。熔断态不藏（保活优先）；审批卡豁免（按钮不可点=决策死锁）。
+      if (slot.marker && slot.kind !== "approval" && !slot.frozen &&
           !this._padFused && this._blankSpan(slot) === 0) {
         el.style.visibility = "hidden";
         return;
@@ -1392,11 +1393,20 @@ class Session {
         slot.pinnedRows = rows;
         this._applyDecoration(slot, rows);
       }
-      // 已盖帽（下方被输出/别的卡占住）就别藏了：宁藏不盖只遮「等 pad 落地」
-      // 的过渡期；盖帽卡按既有夹紧路径露出已垫部分（真机细条＝等 pad，不是
-      // 盖帽），永久盖帽卡藏到冻结阀才放出会让徽标陪跑整段命令空隙
-      if (this._capped(slot)) this._revealSlot(slot);
-      else this._refreshThink();   // 显→隐沿：夹紧隐藏态让思考徽标接班
+      // 已盖帽（下方被输出/别的卡占住）：blankSpan ≥ 1 按夹紧路径放出、露出
+      // 已垫部分（宁藏不盖只遮「等 pad 落地」的过渡期）；盖帽零垫（一行空白
+      // 都没有）的非审批卡不走「盖帽即放行」——露出必被输出切成半行细条，
+      // 整卡藏到定格/冻结阀放出。权衡：永久盖帽卡徽标陪跑观感差于细条，故
+      // 只藏零空白档，≥1 行档维持现状
+      if (this._capped(slot)) {
+        if (slot.kind !== "approval" && this._blankSpan(slot) === 0) {
+          this._refreshThink();   // 卡不放行：徽标继续接班
+        } else {
+          this._revealSlot(slot);
+        }
+      } else {
+        this._refreshThink();   // 显→隐沿：夹紧隐藏态让思考徽标接班
+      }
       return;
     }
     if (this._padFused) return;   // 熔断后保持钉死截断，不回升
@@ -1776,6 +1786,13 @@ class Session {
       // 夹紧截断（宁可矮不许盖）。大头在 _mountCard 锚定新卡前的 settle
       // 窗口里提前补掉。
       if (blank < slot.rows) this._clampCard(slot);
+      // 盖帽零垫（一行空白都没有）的非审批卡不走「盖帽即放行」：露出必被
+      // 输出切成半行细条，整卡藏到定格/冻结阀放出。权衡：徽标陪跑观感差于
+      // 细条，故只藏零空白档；blankSpan ≥ 1 照旧放行露出已垫部分
+      if (slot.kind !== "approval" && this._blankSpan(slot) === 0) {
+        this._refreshThink();   // 卡不放行：徽标继续接班（显→隐沿同款）
+        return;
+      }
       this._revealSlot(slot);   // 盖帽即放行，宁藏不盖只遮等 pad 的过渡期
       return;
     }
