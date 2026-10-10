@@ -295,7 +295,7 @@ class AuthFlow:
         port=None 查 ``user@host``：同一密码两个键、自动填充永远 miss
         （真机：档案登录成功过、嵌套 ssh 仍弹窗重讨）。两键互为别名，
         已落在任一键下的旧条目都读得到。规范实现在
-        secrets_store.load_password_alias（首跳 _connect 共用）。"""
+        connections.secrets.load_password_alias（首跳 _connect 共用）。"""
         return _impl.load_password_alias(host, user, port)
 
     async def _on_nested_password_prompt(self) -> None:

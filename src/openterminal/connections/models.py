@@ -219,7 +219,7 @@ def _backfill_password(target: TargetConfig, session) -> bool:
     _maybe_remember 的 y/n 询问把关。
 
     已有凭据按端口别名去重（None/22 视同同一键，见
-    secrets_store.load_password_alias）：档案流按 port=22 存
+    connections.secrets.load_password_alias）：档案流按 port=22 存
     ``user@host:22``、本次连接解析出 port=None 时，单键直查看不到别名
     键会再存一个 ``user@host``——同一密码两个键、读取侧永远错位。saved
     匹配同样按别名语义（cred_alias_eq）：port None/22 视同一条连接。

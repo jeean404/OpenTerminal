@@ -178,7 +178,7 @@ def test_retire_jumps_drops_table_column_and_secrets(tmp_path, monkeypatch):
     """旧库收尾迁移：jumps 表删除（凭据库里的密码先清）、saved.jump 列删除。"""
     import sqlite3
 
-    import openterminal.secrets_store as secrets_mod
+    import openterminal.connections.secrets as secrets_mod
 
     db = tmp_path / "connections.db"
     conn = sqlite3.connect(str(db))
@@ -219,7 +219,7 @@ def test_retire_jumps_keeps_credentials_shared_with_saved(tmp_path, monkeypatch)
     凭据）：下线迁移只清「已无直连条目引用」的孤儿凭据，共享的不动。"""
     import sqlite3
 
-    import openterminal.secrets_store as secrets_mod
+    import openterminal.connections.secrets as secrets_mod
 
     db = tmp_path / "connections.db"
     conn = sqlite3.connect(str(db))
@@ -252,7 +252,7 @@ def test_retire_jumps_keeps_credentials_shared_with_saved(tmp_path, monkeypatch)
 
 
 def _open_with_password(monkeypatch, *, last_password="s3cret"):
-    import openterminal.secrets_store as secrets_mod
+    import openterminal.connections.secrets as secrets_mod
 
     async def fake_start(self):
         self.last_password = last_password

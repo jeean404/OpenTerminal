@@ -116,7 +116,7 @@ def test_api_saved_stores_password_not_in_db(monkeypatch):
             "password": "s3cret"})
     assert seen == {"h": "1.2.3.4", "u": "root", "p": 22, "pw": "s3cret"}
     # 密码不落 SQLite：库里只有元数据列
-    from openterminal import connections_db
+    from openterminal.connections import db as connections_db
 
     conn = connections_db.connect()
     try:

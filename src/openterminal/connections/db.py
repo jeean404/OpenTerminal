@@ -1,7 +1,7 @@
 """记住的连接存储：SQLite（~/.openterminal/connections.db）。
 
 只存元数据（主机名 / IP / 端口 / 用户名 / 命令集）；密码始终走系统
-凭据库（见 secrets_store），不落库。首次访问自动从旧 connections.toml
+凭据库（见 connections/secrets），不落库。首次访问自动从旧 connections.toml
 一次性迁移，迁移后旧文件改名 connections.toml.migrated 留档。
 
 跳板机已整体下线：旧库的 jumps 表在 connect() 时做一次收尾迁移——

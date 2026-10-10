@@ -25,7 +25,7 @@ from .connections import (
     rename_saved_target, upsert_saved_target,
 )
 from .policy import Policy
-from .secrets_store import delete_password, store_password
+from .connections.secrets import delete_password, store_password
 from .term_frontend import CliCore, TermFrontend
 
 # 全屏/会话接管不再需要 CLI 白名单：单管线前端是整条真终端直通

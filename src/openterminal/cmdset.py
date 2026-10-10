@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from .connections import find_saved_target
-from .secrets_store import load_password, store_password
+from .connections.secrets import load_password, store_password
 
 _CMDSET_KEY_PREFIX = "cmdset:"
 # `> @名称=密码`:名称限字母数字_.-,避免把 `> @a b=c` 之类误当引用

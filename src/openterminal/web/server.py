@@ -20,7 +20,7 @@ from ..connections import (
     find_saved_target, load_saved_targets, parse_user_at_host,
     rename_saved_target, upsert_saved_target,
 )
-from ..secrets_store import delete_password, store_password
+from ..connections.secrets import delete_password, store_password
 from ..render import console
 from .protocol import parse_client
 from .worker import TabWorker

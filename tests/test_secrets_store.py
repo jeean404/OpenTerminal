@@ -2,7 +2,7 @@
 
 import pytest
 
-from openterminal.secrets_store import (
+from openterminal.connections.secrets import (
     load_password, load_password_alias, store_password,
 )
 

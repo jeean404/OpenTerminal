@@ -103,7 +103,7 @@ def _looks_ai(text: str) -> bool:
     # 首词不像命令名（引号、波浪号、空格切分出的奇怪 token）→ 交给模型
     return not all(
         c.isalnum() or c in "./@%+:=_,-" for c in first)
-from ..secrets_store import load_password, store_password
+from ..connections.secrets import load_password, store_password
 from ..shell_integration import (
     StreamRouter, agent_exec_line, history_inject_line, history_quiet_line,
     injection_lines, is_internal_line,
@@ -116,12 +116,12 @@ from ..sysprobe import (
     save_host_cache,
 )
 from ..transcript import open_transcript
-from ..secrets_store import load_password_alias as _load_password_alias_impl
+from ..connections.secrets import load_password_alias as _load_password_alias_impl
 
 
 def load_password_alias(host: str, user: str | None, port: int | None) -> str | None:
     """首跳（_connect）与嵌套（_load_nested_password）共用的凭据读取：
-    None/22 端口别名互查，规范实现在 secrets_store.load_password_alias。
+    None/22 端口别名互查，规范实现在 connections.secrets.load_password_alias。
 
     这里只做透传并把本模块的 load_password 全局当读函数传入——读取永远
     走 core.load_password 这个名字，wmod 桥转发的测试 monkeypatch

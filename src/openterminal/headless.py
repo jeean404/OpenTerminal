@@ -136,7 +136,7 @@ def _gate(command: str, cfg: Config) -> tuple[int, dict] | None:
 
 async def _exec_async(target: TargetConfig, command: str, *, timeout: int) -> int:
     from .connections import open_session
-    from .secrets_store import load_password_alias
+    from .connections.secrets import load_password_alias
 
     # 只有 SSH 目标才查凭据库：local 目标 host=None，按 None 拼 keyring
     # 键纯属噪音（还可能撞上 keyring 后端的空键校验）。别名互查与
