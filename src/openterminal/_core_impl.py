@@ -79,38 +79,6 @@ _AI_ZOMBIE_T = 180.0
 _PW_MODAL_DISMISS = 0.5   # 密码提示符被消费后陈旧模态的代关防抖
 
 
-# shell 自行退出的文字特征（bash TMOUT 自动登出 / ssh 客户端断链）。
-# 认「视觉行」而不是字节行：真机告别语紧跟提示符重画落进流里，前缀是
-# ESC[?2004l + CR + BEL，字节行首锚点跨不过那个 CR，一律漏检（真机审批期
-# TMOUT 后 __ot_pad 连环 command not found 的根因）。故先按 CR/LF 切出视觉
-# 行、剥掉转义与控制符，再整行全文匹配——告别语前只允许一段提示符宽度的
-# 普通字符（bash 是紧贴已打出的提示符写的），后面只许空白；命令输出里恰好
-# 含这些词的长行（grep 日志、带时间戳的行）撑不进这个宽度或后面还拖着正文，
-# 不误判。裸 logout 只在挂起窗口认（见 _shell_exit_window）。
-# （模块后段另有一个喂 str 的 _ANSI_RE，字节流这里必须另起名字，否则被覆盖）
-_EXIT_ANSI_RE = re.compile(
-    rb"\x1b\[[0-9;?]*[ -/]*[@-~]"               # CSI：颜色/光标/模式
-    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC：标题 / 133 标记
-    rb"|\x1b[@-_]"                               # 其余单字符转义
-)
-_EXIT_CTRL_RE = re.compile(rb"[\x00-\x1f\x7f]")
-#: 强特征：任意提示符位置都认（空闲提示符上的 TMOUT 最常见），但整行须是
-#: 「≤48 字符前缀 + 告别语 + 行尾空白」这一形状
-_SHELL_EXIT_RULES = (
-    (re.compile(rb".{0,48}timed out waiting for input: auto-logout\s*",
-                re.IGNORECASE), "timed out waiting for input: auto-logout"),
-    (re.compile(rb"Connection to .*?\b(?:closed|dropped)\b.*",
-                re.IGNORECASE), "Connection closed"),
-)
-#: 弱特征：整行就是一个裸 logout——仅审批挂起窗口认
-_SHELL_EXIT_WEAK_RULES = (
-    (re.compile(rb"logout\s*", re.IGNORECASE), "logout"),
-)
-# 回车看门狗时限：健康路径补发 \r 后，集成壳必在 PROMPT_COMMAND 里回 OSC 标记
-# （133;D + 133;A/B）。到点只收到纯文本、一个标记都没有 = 承接这个回车的根本
-# 不是集成壳（嵌套 shell 被 TMOUT/exit 收走后落回的裸壳）——此时健康路径的裸
-# \r 会把整行自然语言交给它当命令执行（真机 -bash: 执行: command not found）
-_HOOK_LIVENESS = 1.0
 # 注入期续行提示符指纹（zsh PS2）：回显流里出现即判定输入字节被行规程丢弃、
 # 引号失配，shell 卡在续行等补引号——setup 注入竞态的自愈触发点
 _PS2_ECHO_RE = re.compile(rb"(?:quote|dquote|cmdsubst)> ")
@@ -248,12 +216,12 @@ class PipelineCore:
         self.connected = asyncio.Event()
         self._sink = None
         self._hb = None                # 应用层心跳任务（attach 起、close 自然退）
-        self._hook_seen = False        # hook 曾在位（掉线才补注入；结构性无则不试）
         self._outbox: asyncio.Queue = asyncio.Queue()
         self._inbox: asyncio.Queue = asyncio.Queue()
         self._pws: asyncio.Queue = asyncio.Queue()      # 密码应答
         self.auth   # noqa: B018 — 密码状态机组件：触达 lazy 属性即建 _pw_* 状态（core/auth.py）
         self.exec   # noqa: B018 — 标记流/注入/幕帘组件：触达 lazy 属性即建 _exec_*/_curtain 等状态（core/exec_events.py）
+        self.hook   # noqa: B018 — hook 集成/验活组件：触达 lazy 属性即建 _hook_*/_interactive 等状态（core/hook_gate.py）
         self._hks: asyncio.Queue = asyncio.Queue()      # 主机密钥应答
         self._decisions: asyncio.Queue = asyncio.Queue()  # 审批决策
         # 未决审批记账：审批帧只发一次，WS 断隙/刷新即丢，core 会永久等决策
@@ -283,42 +251,12 @@ class PipelineCore:
         # 语义同 CLI /clear 换 session_id）
         self._ctx_epoch = 0
         # --- 交互式 shell 集成（单管线真终端）---
-        self._interactive = False    # hook 集成就绪；False = 纯终端直通（无 AI）
         self._display = "agent"      # agent = hook 集成 / ssh = 纯透传（Shell 模式）
         self._router: StreamRouter | None = None
-        self._shell_kind: str | None = None   # bash | zsh | powershell
-        self._b64flag = "-d"
-        # su - / 嵌套 shell 探测：当前提示符后面的真实 shell 族不再是外层
-        # 会话的 _shell_kind。_ensure_integrated 探测不到可集成的 shell
-        # （bash 3.2 / 其他族 / 前台占用）时置 _hook_gone——标记流不足以
-        # 证明 hook 在位（zsh 版 PS1 落进 bash 照样发 OSC 133 标记，函数
-        # 却一个都没定义出来），pad/健康路径/兜底必须按 hook 不在位降级。
-        # 嵌套 shell 退出（_open_cmds 清空）后复位，外层 hook 自然恢复。
-        self._hook_gone = False
-        # 「hook 陈旧」= 带 hook 的那个 shell 整体消失了（TMOUT 自动登出 /
-        # exit / logout）。bash 退出不发任何告别标记，_hook_gone 的两个入口都
-        # 够不着：探测没跑过；而它唯一的复位路径「_open_cmds 清空」在跳板机
-        # 拓扑下永不发生（外层 `ssh 跳板机` 帧整段会话开着）。死壳留下的
-        # _last_mark_at 会让 _inner_ssh_prompt_live 继续放行健康路径，补发的
-        # 裸 \r 把整行自然语言送进落回来的裸壳执行（用户报障本体）。
-        # 由回车看门狗置位；任一 OSC 标记到达即撤销（外层集成壳重新画出提示符
-        # = 自愈），重注入落地亦作废。
-        self._hook_stale = False
-        self._hook_watch = None         # 回车看门狗任务（_HOOK_LIVENESS）
-        self._hook_watch_text = False   # 看门狗窗口内收到过纯文本
-        self._probe_buf: bytearray | None = None  # 探测行输出收集（_probe_shell_kind）
-        self._exit_tail = bytearray()   # 登出特征滚动窗（_detect_shell_exit）
         self._exec_future = None     # InteractiveRunner 等待 D 标记的 future
         self._ai_task: asyncio.Task | None = None
         self._ai_ping_at = 0.0  # AI 任务最近一次有产出（_live）的时间戳，僵尸判据
         self._ai_queue: list = []           # AI 忙时排队 (line, hooked)
-        # --- 外部触发链的 hook 存活判定（Workbench 蓝色回显路径）---
-        # hook 的 OSC 标记由 PROMPT_COMMAND/PS1 产生：su - 等 login shell 重置
-        # hook 后 PTY 只有裸文本、标记绝迹。比较「最近标记 vs 最近纯文本」的
-        # 时间戳即可无成本判定：标记不落后于文本 = 标记仍在产出 = hook 在位。
-        self._last_mark_at = 0.0    # 最近一次 OSC 标记事件（A/B/D/report/exec）
-        self._last_live_at = 0.0    # 最近一次未被吞除的纯文本输出
-        self._hook_report_pending: str | None = None   # 补发 \r 后等待 AI 上报的行
         self._suppress_ai_report: str | None = None    # 兜底已启动后迟到的重复上报
         self._fallback_task: asyncio.Task | None = None  # _submit_fallback 句柄（测试/关闭可取消）
         # --- 失败救援（分类判 CMD 就直接执行；失败即信号，一键交 AI）---
@@ -363,6 +301,16 @@ class PipelineCore:
             self.__dict__["_exec_events"] = e
         return e
 
+    @property
+    def hook(self) -> "HookGate":
+        """hook 集成/验活组件（Task 5）：惰性建以兼容裸构造测试实例。"""
+        h = self.__dict__.get("_hook_gate")
+        if h is None:
+            from .core.hook_gate import HookGate
+            h = HookGate(self)
+            self.__dict__["_hook_gate"] = h
+        return h
+
     # --- 过渡委托（tests/ 引用旧名；Task 9/10 迁移测试后删除）---
     @staticmethod
     def _parse_ssh_cmd_target(line: str
@@ -393,19 +341,6 @@ class PipelineCore:
     # --- 提示符幕帘（任务期扣住提示符重绘，注入/收尾放行）---
 
     # --- 模型兜底分类（cli 共用形态；web 侧行分类由 hook 完成）---
-    async def _llm_classify(self, text: str) -> str:
-        from .agent import message_text
-
-        _load_agent_stack()
-        model = build_chat_model(self._model)
-        resp = await model.ainvoke([
-            ("system", "判断用户输入是 shell 命令还是自然语言任务，"
-                       "只回答一个词：command 或 task。"),
-            ("user", text),
-        ])
-        answer = message_text(resp).strip().lower()
-        return "command" if answer.startswith("command") else "task"
-
     # --- sink / 消息入口 ---
     def attach(self, sink) -> None:
         self._sink = sink
@@ -694,131 +629,6 @@ class PipelineCore:
 
     # --- \x03 后 ^C 回显吞除（降级重注入的视觉残迹）---
 
-    async def _ensure_integrated(self) -> bool:
-        """su - / sudo su - 等 login shell 会重置 PROMPT_COMMAND、函数与 Enter
-        绑定，丢掉 OSC 133:D 提示符标记与 __ot_exec__/__ot_pad 通道，导致自然语言
-        任务挂起。任务启动前重发分片注入脚本：幂等（healthy shell 只重定义同名函数/
-        重设同款提示符，无副作用；su - 后则恢复全部集成）。回显经 _suppress_live 吞掉，
-        等 OSC:D 提示符标记确认注入落地。
-
-        注入前先探测提示符后面的真实 shell 族（su - 换壳）：外层会话的
-        _shell_kind 是连接时探测的（如 zsh），而 macOS root = /bin/sh =
-        bash 3.2——把 zsh 脚本打进 bash 定义不出任何函数，且 zsh 版 PS1 在
-        bash 里照样发 OSC 133 标记，_hook_ok 由此假阳性（真机 su - 后
-        __ot_pad 连环 command not found、自然语言整行被 root shell 当命令
-        执行、\x15 连环吞输入）。探测不到可集成 shell 时置 _hook_gone 转
-        降级，本次任务外部启动。"""
-        if not self._interactive or self.session is None:
-            return False
-        async with self._runner_lock:
-            return await self._ensure_integrated_locked()
-
-    async def _ensure_integrated_locked(self) -> bool:
-        """重注入本体：调用方必须已持有 _runner_lock。
-
-        拆出来是因为 InteractiveRunner.run（P0-1 门禁）与 _shell_pad 的 60s
-        兜底补注入自己就持着这把锁，再经 _ensure_integrated 取一次就是重入
-        死锁（asyncio.Lock 不可重入）——旧代码 _shell_pad 那条路径正踩着。
-        """
-        self._ev_prompt.clear()
-        self._suppress_live = True
-        self._suppressed_tail = ""
-        try:
-            # 前置 \x15 收纳半行但不补 \x19 恢复：任务启动即丢弃该半行
-            #（若 yank 回 kill ring 里的旧文本，会在提示符行复活污染输入）。
-            # 探测行必须敲在干净提示符上——半行没清，探测行会拼在用户
-            # 已敲文本后面整行执行。
-            await self.session.send_raw(b"\x15")
-            if self._shell_kind != "powershell":
-                # 静默窗口先行：hook 不在位（su - 换壳）时探测行/分片行
-                # 靠前导空格 + ignorespace 原生跳过入史；hook 在位时本行
-                # 被 widget 按内部行（__ot_hc= 前缀）静默处理
-                await self.session.send_raw(history_quiet_line())
-            shell, flag = await self._probe_shell_kind()
-            if shell is None:
-                if not self._hook_gone and not self._hook_stale:
-                    # 首次判定不可集成：明确告知前端，别让每个任务静默失败。
-                    # _hook_stale（壳已自行退出）时不发：根因已由
-                    # _note_shell_dead 报过，再发一句「bash 3.2 / 前台占用」
-                    # 是互相打架的误导
-                    await self.emit_msg(ServerMsg(
-                        type="status",
-                        text="当前 shell 无法集成（bash 3.2 等旧壳 / 前台占用），"
-                             "AI 工具执行不可用；请换可集成的 shell 后重试"))
-                self._hook_gone = True
-                return False
-            self._hook_gone = False
-            self._hook_stale = False   # 重注入落地：陈旧判定作废
-            self._cancel_hook_watch()
-            if shell != self._shell_kind:
-                self._shell_kind = shell
-                self._b64flag = flag
-            for _ci, line in enumerate(
-                    injection_lines(self._shell_kind,
-                                    self.exec._reinject_inst_base(),
-                                    self._b64flag)):
-                self._ev_stream.clear()
-                await self.session.send_raw(line)
-                # 逐片等本片回显到达再发下一片：固定短间隔会让分片堆进
-                # shell 执行间隙的 canonical 缓冲（4096 溢出丢块，真机实测
-                # 0.03s 间隔 md5 不复现）。回显即 readline 已读入本片的凭据；
-                # 回显绝迹（裸模式残影）时退回实测安全的 0.12s 间隔。
-                # 嵌套 ssh 隧道（跳板机）里 ZLE 对赋值行不回显——回显等待
-                # 总是超时、分片全速连发被 ssh 通道合并成大包，远端 pty
-                # 输入队列溢出**静默丢字节**，恰好丢掉末行 eval → 注入整链
-                # 无声失败。因此无条件再垫 0.04s 最小间隔，保证远端逐片
-                # 消化、批次不合并。
-                try:
-                    await asyncio.wait_for(self._ev_stream.wait(), 0.12)
-                except asyncio.TimeoutError:
-                    pass
-                await asyncio.sleep(0.04)
-            try:
-                await asyncio.wait_for(self._ev_prompt.wait(), 2.0)
-                # zsh POSTEDIT 重绘可能落在 A 标记之后：抑制窗口多留 80ms
-                # 把它一并吞掉，否则每任务注入的重绘行泄漏进主屏（§5.5）
-                await asyncio.sleep(0.08)
-                return True
-            except asyncio.TimeoutError:
-                return False
-        finally:
-            self._suppress_live = False
-            await self.exec._resync_after_suppress()
-
-    async def _probe_shell_kind(self) -> tuple[str | None, str]:
-        """在当前提示符敲一行能力探测，识别 su - / 嵌套 shell 后的真实 shell 族。
-
-        复用 probe_command + parse_probe（bash>=4 门槛与 base64 参数判定与
-        连接时探测同一套）；行首加 ``_ot_inj=`` 前缀使 is_internal_line 成立
-        ——hook 恰好在位时该行按内部行静默记账，不入历史、不占用户命令帧；
-        再加一个前导空格——hook 不在位时靠 _ensure_integrated 先发的静默行
-        （ignorespace/hist_ignore_space）原生跳过入史。
-        输出经 _probe_buf 收集（_on_stream_event 的 live/exec 分支塞入），
-        回显与输出由调用方持有的 _suppress_live 窗口吞掉，不外显。
-
-        返回 (shell|None, b64flag)：超时 / 无标记（前台占用吃掉探测行、
-        其他 shell 族、bash 3.2）→ (None, "-d")。Windows 无 su - 语义，
-        维持连接时探测的原判。"""
-        if self.session is None:
-            return None, "-d"
-        if self.profile is not None and self.profile.os_family == "windows":
-            return self._shell_kind, self._b64flag
-        self._probe_buf = bytearray()
-        try:
-            await self.session.send_raw(
-                (' _ot_inj=""; ' + probe_command(self.profile.os_family)
-                 ).encode() + b"\r")
-            deadline = time.monotonic() + _PROBE_TIMEOUT
-            while time.monotonic() < deadline:
-                shell, flag = parse_probe(
-                    self._probe_buf.decode("utf-8", "replace"))
-                if shell is not None:
-                    return shell, flag
-                await asyncio.sleep(0.05)
-            return None, "-d"
-        finally:
-            self._probe_buf = None
-
     async def close(self) -> None:
         if self._closed:
             return
@@ -832,7 +642,7 @@ class PipelineCore:
             self._cs_task.cancel()
         # 密码 hold/验证窗口的定时器一并撤掉：不然会话关了它们还空转到点
         self._cancel_pw_hold_release()
-        self._cancel_hook_watch()
+        self.hook._cancel_hook_watch()
         t = getattr(self, "_pw_verify_timer", None)
         if t is not None:
             t.cancel()
@@ -1098,34 +908,6 @@ class PipelineCore:
         except Exception:  # noqa: BLE001 - 会话关闭竞态等
             pass
 
-    async def _drain_quiet(self, quiet: float = 0.12,
-                           router: "StreamRouter | None" = None,
-                           raw_sink: "Callable[[bytes], None] | None" = None
-                           ) -> str | None:
-        """排空输出直到静默；喂 router 时返回其间出现的提示符（无则 None）。
-
-        setup 注入期专用：泵未启动，必须主动读，否则 zle 回显塞满输出队列
-        会导致 shell 停读输入、写入端 EAGAIN 自旋死锁（Task 注入排障结论）。
-        raw_sink：原始字节旁路（PS2 续行指纹扫描等），不影响 router 解析。
-        """
-        prompt = None
-        while True:
-            try:
-                chunk = await self.session._read_some(quiet)
-            except asyncio.TimeoutError:
-                return prompt
-            except (ConnectionError, EOFError):
-                return prompt
-            if not chunk:
-                return prompt
-            _dbg("drain raw=", repr(chunk[:60]))
-            if raw_sink is not None:
-                raw_sink(chunk)
-            if router is not None:
-                for ev in router.feed(chunk):
-                    if ev[0] == "prompt" and prompt is None:
-                        prompt = ev[1]
-
     async def _on_session_reconnect(self) -> None:
         # 重连后的新 shell 是裸的（集成脚本已随旧会话消失），用记住的
         # shell 种类重新灌历史；种类未知（探测失败过的批处理）跳过
@@ -1330,12 +1112,12 @@ class PipelineCore:
         # 再注一遍＝白等 2~4s，还把实例号推进新号段（外层帧号空间白白作废）
         changed = base is not None and ident is not None and ident != base
         _dbg("cs gate: ident=", ident, "base=", base, "changed=", changed,
-             "hook_ok=", self._hook_ok(), "hook_gone=", self._hook_gone,
+             "hook_ok=", self.hook._hook_ok(), "hook_gone=", self._hook_gone,
              "lastline=", repr(self._cs_lastline()[-40:]))
-        if not changed and (self._hook_ok() or self._hook_gone):
+        if not changed and (self.hook._hook_ok() or self._hook_gone):
             return              # 同壳且 hook 在位(或结构性不可集成)
         try:
-            await self._ensure_integrated()
+            await self.hook._ensure_integrated()
         except Exception:  # noqa: BLE001 - 注入失败不阻断命令集
             return
 
@@ -1442,11 +1224,11 @@ class PipelineCore:
                 # 等 shell 消化完再发下一波：rc 尾声（conda init 等）zle 尚未
                 # 读输入，行规程缓冲积压会整段丢字节——真机注入竞态根因
                 # （丢在引号中间 → shell 卡 quote> 续行 → 8s 兜底 → 直通）
-                await self._drain_quiet(0.15)
+                await self.hook._drain_quiet(0.15)
             # 历史注入须在集成脚本之前（裸 shell 阶段执行 history -r / fc -R）
             await self._inject_shell_history(shell, flag)
             if shell != "powershell":
-                await self._drain_quiet(0.15)
+                await self.hook._drain_quiet(0.15)
             router = StreamRouter()
             _dbg("setup: inject shell=", shell, "flag=", flag,
                  "chunks=", len(injection_lines(shell, 1, flag)))
@@ -1483,7 +1265,7 @@ class PipelineCore:
                         _dbg("chunk", _ci, "sending", len(chunk_line), "B")
                         await self.session.send_raw(chunk_line)
                         _dbg("chunk", _ci, "sent, draining")
-                        drained = await self._drain_quiet(0.12, router,
+                        drained = await self.hook._drain_quiet(0.12, router,
                                                           raw_sink=_scan_ps2)
                         _dbg("chunk", _ci, "drained, prompt=", drained is not None)
                         # sink 可能在写入停顿期已捕获提示符；drain 未再见时不覆盖
@@ -1495,7 +1277,7 @@ class PipelineCore:
                             _dbg("setup: 续行提示符指纹，清行重试",
                                  f"attempt={_attempt}")
                             await self.session.send_raw(b"\x15\x03")
-                            await self._drain_quiet(0.5, router)
+                            await self.hook._drain_quiet(0.5, router)
                             break
                     else:
                         break   # 全部片发完且未见续行指纹：不需要重试
@@ -1580,10 +1362,10 @@ class PipelineCore:
         # 133;A/B），只有文本没有标记 = 承接回车的不是集成壳。
         # 密码位上的回车不验活：那是 sudo/ssh 的读取器在读密码，本来就不发
         # 标记，据此判陈旧是误判。工具命令在途同理（标记由 agent 帧负责）。
-        if (b"\r" in data or b"\n" in data) and self._hook_ok() \
+        if (b"\r" in data or b"\n" in data) and self.hook._hook_ok() \
                 and self._exec_future is None \
                 and not self._pw_at_end and not self._pw_prompt_seen:
-            self._arm_hook_watch()
+            self.hook._arm_hook_watch()
 
     async def _revive_session(self) -> bool:
         """断线后首个键触发重连：恢复会话、补启泵并通知前端。
@@ -1717,7 +1499,7 @@ class PipelineCore:
         # hook 上报触发的任务不重注入：上报即在位凭据，而注入吞窗口会吃掉
         # 在途蓝色重绘字节（真机「提交行消失」）；外部启动（无上报）才需要
         if not hooked:
-            await self._ensure_integrated()   # su - 等 login shell 重置后先重注入
+            await self.hook._ensure_integrated()   # su - 等 login shell 重置后先重注入
             self._reinject_pending = False   # 在途重注入已落定：pad 恢复 60s 兜底
         presenter = CorePresenter(self)
         self.backend.on_start = presenter.on_start
@@ -1980,7 +1762,7 @@ class PipelineCore:
                     _dbg("intr swallow: 整块被 ^C 回显吞除")
                     continue
             self.auth.inspect_output(data)
-            await self._detect_shell_exit(data)
+            await self.hook._detect_shell_exit(data)
             if not self._interactive or self._display == "ssh":
                 self._pump_phase = "passthru"
                 await self.emit_bytes(data)   # 回退模型 / Shell 模式：纯透传
@@ -2146,8 +1928,8 @@ class PipelineCore:
             # 命令行回车同样要验活：承接它的若不是集成壳（嵌套 shell 被 TMOUT
             # 收走后落回的裸壳），下一条自然语言的健康路径 \r 就会把整行当命令
             # 执行。工具命令在途不武装——那段的标记由 agent 帧负责。
-            if t and self._exec_future is None and self._hook_ok():
-                self._arm_hook_watch()
+            if t and self._exec_future is None and self.hook._hook_ok():
+                self.hook._arm_hook_watch()
             return
         if self._pw_prompt_seen:
             # 密码提示符在前台（ssh/sudo 讨密码）：绝不能拦成自然语言——
@@ -2157,12 +1939,12 @@ class PipelineCore:
             self._pw_capture_submit()
             await self.session.send_raw(b"\r")
             return
-        if self._interactive and self._hook_ok() and (
+        if self._interactive and self.hook._hook_ok() and (
                 not self._open_cmds or self._inner_ssh_prompt_live()):
             await self.session.send_raw(b"\r" if typed else (t + "\r").encode())
             # 兜底只保本次任务不悬空；看门狗保的是**下一条**：hook 其实不在位时
             # 置 _hook_stale，后续提交不再重复把整行自然语言送进裸壳
-            self._arm_hook_watch()
+            self.hook._arm_hook_watch()
             if not dirty:
                 self._hook_report_pending = t
                 self._fallback_task = asyncio.create_task(self._submit_fallback(t))
@@ -2273,160 +2055,53 @@ class PipelineCore:
         except Exception as e:  # noqa: BLE001 - 清理失败不追责：任务已起跑
             _dbg("pt-reset: exc", repr(e))
 
+    # --- hook 集成/验活过渡委托（实现已拆 core/hook_gate.py；src 内部
+    # 已直呼 self.hook.*，委托仅供 tests/ 与 core 子组件旧名过渡，Task 9 随
+    # _core_impl 删除）---
+    async def _ensure_integrated(self) -> bool:
+        return await self.hook._ensure_integrated()
+
+    async def _ensure_integrated_locked(self) -> bool:
+        return await self.hook._ensure_integrated_locked()
+
+    async def _probe_shell_kind(self) -> tuple[str | None, str]:
+        return await self.hook._probe_shell_kind()
+
+    async def _drain_quiet(self, quiet: float = 0.12,
+                           router: "StreamRouter | None" = None,
+                           raw_sink: "Callable[[bytes], None] | None" = None
+                           ) -> int:
+        return await self.hook._drain_quiet(quiet, router, raw_sink)
+
     def _hook_ok(self) -> bool:
-        """hook 在位判定：本会话见过 OSC 标记，且探测未判定「换了壳」。
-
-        旧口径「标记时间戳不落后于纯文本」会把**按键回显**（纯文本）误判成
-        标记绝迹：用户只要敲过字，live 必然新于最后一次提示符标记，健康路径
-        永久退化——\\x03 + 整行重发，且 suppress 窗口吞掉 ^C 后的提示符重画
-        使前端光标与 PTY 失步，重发回显拼在首段回显后（真机「同一行输入重复
-        两遍」根因）。su - 等重置发生在用户命令帧内（_open_cmds 开着），已由
-        空闲门闩覆盖；帧闭合后外层 hook 仍在、标记恢复。
-
-        但仅凭标记流也不够：su - 换壳后注入的外族 PS1 照样发标记而函数全空
-        （真机 zsh PS1 落进 bash 3.2），故 _ensure_integrated 探测失败置
-        _hook_gone 转假；嵌套 shell 退出（_open_cmds 清空）复位，外层 hook
-        的标记与函数从未丢过，自然恢复在位。
-
-        _hook_stale 补的是第三类：**带 hook 的 shell 自己没了**。root 空闲
-        TMOUT 自动登出、exit、logout 都不发任何标记，_hook_gone 的两个入口全
-        够不着，而死壳留下的 _last_mark_at 会让 _inner_ssh_prompt_live 继续
-        放行健康路径——补发的 \r 把自然语言整行送进落回来的裸壳执行（真机
-        跳板机 → xiaojian → sudo su - root → TMOUT 掉回 → 再 sudo su - 后
-        「输入自然语言就不行了」= -bash: 执行: command not found）。
-        由回车看门狗置位，任一标记到达即撤销。"""
-        return (self._interactive and not self._hook_gone
-                and not self._hook_stale and self._last_mark_at > 0)
-
-    # --- 回车看门狗：健康路径的「hook 还在不在」验活 -----------------------
+        return self.hook._hook_ok()
 
     def _note_hook_mark(self) -> None:
-        """任一 OSC 标记到达：集成壳就在当前提示符上活着。
-
-        既是 _inner_ssh_prompt_live 的时间戳凭据，也是陈旧判定的撤销凭据——
-        外层集成壳重新画出提示符（嵌套裸壳退出后落回来）即自愈，健康路径
-        立刻恢复，不必白付一次探测 + 分片重注入。"""
-        self._last_mark_at = time.monotonic()
-        self._hook_stale = False
-        self._cancel_hook_watch()
+        self.hook._note_hook_mark()
 
     def _note_hook_text(self) -> None:
-        """纯文本（无标记）到达：看门狗窗口内记一笔「壳有响应」。
-
-        只有文本、没有标记才判陈旧——一个标记都没有且毫无输出（链路卡死）时
-        不作结论，交给既有的超时/断线机制。"""
-        if self._hook_watch is not None:
-            self._hook_watch_text = True
+        self.hook._note_hook_text()
 
     def _arm_hook_watch(self) -> None:
-        """健康路径补发回车后武装看门狗。
-
-        集成壳的回车必有回响：PROMPT_COMMAND 发 133;D，提示符重画发 133;A/B。
-        _HOOK_LIVENESS 内只收到纯文本 = 承接回车的不是集成壳，转降级（下一条
-        自然语言走探测 + 重注入，而不是把整行交给裸壳执行）。误判自愈：真正的
-        标记一到即撤销；期间最多多付一次幂等重注入。"""
-        if self._display == "ssh":
-            # Shell 模式 pump 纯透传，标记根本不进路由器：无从验活，不作结论
-            return
-        self._cancel_hook_watch()
-        self._hook_watch_text = False
-        self._hook_watch = asyncio.create_task(self._hook_liveness())
+        self.hook._arm_hook_watch()
 
     def _cancel_hook_watch(self) -> None:
-        t = self._hook_watch
-        if t is not None:
-            self._hook_watch = None
-            t.cancel()
+        self.hook._cancel_hook_watch()
 
     async def _hook_liveness(self) -> None:
-        me = asyncio.current_task()
-        try:
-            await asyncio.sleep(_HOOK_LIVENESS)
-        finally:
-            # 只清自己的把手：撤销后紧接着重新武装时，新任务不得被旧任务的
-            # finally 抹掉（否则看门狗失控、再也撤不掉）
-            if self._hook_watch is me:
-                self._hook_watch = None
-        if self._closed or not self._hook_watch_text:
-            return
-        _dbg("hook stale: 回车后只有文本没有标记 → 转降级")
-        self._hook_stale = True
-
-    # --- shell 自行退出感知（TMOUT 自动登出 / logout / 断链）--------------
+        await self.hook._hook_liveness()
 
     async def _detect_shell_exit(self, data: bytes) -> None:
-        """在输出字节流里认 shell 自行退出的文字特征。
-
-        bash 退出不发任何 OSC 标记，_hook_gone 的两个入口与回车看门狗都够
-        不着（见 _hook_ok 注释的「第三类」）；而 TMOUT 最常命中在**审批等待
-        期**——那段 core 对 PTY 零字节发送，看门狗根本无从武装。故只能在字节
-        流里认文字，匹配口径见 _match_shell_exit。
-        """
-        self._exit_tail.extend(data)
-        if len(self._exit_tail) > 4096:
-            del self._exit_tail[:-2048]
-        why = self._match_shell_exit(bytes(self._exit_tail))
-        if why is None:
-            return
-        self._exit_tail.clear()
-        await self._note_shell_dead(why)
+        await self.hook._detect_shell_exit(data)
 
     def _match_shell_exit(self, tail: bytes) -> str | None:
-        """在滚动窗里认 shell 告别语，回命中片段；没命中回 None。
-
-        视觉行＝按 CR / LF 断开（CR 重画、提示符转义都并进同一行），剥掉转义
-        与控制符后**整行**全文匹配。两重收敛防误判：告别语前只允许一段提示符
-        宽度的普通字符、后面只许空白；裸 logout 只在审批挂起窗口认。只翻窗尾
-        几行：命中即清窗处置，再往前翻只会翻出早已处置过（或与本次无关）的
-        旧行。
-        """
-        lines = [x for x in re.split(rb"[\r\n]", tail) if x.strip()]
-        for line in lines[-8:]:
-            plain = _EXIT_CTRL_RE.sub(b"", _EXIT_ANSI_RE.sub(b"", line))
-            for pat, label in _SHELL_EXIT_RULES:
-                if pat.fullmatch(plain):
-                    return plain.decode("utf-8", "replace")[:80] or label
-            if self._shell_exit_window():
-                for pat, label in _SHELL_EXIT_WEAK_RULES:
-                    if pat.fullmatch(plain):
-                        return label
-        return None
+        return self.hook._match_shell_exit(tail)
 
     def _shell_exit_window(self) -> bool:
-        """退出特征的弱匹配窗口：审批挂起。
-
-        审批等待期 core 对 PTY 零字节发送、没有命令输出在途，行首 logout
-        只可能是 shell 自己的告别；窗口外认了会把 history/ps/grep 输出里
-        恰好成行的 logout 误判成壳死了。强特征（TMOUT 告别语 / ssh 断链）
-        贴行首且专用，不受此窗口限制——空闲提示符上的 TMOUT 最常见，而那段
-        既不在审批挂起也不在执行等待。"""
-        return self._pending_approval is not None
+        return self.hook._shell_exit_window()
 
     async def _note_shell_dead(self, why: str) -> None:
-        """壳已死：作废 hook 活凭据，立刻解阻塞在途工具执行。
-
-        后续提交与工具注入经 _hook_ok 转假走门禁/降级（P0-1、P1-4），不再把
-        工具注入行、Ctrl+C、__ot_pad 注进落回来的裸壳。任一 OSC 标记到达即由
-        _note_hook_mark 撤销陈旧判定（外层集成壳重画提示符＝自愈）。
-        """
-        if not self._interactive:
-            return
-        first = not self._hook_stale
-        self._hook_stale = True       # _hook_ok 转假：注入/健康路径全降级
-        self._last_mark_at = 0.0      # 死壳留下的旧时间戳不得再当活凭据
-        self._cancel_hook_watch()
-        fut = self._exec_future
-        if fut is not None and not fut.done():
-            # 明确错误立即收束，不等超时打 ^C（那也是落进裸壳的垃圾）
-            fut.set_result(CommandResult(
-                output=f"[ot] 远端 shell 已退出（{why}），命令未执行；"
-                       f"请重新登录后重试",
-                exit_code=CHANNEL_DEAD_EC, truncated=False, cwd=""))
-        if first:
-            await self.emit_msg(ServerMsg(
-                type="status",
-                text=f"远端 shell 已退出（{why}）：AI 工具执行不可用，"
-                     f"请重新登录后重试"))
+        await self.hook._note_shell_dead(why)
 
     async def _submit_fallback(self, t: str) -> None:
         """健康路径兜底：补发 \\r 后 hook AI 上报迟迟未到（重置误判/路由丢报）
@@ -2516,7 +2191,7 @@ class PipelineCore:
             # toggle 的 __ot_exec__ 变普通命令执行(command not found),
             # 确认标记永不回来 → 下面死等 5s 才清屏(真机「切 Shell 没反应」)。
             # 先补注入(幂等,healthy shell 只重定义同名函数)再开关注入。
-            await self._ensure_integrated()
+            await self.hook._ensure_integrated()
             self._ev_exec_end.clear()
             self._suppress_live = True   # 开关注入行的回显吞掉（§5.5）
             try:
@@ -2539,7 +2214,7 @@ class PipelineCore:
             # 保守态（标记绝迹）——首个自然语言提交走降级路径重注入确认 hook
             self._last_mark_at = 0.0
             self._hook_stale = False
-            self._cancel_hook_watch()
+            self.hook._cancel_hook_watch()
             self._last_live_at = time.monotonic()
             self._suppress_live = True
             try:
@@ -2576,3 +2251,13 @@ class CorePresenter:
         elif w._agent_open_cmd == command:
             # 兜底 C 已到但 D 迟迟不到的超时路径（Ctrl+C 后 3s 宽限仍无 D）
             w._agent_open_cmd = None
+
+def __getattr__(name: str):
+    # PEP 562：_HOOK_LIVENESS 已拆 core/hook_gate.py；模块级 from-import 会在
+    # 「core 子模块先于 _core_impl 导入」的顺序下成环（子模块注册触发包桥
+    # __setattr__ → 拉起本模块 → 再回头要半初始化 hook_gate 的符号），
+    # 改惰性再导出供 core 包桥 getattr 读取（tests/test_nested_session.py）
+    if name == "_HOOK_LIVENESS":
+        from .core.hook_gate import _HOOK_LIVENESS
+        return _HOOK_LIVENESS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

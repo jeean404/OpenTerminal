@@ -10,6 +10,7 @@ class FakeCore:
     _open_cmd_at: dict = {}
     _last_mark_at: float = 0.0
     _target_host: str = ""
+    _pending_approval = None   # _shell_exit_window 弱匹配窗口判据
 
 
 def test_tracker_constructs_standalone():
@@ -121,3 +122,44 @@ def test_core_lazy_exec_property():
     from openterminal._core_impl import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     assert core.exec is core.exec
+
+
+def test_hookgate_owns_state():
+    from openterminal.core.hook_gate import HookGate
+    core = FakeCore()
+    HookGate(core)
+    for attr in ("_interactive", "_shell_kind", "_b64flag", "_hook_gone",
+                 "_hook_stale", "_hook_seen", "_hook_watch", "_hook_watch_text",
+                 "_probe_buf", "_last_mark_at", "_last_live_at", "_exit_tail",
+                 "_hook_report_pending"):
+        assert hasattr(core, attr), attr
+
+
+def test_hookgate_preserves_presets():
+    from openterminal.core.hook_gate import HookGate
+    core = FakeCore()
+    core._exit_tail = bytearray(b"logout")
+    core._shell_kind = "bash"
+    HookGate(core)
+    # hasattr 守卫：裸构造测试在 core 上预置的值不得被初始化覆盖
+    assert bytes(core._exit_tail) == b"logout"
+    assert core._shell_kind == "bash"
+
+
+def test_hookgate_initial_state():
+    from openterminal.core.hook_gate import HookGate
+    h = HookGate(FakeCore())
+    assert h.hook_ok() is False          # 未集成时 hook 不在位
+    assert h.shell_kind is None
+
+
+def test_hookgate_exit_tail_matches_tmout_logout():
+    from openterminal.core.hook_gate import HookGate
+    h = HookGate(FakeCore())
+    # 强特征：TMOUT 自动登出（任意提示符位置都认）
+    assert "auto-logout" in h._match_shell_exit(
+        b"root@x:~# timed out waiting for input: auto-logout\r\n")
+    # 弱特征：裸 logout 只在审批挂起窗口认
+    assert h._match_shell_exit(b"logout\r\n") is None
+    h.core._pending_approval = object()
+    assert h._match_shell_exit(b"logout\r\n") == "logout"

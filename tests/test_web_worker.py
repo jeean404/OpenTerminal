@@ -954,7 +954,7 @@ async def test_shell_exit_during_approval_blocks_later_inject(monkeypatch):
     # 决策到达：工具注入走门禁快速失败，PTY 里不得出现任何注入垃圾
     async def _fail_locked():
         return False
-    monkeypatch.setattr(w, "_ensure_integrated_locked", _fail_locked)
+    monkeypatch.setattr(w.hook, "_ensure_integrated_locked", _fail_locked)
     runner = InteractiveRunner(w)
     res = await asyncio.wait_for(
         runner.run("head -2 /var/log/app.log; echo ====", timeout=1,
@@ -1081,7 +1081,7 @@ async def test_dead_shell_first_submit_never_hits_bare_shell(monkeypatch):
 
     async def _fail():
         return False
-    monkeypatch.setattr(w, "_ensure_integrated", _fail)
+    monkeypatch.setattr(w.hook, "_ensure_integrated", _fail)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="帮我看看磁盘占用"))
@@ -1298,7 +1298,7 @@ def _skip_reintegrate(w, monkeypatch):
 
     async def _noop():
         return True
-    monkeypatch.setattr(w, "_ensure_integrated", _noop)
+    monkeypatch.setattr(w.hook, "_ensure_integrated", _noop)
 
 
 async def test_worker_submit_healthy_routes_through_hook(monkeypatch):
@@ -1598,7 +1598,7 @@ async def test_reinject_into_bare_shell_no_prompt_wall(monkeypatch):
     async def _probe():
         return ("bash", "-d")
 
-    monkeypatch.setattr(w, "_probe_shell_kind", _probe)
+    monkeypatch.setattr(w.hook, "_probe_shell_kind", _probe)
     w._ai_task = _fake_ai_task(w)   # 任务在跑：prompt_start 会关帘
 
     assert await w._ensure_integrated()
@@ -1713,7 +1713,7 @@ async def test_worker_degraded_settles_after_intr(monkeypatch):
     async def _fake_reintegrate():
         async with w._runner_lock:
             await w.session.send_raw(b" _ot_probe_line\r")
-    monkeypatch.setattr(w, "_ensure_integrated", _fake_reintegrate)
+    monkeypatch.setattr(w.hook, "_ensure_integrated", _fake_reintegrate)
 
     await w.handle_client(ClientMsg(type="submit", text="看看磁盘用量"))
     assert w._ai_task is not None
@@ -1856,7 +1856,7 @@ async def test_worker_submit_hook_dead_reintegrate_fails_silent_start(monkeypatc
 
     async def _fail():
         return False
-    monkeypatch.setattr(w, "_ensure_integrated", _fail)
+    monkeypatch.setattr(w.hook, "_ensure_integrated", _fail)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
     await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
@@ -2191,7 +2191,7 @@ async def test_ensure_integrated_reinjects_matching_shell(monkeypatch):
 
     async def _fake_probe():
         return "bash", "-d"
-    monkeypatch.setattr(w, "_probe_shell_kind", _fake_probe)
+    monkeypatch.setattr(w.hook, "_probe_shell_kind", _fake_probe)
     base = w.session.send_raw
 
     async def _raw(data):
@@ -2462,7 +2462,7 @@ async def test_switch_display_reinforces_integration_before_toggle(monkeypatch):
         called.append(True)
         return True
 
-    w._ensure_integrated = _fake_ensure
+    w.hook._ensure_integrated = _fake_ensure
     await w._switch_display("ssh")
     assert called, "切换前未补注入集成脚本"
     assert w._display == "ssh"
