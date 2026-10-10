@@ -6,7 +6,7 @@ term_open/commit/command_done、无直通活块、无嵌套 shell 状态机、�
 提示符）。核心只做三件事：
 
 1. 记账：OSC 133（A/B/C/D 相位）+ OSC 6337（CMD/AI/EXEC 行报告）的
-   StreamRouter 监听——history_db、退出码、AI 上下文；
+   StreamRouter 监听——history、退出码、AI 上下文；
 2. AI：agent（自然语言任务）+ ``__ot_exec__`` 工具命令注入通道，输出经
    ai_token/ai_think/ai_collapse/ai_card/final 事件驱动前端卡片层；
 3. 非显示事件：approval/ask_password/ask_host_key/usage 等。
@@ -37,11 +37,11 @@ def _dbg(*a) -> None:
         print(f"[otdbg +{time.monotonic() - _OT_T0:7.3f}s]", *a, flush=True)
 
 from ..shell import cmdset
-from .. import history_db
+from . import history
 from ..config import Config, TargetConfig, app_dir
 from ..connections import (
     PW_STORE_FAIL_HINT, display_name, open_session, parse_user_at_host)
-from ..history_db import HISTORY_RECALL_LIMIT
+from .history import HISTORY_RECALL_LIMIT
 from ..policy import Policy
 from .messages import (
     CHANNEL_DEAD_EC, CHANNEL_DEAD_MSG, ClientMsg, InteractiveRunner,
@@ -115,7 +115,7 @@ from ..agent.sysprobe import (
     LOCAL_PROFILE, MANUAL_PRESETS, load_host_cache, probe_profile,
     save_host_cache,
 )
-from ..transcript import open_transcript
+from .transcript import open_transcript
 from ..connections.secrets import load_password_alias as _load_password_alias_impl
 
 
@@ -721,7 +721,7 @@ class PipelineCore:
         任务重注入都记 ~8 条 ~700B 垃圾，回灌单行超 tty 缓冲会死锁黑屏。
         """
         if command and self._target_host and not is_internal_line(command):
-            history_db.record(self._target_host, source, command)
+            history.record(self._target_host, source, command)
 
     async def _inject_shell_history(self, shell: str | None,
                                     flag: str = "-d") -> None:
@@ -733,7 +733,7 @@ class PipelineCore:
         if not shell or self.session is None or not self._target_host:
             return
         try:
-            rows = history_db.recent(self._target_host, HISTORY_RECALL_LIMIT)
+            rows = history.recent(self._target_host, HISTORY_RECALL_LIMIT)
             cmds = [r["command"] for r in rows
                     if not is_internal_line(r["command"])]
             # 单行注入受 tty canonical 缓冲约束（macOS ~1KB）：超限从最旧丢起。
