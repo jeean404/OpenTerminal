@@ -163,3 +163,19 @@ def test_hookgate_exit_tail_matches_tmout_logout():
     assert h._match_shell_exit(b"logout\r\n") is None
     h.core._pending_approval = object()
     assert h._match_shell_exit(b"logout\r\n") == "logout"
+
+
+def test_cmdset_runner_owns_state():
+    from openterminal.core.cmdset_runner import CmdsetRunner
+    core = FakeCore()
+    CmdsetRunner(core)
+    for attr in ("_cs_tail", "_cs_pw_pending", "_cs_prompt_id",
+                 "_cs_task", "_cs_resume"):
+        assert hasattr(core, attr), attr
+
+
+def test_cmdset_constants_live_in_runner_module():
+    from openterminal.core import cmdset_runner as cr
+    assert cr.CMDSET_ECHO_TIMEOUT > 0 and cr.CMDSET_PROMPT_TIMEOUT > 0
+    assert cr.CMDSET_QUIET > 0 and cr.CMDSET_HOOK_WAIT > 0
+    assert cr._CMDSET_PROMPT_RE is not None and cr._CS_PROMPT_ID_RE is not None
