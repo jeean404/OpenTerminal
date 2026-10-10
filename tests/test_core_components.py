@@ -48,3 +48,44 @@ def test_ssh_frame_host_skips_non_ssh_frames():
     # sudo 凭据键跳过非 ssh 帧向外找最近 ssh 帧（P1-3）
     assert t.ssh_frame_host() == "1.2.3.4"
     assert t.sudo_pw_key() == ("1.2.3.4", "sudo", None)
+
+
+def test_authflow_owns_full_state():
+    from openterminal.core.auth import AuthFlow
+    core = FakeCore()
+    AuthFlow(core)
+    for attr in ("_pw_cancelled", "_pw_tail", "_pw_prompt_seen",
+                 "_nested_pw_attempts", "_nested_pw_ctx", "_pw_verifying",
+                 "_pw_verify_at", "_pw_verify_timer", "_pw_hold",
+                 "_pw_hold_timer", "_pw_at_end", "_pw_modal_open",
+                 "_pw_dismiss_timer", "_pw_capture_key", "_pw_typed",
+                 "_pw_remember_candidate", "_pw_remember_pending",
+                 "_pw_result_from"):
+        assert hasattr(core, attr), attr
+
+
+def test_authflow_preserves_presets():
+    from openterminal.core.auth import AuthFlow
+    core = FakeCore()
+    core._pw_tail = bytearray(b"[sudo] password: ")
+    AuthFlow(core)
+    # hasattr 守卫：裸构造测试在 core 上预置的值不得被初始化覆盖
+    assert bytes(core._pw_tail) == b"[sudo] password: "
+
+
+def test_authflow_armed_false_when_no_prompt():
+    from openterminal.core.auth import AuthFlow
+    core = FakeCore()
+    core._exec_stack = []
+    core._open_cmds = {}
+    core._cs_pw_pending = False
+    assert AuthFlow(core).armed is False
+
+
+def test_core_lazy_auth_property():
+    """PipelineCore.auth 惰性属性：裸构造实例首次访问即建 AuthFlow，
+    且同一实例复用（状态归属唯一）。"""
+    from openterminal._core_impl import PipelineCore
+    core = PipelineCore.__new__(PipelineCore)
+    a = core.auth
+    assert a is core.auth
