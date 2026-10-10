@@ -193,3 +193,15 @@ def test_core_lazy_ai_property():
     from openterminal._core_impl import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     assert core.ai is core.ai
+
+
+def test_outputpump_owns_state():
+    from openterminal.core.pump import OutputPump
+    p = OutputPump(FakeCore())
+    assert p.phase == "read"   # core.py:560 初始值
+
+
+def test_core_lazy_pump_property():
+    from openterminal._core_impl import PipelineCore
+    core = PipelineCore.__new__(PipelineCore)
+    assert core.pump is core.pump

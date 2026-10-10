@@ -196,6 +196,7 @@ class PipelineCore:
         self.hook   # noqa: B018 — hook 集成/验活组件：触达 lazy 属性即建 _hook_*/_interactive 等状态（core/hook_gate.py）
         self.cs    # noqa: B018 — 连接后命令集组件：触达 lazy 属性即建 _cs_* 状态（core/cmdset_runner.py）
         self.ai    # noqa: B018 — AI 行处理/任务组件：触达 lazy 属性即建 _ai_*/_display 等 AI 状态（core/ai_flow.py）
+        self.pump   # noqa: B018 — 输出泵组件：触达 lazy 属性即建 _pump/_sender/_pump_phase 状态（core/pump.py）
         self._hks: asyncio.Queue = asyncio.Queue()      # 主机密钥应答
         self._decisions: asyncio.Queue = asyncio.Queue()  # 审批决策
         # 未决审批记账：审批帧只发一次，WS 断隙/刷新即丢，core 会永久等决策
@@ -209,8 +210,6 @@ class PipelineCore:
         self._target: TargetConfig | None = None   # _connect 时持有(命令集等读取)
         self._target_host = ""       # _connect 时填充
         self._target_user = ""
-        self._sender: asyncio.Task | None = None
-        self._pump: asyncio.Task | None = None
         self._closed = False
         self._closed_sent = False  # closed 消息已入 outbox（sender 退出门闩）
         # 泵 EOF（_pump_eof）置位：断线后首个键经 _on_keys 触发 _revive_session
@@ -227,7 +226,6 @@ class PipelineCore:
         # 任意流字节（live/exec 回显）到达信号：重注入分片逐片等回显做应答
         # （固定短间隔会在 shell 执行间隙把分片堆进 canonical 缓冲溢出丢块）
         self._ev_stream = asyncio.Event()
-        self._pump_phase = "read"   # 排障：泵当前所处 stage（心跳打出）
         self._ev_exec_end = asyncio.Event()  # 模式切换：等 toggle 的 D 标记
 
     @property
@@ -290,6 +288,16 @@ class PipelineCore:
             self.__dict__["_ai_flow"] = a
         return a
 
+    @property
+    def pump(self) -> "OutputPump":
+        """输出泵组件（Task 8）：惰性建以兼容裸构造测试实例。"""
+        p = self.__dict__.get("_output_pump")
+        if p is None:
+            from .core.pump import OutputPump
+            p = OutputPump(self)
+            self.__dict__["_output_pump"] = p
+        return p
+
     # --- 过渡委托（tests/ 引用旧名；Task 9/10 迁移测试后删除）---
     @staticmethod
     def _parse_ssh_cmd_target(line: str
@@ -334,16 +342,6 @@ class PipelineCore:
             # 重连/刷新重挂：补发未决审批（首挂时必为 None，不会重复投）
             self._emit_nowait(self._pending_approval)
 
-    async def _heartbeat(self) -> None:
-        """应用层心跳：10s 一个 ping，给前端看门狗当「服务端还活着」基线。
-        sender 卡死/sink 僵尸时 ping 与回显会同时断——前端据此判定连接无响应
-        并重连，把「假活连接永久卡死」降级成一次秒级抖动（真机 2026-10-07）。"""
-        while not self._closed:
-            await asyncio.sleep(10)
-            if self._closed:
-                break
-            self._emit_nowait(ServerMsg(type="ping"))
-            await self._reap_zombie_ai()
 
     async def _reap_zombie_ai(self) -> None:
         """僵尸任务自愈：``_ai_task`` 存活却长时间零产出且 shell 空闲 → 回收。
@@ -696,32 +694,6 @@ class PipelineCore:
         if len(self._offline) > _OFFLINE_CAP:
             del self._offline[:-_OFFLINE_CAP]
 
-    async def _sender_loop(self) -> None:
-        while True:
-            kind, payload = await self._outbox.get()
-            sink = self._sink
-            if sink is None:
-                self._buffer_offline(kind, payload)
-            else:
-                try:
-                    if kind == "bytes":
-                        await sink.send_bytes(payload)
-                    else:
-                        await sink.send_text(payload)
-                except Exception:
-                    # sink 已死但 detach 尚未回来（网络刚断的那几毫秒）：帧必须
-                    # 攒住，否则断线瞬间发出的收束帧就永久丢了（旧实现 continue
-                    # 直接丢弃）。顺手摘掉死 sink，后续帧不再逐条撞异常。
-                    if self._sink is sink:
-                        self._sink = None
-                    self._buffer_offline(kind, payload)
-            # 关闭后把剩余消息发完（含 closed）再退出，避免协程泄漏。
-            # 只看 _closed 不够：close 会先置 _closed 再入队 closed，若此刻
-            # backlog 未排空，sender 会在 closed 入队前按 empty 提前退出
-            if self._closed and self._closed_sent and self._outbox.empty():
-                break
-
-    # --- 主流程 ---
     async def _run(self) -> None:
         try:
             await self._connect()
@@ -754,7 +726,7 @@ class PipelineCore:
             type="status",
             text=f"已连接 {self._target_host}"
                  f"（{self.profile.distro or self.profile.os_family}）。{hint}"))
-        self._pump = asyncio.create_task(self._pump_guard())
+        self.pump.start()
         if self._interactive:
             # 注入期的提示符字节被 setup 消化掉了：Ctrl+L 让 shell 重画提示符
             #（ready 已先入 outbox，顺序有保证）
@@ -1092,30 +1064,11 @@ class PipelineCore:
             return False
         self._session_dead = False
         if self._pump is None or self._pump.done():
-            self._pump = asyncio.create_task(self._pump_guard())
+            self.pump.start()
         await self.emit_msg(ServerMsg(
             type="reconnected", text=f"已重新连接 {self._target_host or '目标'}"))
         return True
 
-
-    async def _stop_pump(self) -> None:
-        """停输出泵并等它真正退出。只 cancel 不等的话，泵可能还压在
-        _read_some 上，抢走随后命令/探测的回显与哨兵字节（哨兵流被切坏
-        → run 拿空输出）。"""
-        if self._pump is not None:
-            t, self._pump = self._pump, None
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                # 外层任务在 `await t` 上被取消时，取消会传导给泵任务
-                # （await task 的 waiter 就是任务本身），泵的 CancelledError
-                # 会从这里冒出来——不能吞，否则外层的取消也被吞掉，任务
-                # 变成杀不死的僵尸（teardown gather 挂死）
-                if asyncio.current_task().cancelling() > 0:
-                    raise
-            except Exception:  # noqa: BLE001 - 会话关闭竞态（fd 失效等）
-                pass
 
     def _reset_context(self) -> None:
         """模型上下文归零：换 thread_id（langgraph MemorySaver 按 thread 存
@@ -1161,7 +1114,7 @@ class PipelineCore:
             user=self._target_user, distro=self.profile.distro or "",
             prompt=self._cur_prompt,
             interactive=1 if self._interactive else 0))
-        self._pump = asyncio.create_task(self._pump_guard())
+        self.pump.start()
         if self._interactive:
             await self.session.send_raw(b"\x0c")
 
@@ -1197,63 +1150,19 @@ class PipelineCore:
         await self.emit_msg(ServerMsg(
             type="status", text=f"系统方言已手动设为 {parts[1]}"))
 
-    async def _pump_guard(self) -> None:
-        """泵死亡留痕：任务引用被 self._pump 持有，异常永远不会被 asyncio 当作
-        「未取回」打印出来——真机「终端彻底不再回显、日志一片安静」就此查无
-        实据（第 3 轮复现里降级路径之后 90s 零字节的盲区）。"""
-        try:
-            await self._pump_loop()
-        except asyncio.CancelledError:
-            raise
-        except BaseException:  # noqa: BLE001 - 只为留痕，原样重抛
-            import traceback
-            _dbg("pump died:", traceback.format_exc())
-            raise
 
+    # --- 输出泵过渡委托（实现已拆 core/pump.py；src 内部
+    # 调用点暂经委托，Task 9 随 _core_impl 删除）---
+    async def _pump_guard(self) -> None:
+        return await self.pump._pump_guard()
     async def _pump_loop(self) -> None:
-        """PTY 泵：回退/Shell 模式纯透传；集成模式下按 OSC 标记切分——
-        标记字节与需吞除的注入回显不外发，其余原样转发（唯一显示管线）。"""
-        _tick = 0
-        while not self._closed:
-            try:
-                data = await self.session._read_some(0.2)
-            except asyncio.TimeoutError:
-                # 心跳：读超时是稳态，每 10 次（≈2s）留一行。它把「远端真的
-                # 沉默」与「泵死了/卡在处理器里」分开——心跳仍在 = 泵活着且
-                # _read_some 正常返回，字节确实没来（第 3 轮真机盲区）。
-                _tick += 1
-                if _tick % 10 == 0:
-                    _dbg("pump tick", _tick, "phase=", self._pump_phase)
-                continue
-            except (ConnectionError, EOFError):
-                await self._pump_eof("连接已断开")
-                return
-            if data == b"":     # 本地 PTY 读者线程的 EOF 哨兵（如用户 exit）
-                await self._pump_eof("会话已结束")
-                return
-            if not data:
-                continue
-            self._pump_phase = "body"
-            _dbg("raw", len(data), repr(data[:60]))
-            if self._cs_tail is not None:
-                self._cs_tail.extend(data)
-                if len(self._cs_tail) > 8192:
-                    del self._cs_tail[:-8192]   # 只留尾部:提示匹配只需最近输出
-            if self._intr_swallow_until:
-                data = self.exec._strip_intr_echo(data)
-                if not data:
-                    _dbg("intr swallow: 整块被 ^C 回显吞除")
-                    continue
-            self.auth.inspect_output(data)
-            await self.hook._detect_shell_exit(data)
-            if not self._interactive or self._display == "ssh":
-                self._pump_phase = "passthru"
-                await self.emit_bytes(data)   # 回退模型 / Shell 模式：纯透传
-                continue
-            for ev in self._router.feed(data):
-                self._pump_phase = "ev:" + str(ev[0])
-                await self.exec.on_stream_event(ev)
-            self._pump_phase = "read"
+        return await self.pump._pump_loop()
+    async def _stop_pump(self) -> None:
+        return await self.pump._stop_pump()
+    async def _heartbeat(self) -> None:
+        return await self.pump._heartbeat()
+    async def _sender_loop(self) -> None:
+        return await self.pump._sender_loop()
 
     async def _pump_eof(self, text: str) -> None:
         if self._ai_task is not None:
