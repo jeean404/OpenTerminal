@@ -2775,6 +2775,19 @@ class Session {
         // 密码提示符已被终端手输消费：后端防抖代关陈旧模态
         modalDismissPassword();
         break;
+      case "ask_remember":
+        // 手输密码验证成功后的「记住」询问（嵌套 ssh/sudo，P1-3/P1-4）：
+        // 同意 → remember_yes 按后端留档键写 keyring；拒绝 → remember_no
+        // 只清档。文案对齐 ready 后的「记住密码」确认框
+        modalConfirm("记住密码",
+          msg.text || "已成功登录。记住该密码？下次自动填充" +
+                      "（写入系统凭据库，不落数据库）",
+          ok => {
+            this.sendJson({type: "auth",
+                           auth_kind: ok ? "remember_yes" : "remember_no",
+                           text: ""});
+          }, "记住", "不记住");
+        break;
       case "ask_host_key":
         modalConfirm("主机密钥", msg.message, ok => {
           this.sendJson({type: "auth", auth_kind: "host_key", text: String(ok)});

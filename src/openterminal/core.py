@@ -41,7 +41,8 @@ def _dbg(*a) -> None:
 from . import cmdset
 from . import history_db
 from .config import Config, TargetConfig, app_dir
-from .connections import open_session, parse_user_at_host
+from .connections import (
+    PW_STORE_FAIL_HINT, display_name, open_session, parse_user_at_host)
 from .history_db import HISTORY_RECALL_LIMIT
 from .policy import Policy
 
@@ -64,6 +65,17 @@ _PW_VERIFY_TIMEOUT = 3.0
 # hold 释放防抖：auth 结果输出后稍等再放——隧道合包可能把 deny 与重讨提示符
 # 拆成两块，即放会让抢跑命令打进新密码位
 _PW_HOLD_RELEASE = 0.25
+# 手输密码验证成功后的「记住」询问防抖（P1-3/P1-4）：等一拍让迟到的 deny/
+# 重讨提示落地再问——「只落本次验证通过的密码」，错密拆块到达也不误问
+_PW_REMEMBER_DELAY = 0.45
+# 验证失败指纹：auth 结果输出出现即判失败——错密不进库、不弹记忆询问。
+# 英文覆盖 OpenSSH（Permission denied）/sudo（Sorry, try again / incorrect
+# password）原文，中文兜部分本地化；成功输出不含这些字样（bytes 字面量
+# 不能含非 ASCII，中文段 str 编码拼接——同 _PASSWORD_PROMPT_RE）
+_PW_AUTH_FAIL_RE = re.compile(
+    rb"permission denied|sorry, try again|authentication fail"
+    rb"|incorrect password|" + "密码错误|口令错误".encode(),
+    re.IGNORECASE)
 # AI 僵尸任务静默上限：_ai_task 存活但长时间零产出（无 ai_token/think/tool、
 # 无非遇抑 echo）→ 按僵尸回收。触发场景：任务卡在某个等不住的 await 上一直
 # 不归 None，使提示符幕帘在每次 prompt_start 重新关帘（见 _curtain_close），
@@ -226,7 +238,9 @@ class ClientMsg:
     text: str = ""                 # mode: "ssh" | "agent"；auth: 密码文本；submit: 前端拦截的自然语言整行
     data: bytes = b""              # raw 按键字节（二进制帧整帧直发 PTY）
     decision: dict | None = None
-    auth_kind: str = ""            # password | host_key
+    auth_kind: str = ""            # password | password_remember | password_cancel
+                                   # | nested_password(_cancel) | remember_yes/no
+                                   # | host_key | cmdset
     remember: bool = False         # auth 密码勾选「记住」→ 写入 keyring
     model: str = ""                # change_model：目标模型 id
     cols: int = 0
@@ -482,6 +496,16 @@ class PipelineCore:
         self._pw_at_end = False        # 上一 pump 块尾窗是否以密码提示符结尾
         self._pw_modal_open = False    # 嵌套密码模态在屏等应答（提示符被消费即代关）
         self._pw_dismiss_timer = None  # 模态代关防抖任务（_PW_MODAL_DISMISS）
+        # 手输密码捕获（P1-3/P1-4）：无凭据的密码提示符在前台时旁路留档
+        # 用户按键（照常透传 PTY），回车冻结候选；验证成功后弹「记住」询问。
+        # 落键 = _nested_pw_ctx（sudo/su 类为 sudo@<主机> 专用键）
+        self._pw_capture_key: tuple | None = None
+        self._pw_typed = bytearray()   # 捕获中的密码字节（回车即冻结）
+        self._pw_remember_candidate = None   # 已提交待验证的 (键, 密码)
+        self._pw_remember_pending = None     # 验证成功待用户应答的 (键, 密码)
+        # 验证窗起点在 _pw_tail 的偏移：失败指纹只查本次提交之后的输出
+        # （上一轮错密的 deny 还留在尾窗里，全窗扫会把成功误判成失败）
+        self._pw_result_from = 0
         # 降级路径 \x03 后 readline 的 ^C 回显吞除：只吞 "^C" 两字节（跨块
         # 悬置），\r\n 与提示符重画照常透传——光标随后被 \r\n 重新锚定，不
         # 失步（旧「整窗吞」造成回显拼行的教训不适用：这里不吞提示符段）。
@@ -706,6 +730,11 @@ class PipelineCore:
             elif msg.auth_kind == "nested_password":
                 # 嵌套 ssh/sudo 密码提示符的模态代答：打进 PTY 而非认证队列
                 await self._on_nested_password(msg.text, msg.remember)
+            elif msg.auth_kind == "remember_yes":
+                # 手输密码验证成功后的「记住」询问应答：按留档键写 keyring
+                await self._finish_remember(True)
+            elif msg.auth_kind == "remember_no":
+                await self._finish_remember(False)
             elif msg.auth_kind == "nested_password_cancel":
                 # 模态取消/点遮罩：用户改终端手输密码，立即退出验证窗口
                 # （否则手输的密码被 hold 到 _PW_VERIFY_TIMEOUT 才放行）；
@@ -939,12 +968,18 @@ class PipelineCore:
                 not at_end
                 or time.monotonic() - self._pw_verify_at > _PW_VERIFY_TIMEOUT):
             self._end_pw_verify()   # auth 结果已出（或超时）：不再 hold 新输入
+            if not at_end:
+                self._pw_auth_result()   # 成败分流：验证通过才排「记住」询问
             if not at_end and self._innermost_ssh_frame() is not None:
                 # 嵌套 ssh 登录成功：后台主动注入 hook——首条自然语言到达时
                 # hook 已在位走健康路径，免当场探测+分片注入的秒级代价
                 asyncio.get_running_loop().create_task(self._proactive_reinject())
         if not at_end:
             self._pw_prompt_seen = False
+            if self._pw_capture_key is not None:
+                # 提示符被冲走/中止（Ctrl+C 等）：半截口令作废不进库
+                self._pw_capture_key = None
+                self._pw_typed = bytearray()
             return
         if self._pw_prompt_seen or self.session is None:
             return
@@ -963,6 +998,7 @@ class PipelineCore:
         self._pw_prompt_seen = False
         self._pw_verifying = True
         self._pw_verify_at = time.monotonic()
+        self._pw_result_from = len(self._pw_tail)   # 失败指纹的查询起点
         self._schedule_pw_verify_expiry()
 
     def _end_pw_verify(self) -> None:
@@ -994,6 +1030,7 @@ class PipelineCore:
         if not self._pw_verifying:
             return
         self._pw_verifying = False
+        self._pw_remember_candidate = None   # 未见 auth 结果：不算验证通过
         _dbg("pw verify expiry -> release hold", len(self._pw_hold))
         if self._pw_hold:
             self._schedule_pw_hold_release()
@@ -1150,73 +1187,120 @@ class PipelineCore:
             return False
         return self._last_mark_at > self._open_cmd_at.get(inst, 0.0) + 0.05
 
+    @staticmethod
+    def _parse_ssh_cmd_target(line: str
+                              ) -> tuple[str | None, str | None, int | None] | None:
+        """单条命令行解析 ssh 族命令的目标；非 ssh 族返回 None。
+
+        ssh 族但目标解析不出（空行、`ssh` 无目标、别名目标读不到等）
+        返回 (None, None, None)。调用方按各自语义处置：_nested_ssh_target
+        据此向外层帧继续找（既有行为），_ssh_frame_host 跳过本帧找最近的
+        ssh 帧。端口取 dest 的 :port 或 -p/-P/--port= 选项。
+        """
+        import shlex
+
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            parts = line.split()
+        if not parts:
+            return None, None, None
+        cmd = os.path.basename(parts[0])
+        if cmd not in ("ssh", "scp", "rsync", "sftp"):
+            return None   # 非 ssh 类（sudo/su 等）：不算 ssh 帧
+        val_opts = {"b", "c", "D", "e", "F", "i", "J", "l", "L", "m",
+                    "o", "p", "P", "R", "S", "W"}
+        argv = parts[1:]
+        i = 0
+        dest = None
+        bare_args: list[str] = []
+        while i < len(argv):
+            a = argv[i]
+            if a == "--":
+                i += 1
+                if i < len(argv):
+                    bare_args.append(argv[i])
+                break
+            if a.startswith("-") and len(a) > 1:
+                if a[1] in val_opts and len(a) == 2:
+                    i += 2   # 带值短选项：连值一起跳过
+                else:
+                    i += 1   # 无值开关（-t/-A/-4…）或合写带值（-oVal）
+                continue
+            bare_args.append(a)
+            i += 1
+        if cmd in ("scp", "rsync"):
+            # 源/目的都可能带远端路径：挑带 @ 的（user@host:path），
+            # 其次带 : 的（host:path）；纯本地路径跳过
+            remote = [a for a in bare_args if "@" in a] or \
+                [a for a in bare_args if ":" in a]
+            dest = remote[0] if remote else None
+        else:
+            dest = bare_args[0] if bare_args else None
+        if dest is None:
+            return None, None, None
+        if cmd in ("scp", "rsync") and ":" in dest:
+            dest = dest.rsplit(":", 1)[0]   # 去掉远端路径
+        host, user, port = parse_user_at_host(dest)
+        if port is None:
+            # ssh -p/--port 端口在选项里
+            for j, a in enumerate(argv):
+                if a == "-p" and j + 1 < len(argv) and argv[j + 1].isdigit():
+                    port = int(argv[j + 1])
+                elif a.startswith("--port=") and a[7:].isdigit():
+                    port = int(a[7:])
+                elif a == "-P" and j + 1 < len(argv) and argv[j + 1].isdigit():
+                    port = int(argv[j + 1])
+        return host, user, port
+
     def _nested_ssh_target(self) -> tuple[str | None, str | None, int | None]:
         """从**最内层**未闭合用户命令行解析 ssh 类命令的目标 (host, user, port)。
 
         只认最内层帧：嵌套会话里外层 `ssh 跳板机` 帧始终开着，若它兜底
         吸收了内层 sudo 的密码提示，就会把跳板机的凭据错填给 sudo。
         解析不出（sudo、ssh 目标是别名走 ~/.ssh/config 等）返回 (None,...)
-        ——密码仍可弹窗代答，只是「记住」没有可靠的键。"""
-        import shlex
-
+        ——密码仍可弹窗代答，只是「记住」没有可靠的键。
+        （单行解析抽在 _parse_ssh_cmd_target；本方法的最内层帧防线不得
+        放宽——外层 ssh 凭据绝不与内层 sudo/嵌套混用。）"""
         for line in reversed(list(self._open_cmds.values())):
-            try:
-                parts = shlex.split(line)
-            except ValueError:
-                parts = line.split()
-            if not parts:
-                continue
-            cmd = os.path.basename(parts[0])
-            if cmd not in ("ssh", "scp", "rsync", "sftp"):
+            parsed = self._parse_ssh_cmd_target(line)
+            if parsed is None:
                 return None, None, None   # 最内层不是 ssh 类：不解析
-            val_opts = {"b", "c", "D", "e", "F", "i", "J", "l", "L", "m",
-                        "o", "p", "P", "R", "S", "W"}
-            argv = parts[1:]
-            host = user = None
-            port = None
-            i = 0
-            dest = None
-            bare_args: list[str] = []
-            while i < len(argv):
-                a = argv[i]
-                if a == "--":
-                    i += 1
-                    if i < len(argv):
-                        bare_args.append(argv[i])
-                    break
-                if a.startswith("-") and len(a) > 1:
-                    if a[1] in val_opts and len(a) == 2:
-                        i += 2   # 带值短选项：连值一起跳过
-                    else:
-                        i += 1   # 无值开关（-t/-A/-4…）或合写带值（-oVal）
-                    continue
-                bare_args.append(a)
-                i += 1
-            if cmd in ("scp", "rsync"):
-                # 源/目的都可能带远端路径：挑带 @ 的（user@host:path），
-                # 其次带 : 的（host:path）；纯本地路径跳过
-                remote = [a for a in bare_args if "@" in a] or \
-                    [a for a in bare_args if ":" in a]
-                dest = remote[0] if remote else None
-            else:
-                dest = bare_args[0] if bare_args else None
-            if dest is None:
-                continue
-            if cmd in ("scp", "rsync") and ":" in dest:
-                dest = dest.rsplit(":", 1)[0]   # 去掉远端路径
-            host, user, port = parse_user_at_host(dest)
-            if port is None:
-                # ssh -p/--port 端口在选项里
-                for j, a in enumerate(argv):
-                    if a == "-p" and j + 1 < len(argv) and argv[j + 1].isdigit():
-                        port = int(argv[j + 1])
-                    elif a.startswith("--port=") and a[7:].isdigit():
-                        port = int(a[7:])
-                    elif a == "-P" and j + 1 < len(argv) and argv[j + 1].isdigit():
-                        port = int(argv[j + 1])
+            host, user, port = parsed
             if host:
                 return host, user, port
         return None, None, None
+
+    def _ssh_frame_host(self) -> str | None:
+        """最内层未闭合 ssh 族命令的目标主机（都解析不出返回 None）。
+
+        与 _nested_ssh_target 的「最内层非 ssh 即止」不同：这里跳过非
+        ssh 帧（sudo/su 自身）向外找最近的 ssh 帧——sudo 就跑在那台机
+        上，是 sudo 凭据键的落名依据（P1-3）。"""
+        for line in reversed(list(self._open_cmds.values())):
+            parsed = self._parse_ssh_cmd_target(line)
+            if parsed is not None and parsed[0]:
+                return parsed[0]
+        return None
+
+    def _sudo_pw_key(self) -> tuple[str, str, int | None] | None:
+        """sudo/su 类无主机提示符的凭据键：(host, "sudo", None) → sudo@host。
+
+        提示符不带 user@host（[sudo] password for user:），凭据归属只有
+        两条线索：最近一层 ssh 帧的目标（sudo 就跑在那台机上；跳板拓扑
+        里命令集 ssh 进内层机再 sudo，会话目标主机反而是跳板），无 ssh
+        帧则会话目标主机（sudo 直接跑在目标机上）。
+
+        user 恒为 "sudo"——sudo 专用命名空间（display_name 拼出
+        ``sudo@host``），绝不与 ssh 登录凭据键（user@host）混用，外层
+        跳板凭据也就不会被错填给内层 sudo（P1-3 不变量）。键按「sudo
+        实际所在主机」命名：同跳板下多台内层机各记各的 sudo 密码，
+        不互相覆盖误填。
+        """
+        host = self._ssh_frame_host() or self._target_host or None
+        if not host:
+            return None
+        return (host, "sudo", None)
 
     @staticmethod
     def _load_nested_password(host: str, user: str | None,
@@ -1235,11 +1319,14 @@ class PipelineCore:
         """密码提示符上升沿：凭据库自动填充一次，否则交给终端手输。
 
         凭据键优先取提示符自带的 user@host（_pw_prompt_host，归属最强）；
-        提示符无主机信息时回退最内层 ssh 帧解析（_nested_ssh_target）。
-        自动填充每条命令只试一次：密码错误时 ssh 会重新讨，第二次起不再
-        静默代答，避免凭据过期时连环静默失败。**无凭据不弹模态**——提示符
-        本来就在终端里（真实 ssh/sudo 行为），用户直接手输；旧实现弹窗代答，
-        手输消费提示符后模态被防抖代关，表现为弹框一闪而过（真机 2026-10-08）。"""
+        提示符无主机信息时回退最内层 ssh 帧解析（_nested_ssh_target）；
+        双双落空 = sudo/su 类无主机提示符 → sudo@<主机> 专用键
+        （_sudo_pw_key，P1-3）。自动填充每条命令只试一次：密码错误时 ssh
+        会重新讨，第二次起不再静默代答，避免凭据过期时连环静默失败。
+        **无凭据不弹模态**——提示符本来就在终端里（真实 ssh/sudo 行为），
+        用户直接手输；旧实现弹窗代答，手输消费提示符后模态被防抖代关，
+        表现为弹框一闪而过（真机 2026-10-08）。手输的密码经捕获留档
+        （_arm_typed_capture），验证成功后弹一次「记住」询问（P1-3）。"""
         if self._closed or self.session is None:
             return
         attempt = self._nested_pw_attempts
@@ -1253,23 +1340,31 @@ class PipelineCore:
                 port, user = tport, (tuser or user)
         else:
             host, user, port = self._nested_ssh_target()
-        self._nested_pw_ctx = (host, user, port)
-        if host is not None and attempt == 0:
-            pw = self._load_nested_password(host, user, port)
+        key = (host, user, port) if host is not None else self._sudo_pw_key()
+        self._nested_pw_ctx = key
+        if key is not None and key[0] and attempt == 0:
+            pw = self._load_nested_password(key[0], key[1], key[2])
             if pw:
                 await self.session.send_raw(pw.encode() + b"\r")
                 self._begin_pw_verify()
+                self._pw_remember_candidate = None   # 凭据库已有，无需询问
                 await self.emit_msg(ServerMsg(
                     type="status",
-                    text=f"已用记住的密码自动填充 {user + '@' if user else ''}"
-                         f"{host}"))
-        # 无凭据/自动填充未命中：不做任何事——用户在终端手输密码（提示符
-        # 已可见）。模态代答路径（_on_nested_password）保留但不再触发。
+                    text=f"已用记住的密码自动填充 {display_name(*key)}"))
+                return
+        # 无凭据/自动填充未命中：武装手输捕获（sudo 键；ssh 键的手输记忆
+        # 由 P1-4 接入），用户在终端手输密码（提示符已可见），验证成功后
+        # 询问一次「记住」。模态代答路径（_on_nested_password）保留但不再触发。
+        self._arm_typed_capture(key if key and key[1] == "sudo" else None)
 
     async def _on_nested_password(self, pw: str, remember: bool) -> None:
         """模态提交的嵌套密码：整行打进 PTY（远端 echo 关闭，不回显）。"""
         self._pw_modal_open = False
         self._cancel_pw_dismiss()
+        # 模态接管：手输捕获与旧候选作废（密码来源是弹窗，记忆只走勾选）
+        self._pw_capture_key = None
+        self._pw_typed = bytearray()
+        self._pw_remember_candidate = None
         if self.session is not None and pw:
             await self.session.send_raw(pw.encode() + b"\r")
             self._begin_pw_verify()
@@ -1280,6 +1375,117 @@ class PipelineCore:
                     store_password(host, user, port, pw)
                 except Exception:
                     pass    # 凭据库缺席不阻断本次登录
+
+    # --- 手输密码捕获与「记住」询问（P1-3/P1-4）---
+
+    def _arm_typed_capture(self, key) -> None:
+        """无凭据/填充未命中：武装手输捕获——用户在终端打出的密码留档候选。
+
+        key=None（「记住」没有可靠的键）不捕获不询问。重新武装时旧候选
+        作废：错密/中途放弃的密码不进库（只落本次验证通过的）。"""
+        self._pw_typed = bytearray()
+        self._pw_remember_candidate = None
+        self._pw_capture_key = key
+
+    def _pw_typed_capture(self, data: bytes) -> None:
+        """手输密码旁路留档（前端 _pwFeed 同规则的后端版）：只记录，按键
+        照常走原路（透传/hold）——提示符在终端里，密码必须照达远端。
+
+        可打印字节进缓冲；退格删末字符（按 UTF-8 字符）；ESC 序列整体
+        跳过（方向键等不是口令）；\\r/\\n 冻结候选并进验证窗口。"""
+        if self._pw_capture_key is None:
+            return
+        buf = self._pw_typed
+        i = 0
+        while i < len(data):
+            b = data[i]
+            if b in (0x0D, 0x0A):
+                self._pw_capture_submit()
+                return   # 回车后的字节不属于本次口令（粘贴尾巴丢弃）
+            if b == 0x1B:
+                # CSI（ESC [ … 终字节）/ SS3（ESC O x）整体跳过
+                if i + 1 < len(data) and data[i + 1] in (ord("["), ord("O")):
+                    i += 2
+                    while i < len(data) and not 0x40 <= data[i] <= 0x7E:
+                        i += 1
+                    i += 1
+                else:
+                    i += 2
+                continue
+            if b in (0x7F, 0x08):
+                while buf:
+                    c = buf.pop()
+                    if (c & 0xC0) != 0x80:
+                        break   # 删掉末字符（含其 UTF-8 续字节）
+                i += 1
+                continue
+            if b >= 0x20:
+                buf.append(b)
+            i += 1
+
+    def _pw_capture_submit(self) -> None:
+        """捕获的密码随回车提交：冻结候选并进验证窗口（等 auth 结果）。
+
+        与模态路径 _on_nested_password 同语义：提交即 hold 抢跑输入、
+        复位提示符 seen 让重讨上升沿复现。空密码不设候选（远端自会
+        拒绝/放行），但同样进验证窗。"""
+        key, self._pw_capture_key = self._pw_capture_key, None
+        if key is None:
+            return
+        typed, self._pw_typed = self._pw_typed, bytearray()
+        self._begin_pw_verify()
+        if typed:
+            self._pw_remember_candidate = (
+                key, bytes(typed).decode("utf-8", "replace"))
+
+    def _pw_result_tail(self) -> bytes:
+        """本次验证窗起点之后的输出——失败指纹的查询范围（上一轮错密的
+        deny 还留在尾窗里，全窗扫会把重试成功误判成失败）。"""
+        return bytes(self._pw_tail[self._pw_result_from:])
+
+    def _pw_auth_result(self) -> None:
+        """验证窗口以 auth 结果输出收束（not at_end）：成败分流。
+
+        失败（deny 指纹）错密不进库也不问；成功把候选排进「记住」询问
+        （防抖 _PW_REMEMBER_DELAY——等迟到的 deny/重讨落地再问，「只落
+        本次验证通过的密码」）。"""
+        cand = self._pw_remember_candidate
+        if cand is None:
+            return
+        if _PW_AUTH_FAIL_RE.search(self._pw_result_tail()):
+            self._pw_remember_candidate = None
+            return
+        asyncio.get_running_loop().create_task(self._pw_remember_offer(cand))
+
+    async def _pw_remember_offer(self, cand) -> None:
+        """验证成功后的轻量「记住」询问（防抖一拍）。应答经
+        remember_yes/remember_no → _finish_remember；文案对齐 ready 后的
+        「记住密码」确认框。"""
+        await asyncio.sleep(_PW_REMEMBER_DELAY)
+        if self._closed or self._pw_remember_candidate is not cand:
+            return   # 新一轮输入/候选已接管
+        self._pw_remember_candidate = None
+        if self._pw_at_end or _PW_AUTH_FAIL_RE.search(self._pw_result_tail()):
+            return   # 重讨提示又回屏/迟到失败指纹：错密不进库
+        self._pw_remember_pending = cand
+        key, _pw = cand
+        disp = display_name(*key)
+        text = (f"密码验证通过（{disp}）。记住该密码？下次自动填充"
+                if key[1] == "sudo" else
+                f"已成功登录 {disp}。记住该密码？下次自动填充")
+        await self.emit_msg(ServerMsg(
+            type="ask_remember", label=disp,
+            text=text + "（写入系统凭据库，不落数据库）"))
+
+    async def _finish_remember(self, store: bool) -> None:
+        """「记住」询问应答：同意写 keyring（失败可见），拒绝只清档不写。"""
+        pending, self._pw_remember_pending = self._pw_remember_pending, None
+        if not store or pending is None:
+            return
+        (host, user, port), pw = pending
+        if not store_password(host, user, port, pw):
+            await self.emit_msg(ServerMsg(
+                type="status", text=PW_STORE_FAIL_HINT))
 
     async def _proactive_reinject(self) -> None:
         """嵌套 ssh 登录成功后后台补注入：把首条自然语言的探测+分片注入成本
@@ -2192,10 +2398,17 @@ class PipelineCore:
             return
         if self._session_dead and not await self._revive_session():
             return
-        if self._pw_verifying:
+        # 手输密码旁路留档（按键照常放行）。capturing 必须取**进块前**快照：
+        # 块内回车会冻结候选并开启验证窗，若按事后状态判 hold，密码自己就
+        # 被 hold 住发不出去
+        capturing = self._pw_capture_key is not None
+        self._pw_typed_capture(data)
+        if self._pw_verifying and not capturing:
             # 验证窗口（密码已提交、auth 结果未到）：按键 hold，验证结束
             # 依序释放——否则落进 ssh 输入队列被当下一条密码吃掉（真机
-            # 「模态刚关抢跑的命令连排 Permission denied」根因）
+            # 「模态刚关抢跑的命令连排 Permission denied」根因）。
+            # 例外：密码提示符又在前台（错密重讨、捕获已武装）——按键
+            # 是给提示符的应答，hold 会让重试到超时才迟到远端
             self._pw_hold.append(("raw", data))
             return
         _dbg("keys=", repr(data[:60]))
@@ -3023,7 +3236,9 @@ class PipelineCore:
         if self._pw_prompt_seen:
             # 密码提示符在前台（ssh/sudo 讨密码）：绝不能拦成自然语言——
             # 否则密码行被当任务挂起，\r 被 ^C/重注入链吞掉，登录失败。
-            # 字符已原样透传（echo 关闭），这里只补发回车提交密码。
+            # 字符已原样透传（echo 关闭），这里只补发回车提交密码；
+            # CJK/IME 整行路径的回车同时冻结手输捕获的候选（P1-3）。
+            self._pw_capture_submit()
             await self.session.send_raw(b"\r")
             return
         if self._interactive and self._hook_ok() and (

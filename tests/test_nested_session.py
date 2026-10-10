@@ -113,6 +113,8 @@ def test_frontend_line_passthrough_on_password_prompt():
 
     c = _bare_core(session=_Session(), _exec_future=None,
                    _pw_prompt_seen=True, _pw_verifying=False, _pw_hold=[],
+                   _pw_capture_key=None, _pw_typed=bytearray(),
+                   _pw_remember_candidate=None,
                    _open_cmds={})
     asyncio.run(c._on_frontend_line("帮我看下当前目录有什么文件", False))
     assert sent == [b"\r"]
@@ -167,6 +169,10 @@ def _pw_core(session) -> PipelineCore:
         _pw_verify_at=0.0, _pw_hold=[], _pw_hold_timer=None, _pw_at_end=False,
         _pw_modal_open=False, _pw_dismiss_timer=None,
         _nested_pw_attempts=0, _nested_pw_ctx=None,
+        _pw_capture_key=None, _pw_typed=bytearray(),
+        _pw_remember_candidate=None, _pw_remember_pending=None,
+        _pw_result_from=0,
+        _target_host="1.2.3.4",
         _open_cmds={1: "ssh wujian@1.2.3.4"}, _open_cmd_at={1: 10.0},
         _exec_stack=[], _last_mark_at=11.0, _interactive=True,
         _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
@@ -397,6 +403,187 @@ def test_modal_cancel_ends_verify_window():
     asyncio.run(main())
 
 
+# --- 6. 手输密码记忆询问（P1-3 sudo/su 专用键；P1-4 嵌套 ssh 键）---
+
+def _remember_core(session, *, open_cmds, target_host="172.25.104.182"):
+    c = _pw_core(session)
+    c._open_cmds = dict(open_cmds)
+    c._target_host = target_host
+    msgs: list = []
+    stored: list = []
+
+    async def _emit(m):
+        msgs.append(m)
+
+    c.emit_msg = _emit
+    return c, msgs, stored
+
+
+def _patch_pw_io(monkeypatch, stored, *, load=None):
+    monkeypatch.setattr(cmod, "load_password",
+                        load or (lambda h, u, p: None))
+    monkeypatch.setattr(
+        cmod, "store_password",
+        lambda h, u, p, pw: stored.append((h, u, p, pw)) or True)
+
+
+def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
+    """P1-3：sudo/su 类无主机提示符——手输 → 验证成功 → 询问「记住」→
+    同意后以 sudo@<最近 ssh 帧主机> 专用键落库（绝不与 ssh 登录凭据
+    user@host 混键）。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        # 落键 = sudo@<最近 ssh 帧目标>（sudo 就跑在那台机上），非会话
+        # 目标主机（那是跳板），更不是 ssh 键 pe@…
+        assert c._pw_capture_key == ("172.25.105.150", "sudo", None)
+        await c._on_keys(b"s3cret\r")
+        assert sent == [b"s3cret\r"]            # 手输照常直达远端
+        assert c._pw_verifying                  # 回车即进验证窗
+        # auth 结果（提权成功 → root 提示符）
+        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        asks = [m for m in msgs if m.type == "ask_remember"]
+        assert len(asks) == 1, "验证成功后应发出一次记忆询问"
+        assert "sudo@172.25.105.150" in asks[0].text
+        await c._finish_remember(True)
+        assert stored == [("172.25.105.150", "sudo", None, "s3cret")]
+    asyncio.run(main())
+
+
+def test_sudo_remember_key_falls_back_to_session_host(monkeypatch):
+    """无 ssh 帧（sudo 直接跑在会话目标机上）：sudo 键落会话目标主机。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={2: "sudo su -"}, target_host="10.0.0.9")
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        assert c._pw_capture_key == ("10.0.0.9", "sudo", None)
+    asyncio.run(main())
+
+
+def test_sudo_wrong_password_never_offers_or_stores(monkeypatch):
+    """错密（deny 指纹）不进库、不询问；重讨后再手输成功才问（只落本次
+    验证通过的密码）。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        await c._on_keys(b"wrong\r")
+        # 错密：Sorry + 重讨（合包到达）——验证窗不收束，候选随重讨作废
+        c._detect_password_prompt(
+            b"\r\nSorry, try again.\r\n[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        assert c._pw_remember_candidate is None
+        await c._on_keys(b"right\r")
+        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        asks = [m for m in msgs if m.type == "ask_remember"]
+        assert len(asks) == 1, "只有验证通过的那次才询问"
+        await c._finish_remember(True)
+        assert stored == [("172.25.105.150", "sudo", None, "right")]
+    asyncio.run(main())
+
+
+def test_sudo_remember_decline_stores_nothing(monkeypatch):
+    """拒绝「不记住」：不写库（维持每次手输现状）。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        await c._on_keys(b"s3cret\r")
+        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        assert any(m.type == "ask_remember" for m in msgs)
+        await c._finish_remember(False)
+        assert stored == []
+    asyncio.run(main())
+
+
+def test_sudo_verify_timeout_never_offers(monkeypatch):
+    """验证窗超时（未见 auth 结果）不算验证通过：不询问不落库。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+    _patch_pw_io(monkeypatch, stored)
+
+    async def main():
+        c._detect_password_prompt(b"[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        await c._on_keys(b"s3cret\r")
+        await asyncio.sleep(cmod._PW_VERIFY_TIMEOUT + 0.1)   # 强制到期
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        assert not any(m.type == "ask_remember" for m in msgs)
+        assert stored == []
+    asyncio.run(main())
+
+
+def test_sudo_autofill_stored_key_no_ask(monkeypatch):
+    """凭据库命中自动填充：密码本来就在库里，验证成功后不再询问。"""
+    sent: list[bytes] = []
+
+    class _Session:
+        async def send_raw(self, data):
+            sent.append(data)
+
+    c, msgs, stored = _remember_core(
+        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+    _patch_pw_io(monkeypatch, stored,
+                 load=lambda h, u, p: "cached" if (h, u, p) ==
+                 ("172.25.105.150", "sudo", None) else None)
+
+    async def main():
+        c._detect_password_prompt(b"[sudo] password for pe: ")
+        await asyncio.sleep(0)
+        assert sent == [b"cached\r"]
+        c._detect_password_prompt(b"\r\n[root@inner ~]# ")
+        await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
+        assert not any(m.type == "ask_remember" for m in msgs)
+        assert stored == []
+    asyncio.run(main())
+
+
 def test_inner_ssh_prompt_live_relaxes_latch():
     """嵌套 ssh 帧开着但内层提示符标记在位 → 健康路径放行（秒级降级是
     分析卡延迟根因）；su - / 未登录 / 内层前台命令仍锁降级。"""
@@ -464,6 +651,9 @@ def _stale_core(session) -> PipelineCore:
         _pw_verify_at=0.0, _pw_hold=[], _pw_hold_timer=None, _pw_at_end=False,
         _pw_modal_open=False, _pw_dismiss_timer=None,
         _nested_pw_attempts=0, _nested_pw_ctx=None,
+        _pw_capture_key=None, _pw_typed=bytearray(),
+        _pw_remember_candidate=None, _pw_remember_pending=None,
+        _target_host="101.33.233.232",
         _open_cmds={1: "ssh xiaojian@101.33.233.232"}, _open_cmd_at={1: 10.0},
         _exec_stack=[], _last_mark_at=11.0, _interactive=True,
         _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
