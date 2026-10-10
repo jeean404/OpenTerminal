@@ -2242,7 +2242,7 @@ async def test_hooked_flag_threads_through_start_ai(monkeypatch):
     async def fake_flow(line, hooked=False):
         seen.append((line, hooked))
 
-    w._ai_flow = fake_flow
+    w.ai._ai_flow = fake_flow
     w._start_ai("甲", True)
     await asyncio.sleep(0)
     assert seen == [("甲", True)]
@@ -2708,7 +2708,7 @@ async def test_prompt_curtain_released_at_task_end(monkeypatch):
     async def _fake_run(text, hooked=False):
         return
 
-    monkeypatch.setattr(w, "_run_task", _fake_run)
+    monkeypatch.setattr(w.ai, "_run_task", _fake_run)
     w._start_ai("查资源")
     await _wait(lambda: w._ai_task is None or w._ai_task.done(), timeout=5)
     t = _fake_ai_task(w)   # 幕帘再次关上（模拟下一任务中段）

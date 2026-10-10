@@ -179,3 +179,17 @@ def test_cmdset_constants_live_in_runner_module():
     assert cr.CMDSET_ECHO_TIMEOUT > 0 and cr.CMDSET_PROMPT_TIMEOUT > 0
     assert cr.CMDSET_QUIET > 0 and cr.CMDSET_HOOK_WAIT > 0
     assert cr._CMDSET_PROMPT_RE is not None and cr._CS_PROMPT_ID_RE is not None
+
+
+def test_aiflow_owns_state():
+    from openterminal.core.ai_flow import AiFlow
+    a = AiFlow(FakeCore())
+    for attr in ("_ai_task", "_ai_ping_at", "_ai_queue", "_rescue_open",
+                 "_rescue_ctx", "_fallback_task", "_suppress_ai_report"):
+        assert hasattr(a, attr), attr
+
+
+def test_core_lazy_ai_property():
+    from openterminal._core_impl import PipelineCore
+    core = PipelineCore.__new__(PipelineCore)
+    assert core.ai is core.ai

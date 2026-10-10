@@ -699,7 +699,7 @@ def test_task_start_precedes_agent_build():
     def _boom():
         order.append("agent_build")
         raise RuntimeError("boom")
-    c._ensure_agent = _boom
+    c.ai._ensure_agent = _boom
 
     asyncio.run(c._run_task("hi", hooked=True))
     assert order == ["task_start", "agent_build", "error"]
@@ -788,11 +788,11 @@ def test_hook_stale_after_enter_yields_text_without_markers():
 
         async def _no_hook():
             return False
-        c._ensure_integrated = _no_hook
+        c.hook._ensure_integrated = _no_hook
 
         async def _ai(line, hooked=False):
             started.append(line)
-        c._on_ai_line = _ai
+        c.ai._on_ai_line = _ai
 
         await c._on_frontend_line("执行 echo MARK-AI-TWO 并把输出原样告诉我",
                                   False)
