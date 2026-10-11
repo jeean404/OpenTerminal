@@ -51,6 +51,17 @@ SCENARIOS = {
         ],
         "final": "按编辑后的命令写入完成。",
     },
+    # 复现「下载远端文件到本机」现场（2026-10-11 write_file ×失败）：
+    # 第 1 轮 execute（真机上正是它把文件根打成远端 cwd）→ 第 2 轮 write_file
+    "下载": {
+        "rounds": [
+            [("execute", {"command": "cat /tmp/smoke_print.sh"})],
+            [("write_file", {"file_path": "/Downloads/smoke_print.sh",
+                             "content": "#!/bin/bash\n# 测试脚本：打印 opentrimnal\n"
+                                        "\necho \"opentrimnal\"\n"})],
+        ],
+        "final": "已下载到本机：Downloads/smoke_print.sh（真实路径见下）。",
+    },
 }
 _DEFAULT = SCENARIOS["单个"]
 
@@ -80,6 +91,18 @@ class ScriptedFlowModel(FakeModel):
                 break
         sc = _scenario_for(last_user)
         mid = "ai-" + uuid.uuid4().hex[:8]
+        done = sum(1 for m in turn if isinstance(m, ToolMessage))
+        rounds = sc.get("rounds")
+        if rounds is not None:
+            # 多轮脚本：第 N 轮发 rounds[N]，工具全部回来后收尾
+            if done >= len(rounds):
+                return AIMessage(content=sc["final"], id=mid)
+            calls = [
+                {"name": n, "args": a, "id": "tc-" + uuid.uuid4().hex[:8],
+                 "type": "tool_call"}
+                for n, a in rounds[done]
+            ]
+            return AIMessage(content="", id=mid, tool_calls=calls)
         if any(isinstance(m, ToolMessage) for m in turn):
             return AIMessage(content=sc["final"], id=mid)
         calls = [

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -20,16 +21,51 @@ from deepagents.backends.protocol import (
 
 from ..session.base import ShellSession
 
+# 带盘符的路径段（`C:`、`/C:/...`、`\\?\C:\...`）：deepagents 的路径拼接遇到它
+# 会换锚，把结果带出 root
+_DRIVE_SEG_RE = re.compile(r"(?:^|[/\\])[A-Za-z]:")
+
+
+def _local_root(root_dir: str | None, session: ShellSession,
+                remote_target: bool) -> Path:
+    """read_file/write_file 等文件工具的**本机**根目录（虚拟路径 /x 的锚点）。
+
+    只有本机真实存在的绝对目录才配当根：SSH（含嵌套 ssh）会话的 cwd 是远端
+    路径，拿来当根会在本机解析出影子目录——Windows 上 ``Path("/tmp")`` 是无
+    盘符路径，resolve 出 ``<当前盘>:\\tmp``——甚至按远端路径树在本机凭空
+    mkdir。远端目标一律回退到用户主目录：「下载到我本机」的落点，且
+    /Downloads、/Desktop、/Documents 都在根内可写。
+    """
+    if root_dir is not None:
+        # 显式指定照办（测试/调用方自知其意），只做规范化，不改语义
+        return Path(root_dir).expanduser().resolve()
+    cand = "" if remote_target else (getattr(session, "cwd", "") or "")
+    if cand:
+        try:
+            p = Path(cand).expanduser()
+            if p.is_absolute() and p.is_dir():
+                return p.resolve()
+        except (OSError, RuntimeError, ValueError):
+            pass
+    return Path.home()
+
 
 class PtyShellBackend(LocalShellBackend):
     """文件操作沿用 LocalShellBackend；execute 走持久 PTY 会话。
+
+    文件根是**本机**目录，构造时定死、此后不再跟随 shell 的 cd：虚拟路径
+    /x 的含义必须全程稳定；且 execute 回报的 cwd 可能来自远端 shell，覆盖根
+    会把根打成无盘符/远端路径，之后所有文件工具在 ``relative_to`` 判据下集体
+    报「outside root directory」（真机「write_file ×失败」根因）。
 
     SSH 模式下注意：内置文件工具作用于本机，Agent 系统提示词中已要求
     远程文件操作一律走 execute。
     """
 
-    def __init__(self, session: ShellSession, root_dir: str | None = None) -> None:
-        super().__init__(root_dir=root_dir or session.cwd or None, inherit_env=True)
+    def __init__(self, session: ShellSession, root_dir: str | None = None, *,
+                 remote_target: bool = False) -> None:
+        super().__init__(root_dir=_local_root(root_dir, session, remote_target),
+                         inherit_env=True)
         self.session = session
         # CLI 在任务开始前设置、结束后清空（rich console 实时打印）
         self.on_output: Callable[[str], None] | None = None
@@ -41,6 +77,20 @@ class PtyShellBackend(LocalShellBackend):
         # （ai_boundary/boundary_settled 往返），保证命令回显在 PTY 里落在
         # pad 空行之后——回显先于空行进缓冲会把卡的连续空白区打断=永久盖帽
         self.on_boundary: Callable[[], Awaitable[None]] | None = None
+
+    def _resolve_path(self, key: str) -> Path:
+        """越界路径判据补一层：带盘符的段直接判越界。
+
+        deepagents 的 `root / key` 拼接遇 `C:/...` 会换锚跳走，工具层
+        validate_path 只挡 `^[a-zA-Z]:` 开头，挡不住 `/C:/Users/x` 这类「过了
+        校验、解析却越界」的路径（docs/bug.md 上传场景那类）。根落在 C: 盘时
+        它会真逃出沙箱——实测能列出/写入真实桌面。这里与越界路径同口径拒绝，
+        由调用方包成 error 结果回模型。
+        """
+        if _DRIVE_SEG_RE.search(str(key)):
+            raise ValueError(
+                f"Path:{key} outside root directory: {self.cwd}")
+        return super()._resolve_path(key)
 
     # --- 文件操作：路径 ValueError 不上抛，包成 error 结果 ---
     # deepagents 的 FilesystemBackend._resolve_path 对越界/穿越路径抛
@@ -110,8 +160,10 @@ class PtyShellBackend(LocalShellBackend):
             if self.on_finish is not None:
                 self.on_finish(command, 130)
             raise
-        if result.cwd:
-            self.cwd = Path(result.cwd)
+        # 这里刻意不动 self.cwd：文件根构造时定死（见类文档）。曾经的
+        # `self.cwd = Path(result.cwd)` 会把远端 shell 的 cwd（/tmp 这类无盘符
+        # 路径）灌成本机根，随后每个文件工具都因 relative_to 判据失败而报
+        # 「outside root directory: \\tmp」——真机 write_file 连续 ×失败 的根因。
         if self.on_finish is not None:
             self.on_finish(command, result.exit_code)
         return ExecuteResponse(

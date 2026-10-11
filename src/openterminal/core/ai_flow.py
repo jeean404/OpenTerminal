@@ -54,9 +54,13 @@ class AiFlow:
         （deepagents/langchain 约 4s 导入由此与启动路径解耦）；测试 monkeypatch
         的 _impl.build_agent 桩在此生效（非 None 即跳过真导入）。"""
         _impl._load_agent_stack()
+        # 远端目标（SSH/嵌套 ssh）的 session.cwd 是远端路径，不能当本机文件根
+        target = getattr(self.core, "_target", None)
+        remote = bool(target is not None and target.mode != "local")
         self.core.agent, self.core.allowed, self.core.backend = _impl.build_agent(
             self.core.profile, self._agent_session(), self.core.cfg, self.core.policy,
-            model=_impl.build_chat_model(self.core._model))
+            model=_impl.build_chat_model(self.core._model),
+            remote_target=remote)
     def _ensure_agent(self) -> None:
         """首个 AI 任务时构建 agent，已建则复用。self.core.agent/backend 从 None
         变就绪的唯一入口（建连不再预建）。"""

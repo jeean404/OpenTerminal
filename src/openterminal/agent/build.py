@@ -34,8 +34,13 @@ def build_agent(
     policy: Policy | None = None,
     *,
     model: Any = None,
+    remote_target: bool = False,
 ):
-    """返回 (compiled_agent, session_allowed_commands)。"""
+    """返回 (compiled_agent, session_allowed_commands)。
+
+    remote_target：目标是 SSH/远端 shell——此时 session.cwd 是远端路径，不能当
+    本机文件根（见 backend._local_root），文件工具回退到用户主目录。
+    """
     policy = policy or Policy(
         mode=cfg.policy.mode,
         auto_extra=cfg.policy.auto_extra,
@@ -43,7 +48,7 @@ def build_agent(
         deny_extra=cfg.policy.deny_extra,
     )
     allowed: set[str] = set()
-    backend = PtyShellBackend(session)
+    backend = PtyShellBackend(session, remote_target=remote_target)
 
     def _when(req) -> bool:
         cmd = req.tool_call.get("args", {}).get("command", "")
@@ -81,7 +86,9 @@ def build_agent(
     agent = create_deep_agent(
         model=model or build_chat_model(cfg.model),
         backend=_with_skills(backend, middleware),
-        system_prompt=build_system_prompt(profile),
+        # 本机文件根一并告知模型：虚拟路径落地在本机哪里必须能向用户交代，
+        # 否则「下载到我本机」写完只报 /x，用户在磁盘上找不到文件
+        system_prompt=build_system_prompt(profile, str(backend.cwd)),
         middleware=middleware,
         checkpointer=MemorySaver(),
     )
