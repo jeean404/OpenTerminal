@@ -14,7 +14,7 @@ class _P:  # 只提供 build_system_prompt 需要的字段
 
 
 def test_system_prompt_uses_section_title_convention():
-    from openterminal.agent.runner import build_system_prompt
+    from openterminal.agent.prompt import build_system_prompt
     out = build_system_prompt(_P())
     assert "小节标题" in out
     assert "##" in out

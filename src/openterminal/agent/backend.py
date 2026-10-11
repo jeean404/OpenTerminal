@@ -7,7 +7,16 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from deepagents.backends import LocalShellBackend
-from deepagents.backends.protocol import ExecuteResponse
+from deepagents.backends.protocol import (
+    DeleteResult,
+    EditResult,
+    ExecuteResponse,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
+    WriteResult,
+)
 
 from ..session.base import ShellSession
 
@@ -32,6 +41,59 @@ class PtyShellBackend(LocalShellBackend):
         # （ai_boundary/boundary_settled 往返），保证命令回显在 PTY 里落在
         # pad 空行之后——回显先于空行进缓冲会把卡的连续空白区打断=永久盖帽
         self.on_boundary: Callable[[], Awaitable[None]] | None = None
+
+    # --- 文件操作：路径 ValueError 不上抛，包成 error 结果 ---
+    # deepagents 的 FilesystemBackend._resolve_path 对越界/穿越路径抛
+    # ValueError，而 read/write 等只兜 (OSError, RuntimeError)；工具层的
+    # validate_path 又拦不住 `/C:/...` 这类「过了校验、解析却越界」的路径
+    # （Windows 桌面文件上传场景的「任务失败：ValueError」根因）。backend
+    # 契约是返回 error 结果而非抛异常——这里补上，模型看到错误文本后自行
+    # 换方案；其余未预期异常交给 ToolErrorRetryMiddleware 统一收口。
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
+        try:
+            return super().read(file_path, offset=offset, limit=limit)
+        except ValueError as e:
+            return ReadResult(error=f"Error reading file '{file_path}': {e}")
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        try:
+            return super().write(file_path, content)
+        except ValueError as e:
+            return WriteResult(error=f"Error writing file '{file_path}': {e}")
+
+    def edit(self, file_path: str, old_string: str, new_string: str,
+             replace_all: bool = False) -> EditResult:
+        try:
+            return super().edit(file_path, old_string, new_string, replace_all)
+        except ValueError as e:
+            return EditResult(error=f"Error editing file '{file_path}': {e}")
+
+    def delete(self, file_path: str) -> DeleteResult:
+        try:
+            return super().delete(file_path)
+        except ValueError as e:
+            return DeleteResult(error=f"Error deleting '{file_path}': {e}")
+
+    def ls(self, path: str) -> LsResult:
+        try:
+            return super().ls(path)
+        except ValueError as e:
+            return LsResult(error=f"Cannot list '{path}': {e}", entries=None)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        try:
+            return super().glob(pattern, path=path)
+        except ValueError as e:
+            return GlobResult(error=f"Error globbing '{pattern}': {e}")
+
+    def grep(self, pattern: str, path: str | None = None, glob: str | None = None,
+             *, max_count: int | None = None, context_lines: int = 0) -> GrepResult:
+        try:
+            return super().grep(pattern, path=path, glob=glob,
+                                max_count=max_count, context_lines=context_lines)
+        except ValueError as e:
+            return GrepResult(error=f"Error searching '{pattern}': {e}", matches=[])
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         if self.on_boundary is not None:

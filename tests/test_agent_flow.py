@@ -10,9 +10,10 @@ if sys.platform == "win32":
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
-from openterminal.agent.runner import (
-    DenyMiddleware, TaskRunner, build_agent, build_system_prompt,
-)
+from openterminal.agent.build import build_agent
+from openterminal.agent.middleware import DenyMiddleware
+from openterminal.agent.prompt import build_system_prompt
+from openterminal.agent.runner import TaskRunner
 from openterminal.config import Config
 from openterminal.session.local_posix import LocalPtySession
 from openterminal.policy import Policy

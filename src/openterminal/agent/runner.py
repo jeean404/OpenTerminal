@@ -1,189 +1,20 @@
-"""Agent 装配：模型、系统提示词、审批/拒绝、有界任务执行。"""
+"""有界任务执行器：处理流式事件、中断暴露、resume 与轮次预算。
+
+智能体构建（build_agent）、中间件（DenyMiddleware/ToolErrorRetryMiddleware）、
+系统提示词（build_system_prompt）、模型工厂（build_chat_model）已拆出本文件。
+"""
 
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
-from deepagents import create_deep_agent
-from deepagents.backends import CompositeBackend, FilesystemBackend
-from deepagents.middleware.skills import SkillsMiddleware
-from langchain.agents.middleware import AgentMiddleware
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, ToolMessage
-
-from .token_est import count_tokens
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 
-from .backend import PtyShellBackend
-from ..config import Config, ModelConfig
-from ..policy import Policy
-from ..skills import skill_routes, skill_sources
-from .sysprobe import SystemProfile
-
-_DIALECT_TABLE = """
-| 意图 | debian/Ubuntu | rhel CentOS7 | rhel Rocky/Fedora | alpine | darwin |
-|---|---|---|---|---|---|
-| 安装软件 jq | sudo apt-get install -y jq | sudo yum install -y jq | sudo dnf install -y jq | sudo apk add jq | brew install jq |
-| 重启 nginx | sudo systemctl restart nginx | 同左 | 同左 | sudo rc-service nginx restart | brew services restart nginx |
-| 查监听端口 | ss -ltnp | netstat -ltnp | ss -ltnp | netstat -ltnp | lsof -i |
-"""
-
-
-def build_system_prompt(p: SystemProfile) -> str:
-    tools = ", ".join(sorted(p.tools)) or "未探测到额外工具"
-    return f"""你是 OpenTerminal，一个运行在用户自带终端里的运维助手。
-
-## 当前目标系统
-- 主机：{p.host}
-- 系统：{p.distro}（family={p.os_family}, version={p.version}, kernel={p.kernel}）
-- 包管理器：{p.pkg_manager}；服务管理器：{p.service_mgr}；shell：{p.shell}
-- 已探测工具：{tools}
-
-## 命令翻译规则
-1. 所有命令必须适配上面的系统画像，禁止在非 debian 系上使用 apt。
-2. 方言映射：
-{_DIALECT_TABLE}
-3. 软件安装/服务操作/删除等高危命令会触发用户审批，命令要尽量短小、可读。
-4. 如果目标是远程主机，读写远程文件一律用 execute（cat/sed/tee 等），不要用
-   read_file/write_file 等内置文件工具——它们作用于运行本程序的本机。
-   例外：/skills/ 挂载的 SKILL.md 按 Skills 清单指引正常用 read_file 加载。
-5. 命令失败时：先读懂 stderr 与 exit code，再换方案；同一个失败命令原样重试不超过
-   一次；`command not found` 先用 `command -v` 探测；包管理器报错先核对系统画像。
-6. 被安全策略拒绝或被用户拒绝的命令不得换皮重试，要给出替代方案或向用户说明。
-7. 任务完成后用一句中文总结结果；没有完成时说明已尝试的命令、失败原因和建议。
-8. 结论与多条命令的分析结果要美化输出：适合表格呈现的数据（多项对比、结果汇总、
-   参数/指标列表）整理成 Markdown 表格，而不是堆文字；排版前可先 read_file 加载
-   markdown-tables skill（见 Skills 清单）按其规范书写。小节标题单独成行并用 `##`
-   开头（如 `## 内存使用`，可带 emoji）；结尾「结论」等段落用普通段落、关键短语加粗。
-9. 命令保持简单、可读：够用就好，不要画蛇添足。除非用户明确要求，不加单位换算、
-   computed property、内联脚本块、多余管道或 && 拼接，也不手动格式化输出——交给
-   系统默认即可。PowerShell 优先短别名（Sort/Select/Where），POSIX 优先基础命令
-   （ls/find/grep/df）。清晰胜过炫技：用户要的是结果，不是一行看起来很专业的命令。
-"""
-
-
-def build_chat_model(cfg: ModelConfig) -> Any:
-    """按 cfg.provider 构造 langchain 聊天模型。
-
-    anthropic → ChatAnthropic（缺省，走 base_url 网关）；openai → ChatOpenAI，
-    任何 OpenAI 兼容协议网关（base_url 留空则用 SDK 官方端点）。langchain_openai
-    在分支内惰性导入：anthropic 配置既不付导入耗时也不要求安装该包。
-    """
-    api_key = os.environ.get(cfg.api_key_env, "not-set")
-    if cfg.provider == "openai":
-        from langchain_openai import ChatOpenAI
-
-        return ChatOpenAI(
-            model=cfg.model,
-            base_url=cfg.base_url or None,
-            api_key=api_key,
-            max_tokens=4096,
-        )
-    return ChatAnthropic(
-        model=cfg.model,
-        base_url=cfg.base_url,
-        api_key=api_key,
-        max_tokens=4096,
-    )
-
-
-class DenyMiddleware(AgentMiddleware):
-    """灾难命令：不执行，直接把拒绝原因作为 tool 错误回模型。"""
-
-    def __init__(self, policy: Policy) -> None:
-        self.policy = policy
-
-    async def awrap_tool_call(self, request, handler):
-        tc = request.tool_call
-        if tc.get("name") == "execute":
-            cmd = tc.get("args", {}).get("command", "")
-            d = self.policy.classify(cmd)
-            if d.level == "deny":
-                return ToolMessage(
-                    content=f"命令被 OpenTerminal 安全策略拒绝：{cmd}\n原因："
-                            f"{'；'.join(d.reasons)}。请换一个方案，不要换皮重试。",
-                    tool_call_id=tc["id"],
-                    status="error",
-                )
-        return await handler(request)
-
-
-def build_agent(
-    profile: SystemProfile,
-    session,
-    cfg: Config,
-    policy: Policy | None = None,
-    *,
-    model: Any = None,
-):
-    """返回 (compiled_agent, session_allowed_commands)。"""
-    policy = policy or Policy(
-        mode=cfg.policy.mode,
-        auto_extra=cfg.policy.auto_extra,
-        approve_extra=cfg.policy.approve_extra,
-        deny_extra=cfg.policy.deny_extra,
-    )
-    allowed: set[str] = set()
-    backend = PtyShellBackend(session)
-
-    def _when(req) -> bool:
-        cmd = req.tool_call.get("args", {}).get("command", "")
-        if cmd in allowed:
-            return False
-        return policy.classify(cmd).level == "approve"
-
-    def _description(tc, state, runtime) -> str:
-        cmd = tc.get("args", {}).get("command", "")
-        reasons = "；".join(policy.classify(cmd).reasons) or "高危命令"
-        return f"高危命令需要审批\n\n目标主机：{profile.host}\n风险点：{reasons}\n命令：{cmd}"
-
-    middleware = [
-        DenyMiddleware(policy),
-    ]
-    from langchain.agents.middleware import HumanInTheLoopMiddleware
-
-    middleware.append(HumanInTheLoopMiddleware(interrupt_on={"execute": {
-        "allowed_decisions": ["approve", "edit", "reject"],
-        "when": _when,
-        "description": _description,
-    }}))
-
-    agent = create_deep_agent(
-        model=model or build_chat_model(cfg.model),
-        backend=_with_skills(backend, middleware),
-        system_prompt=build_system_prompt(profile),
-        middleware=middleware,
-        checkpointer=MemorySaver(),
-    )
-    return agent, allowed, backend
-
-
-def _with_skills(backend: PtyShellBackend, middleware: list):
-    """给 agent 挂上内置/用户两层 Agent Skills（渐进式披露）。
-
-    skill 目录在文件沙箱（shell cwd）之外，故经 CompositeBackend 以
-    /skills/... 虚拟前缀挂进文件系统：SkillsMiddleware 把 skill 清单
-    注入系统提示词，模型按需 read_file 加载 SKILL.md 全文；用户目录
-    后挂，同名 skill 覆盖内置。backend 本身原样返回给调用方（回调、
-    cwd 语义不变），composite 只作为 agent 的文件/命令入口。
-    """
-    routes = skill_routes()
-    if not routes:
-        return backend
-    agent_backend: Any = CompositeBackend(
-        default=backend,
-        routes={p: FilesystemBackend(root_dir=str(d)) for p, d in routes.items()},
-    )
-    middleware.append(
-        SkillsMiddleware(backend=agent_backend, sources=skill_sources())
-    )
-    return agent_backend
-
+from .token_est import count_tokens
 
 # 任务卡死兜底（astream 自身无超时）：静默到点即中止任务并给前端 error 收尾，
 # 否则「AI 正在思考」永久不收。两档：无在途工具=模型挂起；有=工具没回。

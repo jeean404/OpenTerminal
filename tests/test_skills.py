@@ -96,7 +96,7 @@ def test_user_skills_dir_default_location():
 
 def test_with_skills_wraps_backend_and_registers_middleware():
     """_with_skills：backend 包成 CompositeBackend，SkillsMiddleware 入列。"""
-    from openterminal.agent.runner import _with_skills
+    from openterminal.agent.build import _with_skills
 
     class FakeBackend:
         pass
