@@ -35,3 +35,8 @@ connections.toml
 /scripts/smoke_*.py
 /scripts/run_main_worktree_web.py
 /.mcp.json
+
+# 本地临时调试产物
+/tmp/
+/Desktop/
+/~/

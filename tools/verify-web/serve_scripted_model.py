@@ -26,7 +26,9 @@ for p in (REPO, os.path.join(REPO, "src")):
         sys.path.insert(0, p)
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import (ChatGeneration, ChatGenerationChunk,
+                                     ChatResult)
 
 import openterminal.core as core
 from tests.fakes import FakeModel
@@ -50,6 +52,24 @@ SCENARIOS = {
             ("execute", {"command": "echo orig | tee /tmp/ot-cc-orig.txt"}),
         ],
         "final": "按编辑后的命令写入完成。",
+    },
+    # 复现「总结卡渲染后终端卡顿」现场：一次 execute + 一张高总结卡
+    # （多行 markdown 表格 → pad 预留行最多，收束期补差链最长）
+    "总结": {
+        "calls": [
+            ("execute", {"command": "uname -a && df -h"}),
+        ],
+        "final": "## 巡检结论\\n\\n"
+                 "目标机巡检完成，磁盘与内核信息如下。\\n\\n"
+                 "| 项目 | 值 | 状态 | 说明 |\\n"
+                 "| --- | --- | --- | --- |\\n" +
+                 "\\n".join(
+                     f"| 检查项 {i} | 值 {i} | 正常 | 第 {i} 行占位，"
+                     f"让总结卡足够高以复现收束期补差链 |" for i in range(1, 25)) +
+                 "\\n\\n### 建议\\n\\n"
+                 "1. 磁盘水位正常，无需扩容。\\n"
+                 "2. 内核版本可接受。\\n"
+                 "3. 继续保持每周巡检。",
     },
     # 复现「下载远端文件到本机」现场（2026-10-11 write_file ×失败）：
     # 第 1 轮 execute（真机上正是它把文件根打成远端 cwd）→ 第 2 轮 write_file
@@ -80,6 +100,28 @@ class ScriptedFlowModel(FakeModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         return ChatResult(generations=[ChatGeneration(
             message=self._reply(list(messages)))])
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        # 真模型是流式分片到达；单块整条投递会让 final/ai_card 与 _mountCard
+        # 撞出竞态（总结卡常丢，见 verify-card-dup 注释）。这里按行切分多片，
+        # 让收束路径走真模型的时序。
+        msg = self._reply(list(messages))
+        mid = msg.id or ("ai-" + uuid.uuid4().hex[:8])
+        calls = list(getattr(msg, "tool_calls", []) or [])
+        text = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+        if not text:
+            yield ChatGenerationChunk(message=AIMessageChunk(
+                content="", tool_calls=calls, id=mid))
+            return
+        lines = text.split("\n")
+        for i, ln in enumerate(lines):
+            chunk = ln + ("\n" if i < len(lines) - 1 else "")
+            if not chunk:
+                continue
+            yield ChatGenerationChunk(message=AIMessageChunk(
+                content=chunk,
+                tool_calls=(calls if i == 0 else None),
+                id=mid if i == 0 else mid + "-" + str(i)))
 
     def _reply(self, msgs):
         turn: list = []

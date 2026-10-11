@@ -13,6 +13,14 @@ function esc(s) {
     {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 }
 
+// otdbg 调试仪表：localStorage.otdbg 置位才输出（生产零成本）。
+// 用 performance.now() 打时间戳——真机排「卡顿/回显迟到」必须能和 WS 帧
+// 到达、term.write 对齐到同一时钟。
+function otdbg(...a) {
+  if (typeof localStorage !== "undefined" && localStorage.getItem("otdbg"))
+    console.log("[otdbg]", performance.now().toFixed(1), ...a);
+}
+
 const sessions = {};   // tabId -> Session
 let activeTabId = null;
 // mac 用 Cmd+C/Cmd+V 原生路径；Windows/Linux 的裸 Ctrl+C/Ctrl+V 需特殊路由
@@ -584,6 +592,7 @@ class Session {
   // 用户按键不扣（onData 直发 PTY，提示符在占位区下方）。
   _holdBytes(tag) {
     this._holdDepth = (this._holdDepth || 0) + 1;
+    otdbg("hold+", tag, "depth=" + this._holdDepth);
     if (!this._holdBuf) this._holdBuf = [];
     this._holdTags = this._holdTags || [];
     this._holdTags.push(tag || "");
@@ -593,6 +602,7 @@ class Session {
   _releaseBytes() {
     if (!this._holdDepth) return;
     this._holdDepth -= 1;
+    otdbg("hold-", "depth=" + this._holdDepth, "held=" + ((this._holdBuf || []).length));
     if (this._holdTags && this._holdTags.length) this._holdTags.pop();
     if (this._holdDepth > 0) return;
     this._holdSince = 0;
@@ -1504,6 +1514,9 @@ class Session {
     if (slot.reanchorT) { clearTimeout(slot.reanchorT); slot.reanchorT = null; }
     slot.settling = (async () => {
       this._holdBytes("card-settle");
+      // 定格接管结账＝批量窗被取消，其记账的长高扣流必须就地归还。
+      // 放在新扣流之后归还：中间无 await，不会有字节漏进占位区的空窗。
+      this._releaseGrow(slot);
       try {
         // 空闲期补 host：PTY 静默窗里槽可能还 pendingMount（无 host、React 内容
         // 没落地、高度停在出生值）——按出生高结账等于没结：等真高度量出来时
@@ -1555,6 +1568,17 @@ class Session {
       .then(() => { clearTimeout(timer); once(); });
   }
 
+  // 归还 _scheduleReanchor 记账的「长高」扣流。取消 reanchorT 的每条路径
+  // （定格结账 _settleCard、丢槽 _discardSlot）都必须走它：漏还一笔就让
+  // _holdActive() 永久为真，此后 PTY 字节只进 _holdBuf 不落 xterm，且字节
+  // 不进 _writeTerm 就不会唤醒 _scheduleHeal——自愈也救不回来，终端停在
+  // 「打字没回显、命令没输出」（真机 2026-10-11 总结卡后卡顿的根因之一）。
+  _releaseGrow(slot) {
+    const grown = (slot && slot.growHolds) || 0;
+    if (slot) slot.growHolds = 0;
+    for (let i = 0; i < grown; i++) this._releaseBytes();
+  }
+
   // 流式长高：攒 150ms 统一重贴（禁止逐 token 撕贴纸）。
   // 扣流窗口必须从「感知到长高」就开始：150ms 批量延迟 + pad 往返期间，
   // 命令回显/输出会写进未垫够的卡区，打破卡下空白连续区 → 卡被夹紧截断、
@@ -1576,13 +1600,16 @@ class Session {
       this._holdBytes("card-grow");
       slot.growHolds = (slot.growHolds || 0) + 1;
     }
-    if (slot.reanchorT) clearTimeout(slot.reanchorT);
+    // 节流而非防抖：只在「没有在途批量窗」时排一次，150ms 后统一重贴。
+    // 旧实现每次都 clearTimeout 重排 = 防抖，连续流式长高期间永远不触发——
+    // 真机实测 3.5s 内叠到 43 层 card-grow 未归还，整段 PTY 回显被扣住，
+    // 用户体感就是「总结卡出来后几秒打不进字」。节流后扣流窗被钉死在
+    // 「150ms 批量 + pad 往返」这一个量级，正是下面注释要保的范围。
+    if (slot.reanchorT) return;
     slot.reanchorT = setTimeout(async () => {
       slot.reanchorT = null;
-      const grown = slot.growHolds || 0;
-      slot.growHolds = 0;
       if (this._dead || !slot.marker) {
-        for (let i = 0; i < grown; i++) this._releaseBytes();
+        this._releaseGrow(slot);
         return;
       }
       this._holdBytes("card-reanchor");
@@ -1593,7 +1620,7 @@ class Session {
       } finally {
         this._releaseBytes();
         // 归还长高窗口的扣流（含卡被丢弃不再批量的情形）
-        for (let i = 0; i < grown; i++) this._releaseBytes();
+        this._releaseGrow(slot);
       }
     }, 150);
   }
@@ -1815,11 +1842,13 @@ class Session {
         this._padSlot = slot;
         slot.ackDeferred = false;   // _onPadded 按 ack 事件的 deferred 置位
         slot.padOut = (slot.padOut || 0) + gap;
+        this._padSentAt = Date.now();
+        const blankBefore = this._blankSpan(slot);
         // mirror：可信的半行镜像交给 worker 收纳/复原——pad 注入不再吞掉
         // 用户正在敲的输入（dirty 时省略，worker 走旧的丢弃路径）
+        otdbg("pad-send", "gap=" + gap, "need=" + slot.need, "blank=" + blankBefore);
         this.sendJson({type: "pad", pad: gap,
                        mirror: this._lineDirty ? undefined : this._lineBuf});
-        const blankBefore = this._blankSpan(slot);
         let timedOut = true;
         await new Promise(r => {
           const done = () => { timedOut = false; r(); };
@@ -1877,6 +1906,8 @@ class Session {
   }
 
   _onPadded(ev) {
+    otdbg("pad-ack", ev && ev.deferred ? "deferred" : "ok",
+          "waited=" + (this._padSentAt ? (Date.now() - this._padSentAt) : "?"));
     // deferred：重注入在途窗口的 ack——空白没长是暂时现象，不计熔断连败
     if (this._padSlot) this._padSlot.ackDeferred = !!(ev && ev.deferred);
     if (this._padWait) {
@@ -1935,7 +1966,8 @@ class Session {
   }
 
   _discardSlot(slot) {
-    if (slot.reanchorT) clearTimeout(slot.reanchorT);
+    if (slot.reanchorT) { clearTimeout(slot.reanchorT); slot.reanchorT = null; }
+    this._releaseGrow(slot);   // 批量窗被取消，记账的长高扣流一并归还
     if (slot.ro) { try { slot.ro.disconnect(); } catch (e) {} }
     if (slot.decoration) { try { slot.decoration.dispose(); } catch (e) {} }
     if (this._cardsText) this._cardsText.delete(slot.id);
