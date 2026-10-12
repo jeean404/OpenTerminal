@@ -386,6 +386,10 @@ async def test_worker_tool_card_events(monkeypatch):
 
     w.ai._start_ai("读一下 notes.txt")
     await _wait(lambda: w._ai_task is None)
+    # 工具事件走 _emit_nowait 入 outbox：sender 泵可能晚于 _ai_task 清空
+    # 才送达 sink，按末位事件到达再断言全序列，否则抢跑看到半截 kinds
+    await _wait_json(sink, lambda m: any(
+        x.get("event", {}).get("kind") == "ai_card" for x in m))
     kinds = _event_kinds(sink)
     assert kinds == ["task_start", "ai_collapse", "ai_tool", "ai_tool",
                      "final", "ai_card"], kinds
@@ -413,7 +417,13 @@ async def test_worker_tool_card_ids_unique_across_tasks(monkeypatch):
     await _wait(lambda: w._ai_task is None)
     w.ai._start_ai("第二读")
     await _wait(lambda: w._ai_task is None)
-    starts = [x["event"] for x in sink.json()
+    # 工具事件走 _emit_nowait 入 outbox：sender 泵可能晚于 _ai_task 清空
+    # 才送达 sink，断言前按「已到达条数」等待，否则抢跑只看到第一条
+    msgs = await _wait_json(sink, lambda m: sum(
+        1 for x in m
+        if x.get("event", {}).get("kind") == "ai_tool"
+        and x["event"].get("phase") == "start") >= 2)
+    starts = [x["event"] for x in msgs
               if x.get("event", {}).get("kind") == "ai_tool"
               and x["event"].get("phase") == "start"]
     assert [t["id"] for t in starts] == [1, 2], starts
