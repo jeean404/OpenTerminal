@@ -32,15 +32,23 @@ function loadSessionClass() {
   return {Session: load(src, fakeDoc), els};
 
   function load(src2, doc) {
+    // modal 实现已抽到 modal.js（node 可单测），这里注入进 app.js 的求值作用域。
+    // modal.js 是 require 进来的模块，它内部的 document 走全局，须一并挂上。
+    const {modalShell, modalAsk, modalConfirm} = require(path.join(
+      __dirname, "..", "..", "src", "openterminal", "web", "frontend",
+      "static", "modal.js"));
+    global.document = doc;
     const factory = new Function(
       "window", "document", "sessionStorage", "fetch", "performance", "mdLite",
+      "modalShell", "modalAsk", "modalConfirm",
       src2 + "\n;return Session;");
     return factory(
       {addEventListener() {}}, doc,
       {getItem: () => null, setItem() {}, removeItem() {}},
       () => new Promise(() => {}),
       {now: () => 0},
-      s => s);
+      s => s,
+      modalShell, modalAsk, modalConfirm);
   }
 }
 

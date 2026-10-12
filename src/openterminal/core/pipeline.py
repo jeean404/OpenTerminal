@@ -24,6 +24,7 @@ import re
 import time
 import uuid
 from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -534,6 +535,12 @@ class PipelineCore:
         if self._closed:
             return
         self._closed = True
+        # 可释放资源钩子（如文件面板的 SSH 连接）：放在最前，后面任何一步
+        # 抛错都不会漏释放。旧实现靠调用点记得调 close_cascade，断线回收
+        # 与 app 关闭两条路径都漏了。getattr 默认空表 → fake worker 零改动。
+        for fn in list(getattr(self, "_disposables", [])):
+            with suppress(Exception):
+                await fn()
         self._curtain = False   # 关闭即弃：扣留的提示符字节随会话消失
         self._curtain_parts = []
         if self._ai_task is not None:
@@ -670,6 +677,10 @@ class PipelineCore:
         self._target = target
         host = target.host or ("local" if target.mode == "local" else target.name)
         self._target_host = host
+        # 用户名与主机同时就绪：下面 probe_profile 要跑几秒，期间文件面板的
+        # 登录弹框就要预填「用户名」，等 _setup_interactive 之后才赋值就晚了。
+        # 这里先按连接目标给，后面再用 session.username 兜底覆盖。
+        self._target_user = target.user or ""
         stored_pw = (load_password_alias(target.host, target.user, target.port)
                      if target.mode == "ssh" and target.host else None)
         self.session = await open_session(
@@ -890,6 +901,48 @@ class PipelineCore:
             import traceback
             _dbg("setup: 异常回退纯终端直通", traceback.format_exc())
             self._interactive = False
+
+    @property
+    def files_identity(self) -> dict:
+        """文件面板该连哪台机器、以谁的身份。
+
+        跳板机场景（连 A、终端里 `ssh B`）下会话的 SFTP 挂在 A 上，够不着
+        B 的文件——面板要经隧道另连 B。host/port 取**最近一层未闭合 ssh 帧**
+        （ssh_frame_target：`sudo su -` 开帧后仍要认出 B，用
+        nested_ssh_target 会退回跳板机）；user 优先取提示符里的用户名
+        （`sudo su -` 之后是 root，面板以该身份连才看得到 /root），拿不到
+        就退 ssh 帧里的登录名。
+
+        `users` 是连接候选（按优先级）：连不上时逐个退，直到连上或全部
+        缺凭据。`nested=False` 表示终端没跳，面板用会话自己的 SFTP 即可。
+        """
+        from .cmdset_runner import _CS_PROMPT_ID_RE
+
+        thost, tuser, tport = self.nested.ssh_frame_target()
+        session_host = getattr(self, "_target_host", "") or ""
+        host = thost or session_host
+        m = _CS_PROMPT_ID_RE.match((self._cur_prompt or "").strip())
+        eff = m.group(1) if m else ""
+        session_user = getattr(self, "_target_user", "") or ""
+        target = getattr(self, "_target", None)
+        users = []
+        for u in (eff, tuser, session_user,
+                  getattr(target, "user", None) or ""):
+            if u and u not in users:
+                users.append(u)
+        return {
+            "host": host,
+            # 非嵌套时 ssh_frame_target 全 None，但用户连的可能不是 22 端口
+            # （诊断拓扑正是 127.0.0.1:2222）——端口栏必须预填真实端口
+            "port": (tport if thost
+                     else (getattr(target, "port", None) if target else None)),
+            "users": users,
+            "effective_user": eff or (users[0] if users else ""),
+            "nested": bool(thost) and (thost != session_host or tport is not None),
+            # 本机终端没有「最终服务器」（host 是字面量 "local"），
+            # 文件面板据此隐藏 📁 入口，别把 "local" 当 IP 填进表单
+            "mode": getattr(target, "mode", "") if target else "",
+        }
 
     async def _dispatch(self, msg: ClientMsg) -> None:
         if msg.type == "raw":

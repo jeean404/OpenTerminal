@@ -135,17 +135,28 @@ class NestedSshTracker:
                 return host, user, port
         return None, None, None
 
-    def ssh_frame_host(self) -> str | None:
-        """最内层未闭合 ssh 族命令的目标主机（都解析不出返回 None）。
+    def ssh_frame_target(self) -> tuple[str | None, str | None, int | None]:
+        """最近一层未闭合 ssh 帧的完整目标 (host, user, port)。
 
-        与 _nested_ssh_target 的「最内层非 ssh 即止」不同：这里跳过非
-        ssh 帧（sudo/su 自身）向外找最近的 ssh 帧——sudo 就跑在那台机
-        上，是 sudo 凭据键的落名依据（P1-3）。"""
+        与 ``nested_ssh_target`` 的「最内层非 ssh 即止」不同：这里**跳过
+        非 ssh 帧向外找**——`ssh B` 之后再 `sudo su -`，终端仍停在 B 上，
+        文件面板要连的就是 B。真机踩过：面板按 nested_ssh_target 取目标，
+        `sudo su -` 一开帧就解析成 None、退回跳板机，用户看到的是跳板机的
+        家目录。凭据代答仍用 nested_ssh_target 的严格语义（防跳板机凭据
+        错填给内层 sudo），两条语义不混用。
+        """
         for line in reversed(list(self.core._open_cmds.values())):
             parsed = self.parse_ssh_cmd_target(line)
             if parsed is not None and parsed[0]:
-                return parsed[0]
-        return None
+                return parsed
+        return None, None, None
+
+    def ssh_frame_host(self) -> str | None:
+        """最内层未闭合 ssh 族命令的目标主机（都解析不出返回 None）。
+
+        跳过非 ssh 帧（sudo/su 自身）向外找最近的 ssh 帧——sudo 就跑在那台机
+        上，是 sudo 凭据键的落名依据（P1-3）。"""
+        return self.ssh_frame_target()[0]
 
     def sudo_pw_key(self) -> tuple[str, str, int | None] | None:
         """sudo/su 类无主机提示符的凭据键：(host, "sudo", None) → sudo@host。

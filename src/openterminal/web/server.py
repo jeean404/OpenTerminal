@@ -22,6 +22,7 @@ from ..connections import (
 )
 from ..connections.secrets import delete_password, store_password
 from ..frontend.render import console
+from .files_api import install_files_errors, make_files_router
 from .protocol import parse_client
 from .worker import TabWorker
 
@@ -116,6 +117,9 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if token and headers.get("x-ot-token") != token:
             raise HTTPException(401, "token 缺失或不正确")
 
+    app.include_router(make_files_router(tabs, _check_token))
+    install_files_errors(app)
+
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="static")
     app.mount("/vendor", StaticFiles(directory=FRONTEND_DIR / "vendor"), name="vendor")
 
@@ -144,7 +148,7 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         _check_token(request.headers)
         worker = tabs.pop(tab_id, None)
         if worker is not None:
-            await worker.close()
+            await worker.close()   # 释放钩子（文件面板连接）在 close() 内统一跑
         return {"ok": True}
 
     @app.post("/api/saved")

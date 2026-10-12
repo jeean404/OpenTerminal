@@ -52,22 +52,33 @@ function promptForToken() {
   });
 }
 
-// 带 token 的 fetch：401 时先问一次 token 再重试
+// 带 token 的 fetch：**只有真的是令牌问题**才问 token 再重试。
+// 401 不等于令牌失效——业务错误（如级联密码错误）也可能用它，误弹「访问令牌」
+// 会让用户莫名其妙（真机反馈：点 📁 被要求填访问令牌）。判据：响应体带
+// 业务 code（unauthorized 除外）就不是令牌问题，原样交回调用方。
 function authFetch(url, opts = {}) {
   opts.headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
   const t = getToken();
   if (t) opts.headers["x-ot-token"] = t;
-  return fetch(url, opts).then(r => {
-    if (r.status === 401 && !opts._retried) {
-      return promptForToken().then(() => {
-        const o2 = Object.assign({}, opts, {_retried: true});
-        const t2 = getToken();
-        if (t2) o2.headers["x-ot-token"] = t2;
-        return fetch(url, o2);
-      });
+  return fetch(url, opts).then(async r => {
+    if (r.status === 401 && !opts._retried && (await _isTokenProblem(r))) {
+      await promptForToken();
+      const o2 = Object.assign({}, opts, {_retried: true});
+      const t2 = getToken();
+      if (t2) o2.headers["x-ot-token"] = t2;
+      return fetch(url, o2);
     }
     return r;
   });
+}
+
+async function _isTokenProblem(r) {
+  try {
+    const j = await r.clone().json();
+    return !(j && j.code && j.code !== "unauthorized");
+  } catch (e) {
+    return true;      // 读不出 body：按令牌问题处理（旧行为）
+  }
 }
 
 function wsUrl(tabId) {
@@ -76,68 +87,6 @@ function wsUrl(tabId) {
   const t = getToken();
   if (t) url += `?token=${encodeURIComponent(t)}`;
   return url;
-}
-
-// --- 通用模态框 ---
-// buttons: [{label, primary?, onClick() -> bool(true=关闭)}]
-function modalShell(title, bodyHtml, buttons, opts = {}) {
-  const root = document.getElementById("modal-root");
-  delete root.dataset.pw;   // 新模态顶掉密码模态标记：代关只认密码模态
-  const btns = buttons.map((b, i) =>
-    `<button class="${b.primary ? "primary" : ""}" data-i="${i}">${esc(b.label)}</button>`).join("");
-  root.innerHTML = `
-    <div class="modal">
-      <h3>${esc(title)}</h3>
-      <div class="modal-body">${bodyHtml}</div>
-      <div class="modal-btns">${btns}</div>
-    </div>`;
-  const close = () => { root.innerHTML = ""; };
-  root.querySelectorAll(".modal-btns button").forEach(btn => {
-    btn.onclick = () => {
-      const b = buttons[Number(btn.dataset.i)];
-      const shouldClose = b.onClick ? b.onClick() !== false : true;
-      if (shouldClose) close();
-    };
-  });
-  const val = document.getElementById("modal-value");
-  if (val) {
-    val.addEventListener("keydown", ev => {
-      if (ev.key === "Enter") {
-        const ok = buttons.find(b => b.primary) || buttons[0];
-        if (ok && ok.onClick() !== false) close();
-      }
-    });
-  }
-  root.onmousedown = ev => {
-    if (ev.target === root) {
-      opts.onDismiss && opts.onDismiss();
-      close();
-    }
-  };
-  return close;
-}
-
-function modalAsk(title, message, onOk, opts = {}) {
-  const rememberHtml = opts.remember
-    ? `<label class="modal-check"><input type="checkbox" id="modal-remember" checked> ` +
-      `${esc(opts.rememberLabel || "记住密码")}</label>`
-    : "";
-  modalShell(title,
-    `<p>${esc(message)}</p>` +
-    `<input type="${opts.password === false ? "text" : "password"}" id="modal-value" autofocus>` +
-    rememberHtml,
-    [
-      {label: "确定", primary: true, onClick: () => {
-        const remember = opts.remember
-          ? document.getElementById("modal-remember").checked : false;
-        onOk(document.getElementById("modal-value").value, remember);
-      }},
-      {label: "取消", onClick: () => { opts.onCancel && opts.onCancel(); }},
-    ],
-    {onDismiss: opts.onCancel});
-  document.getElementById("modal-root").dataset.pw = "1";
-  const v = document.getElementById("modal-value");
-  if (v) v.focus();
 }
 
 // 后端代关陈旧密码模态（密码提示符已被终端手输消费）：只关带 pw 标记的
@@ -237,6 +186,7 @@ class Session {
           <button data-mode="agent" class="on">Agent <kbd>Ctrl+Shift+I</kbd></button>
         </div>
         <div class="pane-host" id="host-${this.tabId}"></div>
+        <button class="files-toggle" id="filesbtn-${this.tabId}" tabindex="-1" title="远程文件：登录该主机的家目录（上传/下载）">📁 文件</button>
       </div>
       <div class="term" id="term-${this.tabId}"></div>
       <div class="statusbar">
@@ -255,6 +205,9 @@ class Session {
       </div>`;
     document.getElementById("panes").appendChild(pane);
     this.paneEl = pane;
+
+    this.filesPanel = new FilePanel(this);
+    document.getElementById(`filesbtn-${this.tabId}`).onclick = () => this.filesPanel.toggle();
 
     pane.querySelectorAll(".seg button").forEach(btn => {
       btn.onclick = () => this.setMode(btn.dataset.mode);
@@ -2749,6 +2702,8 @@ class Session {
         const hostEl = document.getElementById(`host-${this.tabId}`);
         if (hostEl) hostEl.textContent = msg.host || "";
         this._renderModelSelect(msg.models, msg.model);
+        // 本机终端没有远程文件：知道会话类型后收掉 📁 入口（否则是个死按钮）
+        if (this.filesPanel) this.filesPanel.probeSupport();
         // 集成失败回退 = 纯终端（无 AI），不显示模型信息
         const modelSel = document.getElementById(`model-${this.tabId}`);
         if (modelSel) modelSel.hidden = !this.interactive;
