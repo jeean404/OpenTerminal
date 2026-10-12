@@ -552,17 +552,23 @@ def _usable_bash() -> str | None:
     Windows 上 subprocess 里的裸名 ``bash`` 会命中 System32 的 WSL 存根
     （不走 PATH 顺序），它丢弃 ``-c`` 脚本之后的实参、stderr 还喷 wsl: 翻译
     告警——一律用 which 解析出的绝对路径，并实测实参可达才认。
+
+    导入期探针在整套并发负载下会偶发超时（真机：3 个裸壳用例随机 skip），
+    重试几次再放弃——bash 本身没坏，只是起进程慢。
     """
     exe = shutil.which("bash")
     if not exe:
         return None
-    try:
-        r = subprocess.run(
-            [exe, "-c", 'printf %s "$1"', "sh", "OT"],
-            capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return exe if r.returncode == 0 and r.stdout == "OT" else None
+    for _ in range(3):
+        try:
+            r = subprocess.run(
+                [exe, "-c", 'printf %s "$1"', "sh", "OT"],
+                capture_output=True, text=True, input="", timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout == "OT":
+            return exe
+    return None
 
 
 _BASH = _usable_bash()
@@ -571,10 +577,16 @@ _BASH_SKIP = pytest.mark.skipif(
 
 
 def _bare_bash(line: str):
-    """在 __ot_exec__ 不在位的裸 bash 里跑一行（真机落回来的跳板机 pe 壳）。"""
+    """在 __ot_exec__ 不在位的裸 bash 里跑一行（真机落回来的跳板机 pe 壳）。
+
+    stdin 显式给 EOF（``input=""``）：整套负载下 Windows 传参偶发让 bash
+    认为引号未闭合去读 stdin，15s 挂死（TimeoutExpired 而非断言失败）。
+    EOF 让它立刻收行退出——本用例只关心「命令体一段都没执行」，与
+    bash 是正常报 command not found 还是收 EOF 退出无关。
+    """
     return subprocess.run(
         [_BASH, "--noprofile", "--norc", "-c", line],
-        capture_output=True, text=True, timeout=15)
+        capture_output=True, text=True, input="", timeout=30)
 
 
 def test_agent_exec_line_quoted_body_is_single_word():
@@ -645,7 +657,7 @@ def test_hook_unwraps_quoted_exec_body():
     body = 't="$1"' + NL + unwrap + NL + 'printf %s "$t"'
     r = subprocess.run(
         [_BASH, "--noprofile", "--norc", "-c", body, "sh", f"'{probe}'"],
-        capture_output=True, text=True, timeout=15)
+        capture_output=True, text=True, input="", timeout=30)
     assert r.stdout == probe, r.stdout + r.stderr
 
 
