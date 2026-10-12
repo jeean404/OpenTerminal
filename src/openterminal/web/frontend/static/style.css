@@ -565,3 +565,126 @@ body.sidebar-collapsed #sidebar { display: none; }
   opacity: 0; transition: opacity .3s ease;
 }
 .copy-toast.show { opacity: .92; }
+
+/* --- 文件面板（远程文件浏览/上传/下载，仅 SSH 会话）---
+   抽屉式覆盖在 pane 右侧；top/bottom 由 JS 按 pane-head/statusbar 实际
+   高度设置，不改 .term 布局（避开 xterm fit 敏感链路）。 */
+.files-toggle {
+  margin-left: auto; padding: 3px 10px; font-size: 12px;
+  color: var(--muted); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 5px; cursor: pointer;
+}
+.files-toggle:hover { color: var(--text); border-color: var(--accent); }
+
+.files-panel {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 340px; max-width: 90%;
+  z-index: 700; display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--border);
+  box-shadow: -6px 0 18px rgba(0, 0, 0, 0.35);
+}
+.files-panel[hidden] { display: none; }
+/* 头部两行：标题+来源徽标一行，操作按钮一行并允许换行——按钮一多塞单行
+   会把标题挤成三行、右侧按钮溢出面板（真机截图） */
+.fp-head {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+}
+.fp-head-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fp-head-acts { display: flex; flex-wrap: wrap; gap: 6px; }
+/* 关闭键常驻标题行右端：塞进操作行会让它单独掉到第二行（真机量尺寸） */
+.fp-head-top .fp-x { flex: none; padding: 2px 7px; }
+.fp-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600;
+  color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 来源徽标：本机（会话直连）/ 级联目标主机 */
+.fp-badge {
+  flex-shrink: 0; max-width: 40%; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+  padding: 1px 7px; font-size: 10px; border-radius: 999px;
+  color: var(--muted); background: var(--bg); border: 1px solid var(--border);
+}
+.fp-badge.cascade { color: #39c5cf; border-color: #2a6f75; }
+.fp-connect-hint { padding: 2px 12px 0; font-size: 11px; color: var(--muted); }
+.fp-btn {
+  padding: 2px 8px; font-size: 12px; color: var(--muted);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; cursor: pointer; white-space: nowrap;
+}
+.fp-btn:hover { color: var(--text); border-color: var(--accent); }
+/* 工具栏图标按钮：文字按钮换图标后收紧内边距，与 tab 关闭 × 同构 */
+.fp-btn.fp-icon { padding: 2px 7px; line-height: 1.4; font-size: 13px; }
+.fp-path {
+  padding: 5px 10px; font-size: 11px; color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto; white-space: nowrap; flex: none;
+}
+.fp-path a { color: var(--cyan); cursor: pointer; }
+.fp-muted { color: var(--muted); }
+.fp-empty .fp-retry { margin-top: 10px; }
+.fp-path a:hover { text-decoration: underline; }
+.fp-list {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0;
+}
+.fp-list.drop { outline: 2px dashed var(--accent); outline-offset: -4px; }
+.fp-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; font-size: 12px; color: var(--text); cursor: pointer;
+}
+/* 选中态不能只靠 accent-soft——那与 :hover 同色，看不出选中。
+   用左侧竖条把「选中」与「鼠标掠过」分开。 */
+.fp-row:hover { background: var(--accent-soft); }
+.fp-row.active {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.fp-row.active:hover { background: var(--accent-soft); }
+.fp-row .fp-icon { flex: none; }
+.fp-row .fp-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-row .fp-meta { flex: none; font-size: 11px; color: var(--muted); }
+.fp-empty { padding: 18px 10px; text-align: center; font-size: 12px; color: var(--muted); }
+.fp-progress {
+  height: 3px; background: var(--bg); flex: none;
+}
+.fp-progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+.fp-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-top: 1px solid var(--border); flex: none;
+}
+.fp-hint { font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 面板操作结果提示：复用 copy-toast 的浮层样式 */
+.fp-toast {
+  position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%);
+  z-index: 901; padding: 5px 14px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); font-size: 12px; pointer-events: none;
+  opacity: 0; transition: opacity .3s ease; max-width: 80%;
+}
+.fp-toast.show { opacity: .92; }
+.fp-toast.bad { border-color: var(--danger); color: var(--danger); }
+
+/* --- 文件面板管理操作（新建/编辑/删除）--- */
+.fp-acts { display: none; gap: 2px; flex: none; }
+/* 悬浮出现；选中行也常驻——否则选中后鼠标移开就找不到下载按钮 */
+.fp-row:hover .fp-acts,
+.fp-row.active .fp-acts { display: flex; }
+.fp-act {
+  padding: 0 4px; font-size: 11px; line-height: 1.5;
+  color: var(--muted); border-radius: 3px; cursor: pointer;
+}
+.fp-act:hover { color: var(--text); background: var(--border); }
+.fp-name-input { width: 100%; }
+.fp-name-input + .fp-name-input { margin-top: 8px; }
+/* 级联连接弹窗：密码框间距 + 记住密码勾选 + 说明行 */
+.fp-remember {
+  display: flex; align-items: center; gap: 6px;
+  margin: 6px 0 0; font-size: 12px; color: var(--text); cursor: pointer;
+}
+.fp-hint2 { margin: 8px 0 0; font-size: 11px; color: var(--muted); }
+.fp-edit {
+  width: 100%; height: 55vh; resize: vertical;
+  background: var(--term-bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; padding: 8px;
+  font: 12px/1.5 var(--mono); white-space: pre; overflow: auto;
+}
+.fp-edit:focus { outline: none; border-color: var(--accent); }
+.fp-edit-hint { margin: 6px 0 0; font-size: 11px; color: var(--muted); }

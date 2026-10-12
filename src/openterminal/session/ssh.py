@@ -107,6 +107,9 @@ class SshPtySession(BasePtySession):
         self._ask_host_key = host_key_prompt or _default_host_key_prompt
         self._conn = None
         self._proc = None
+        # SFTP 客户端缓存：懒打开；断线重连重建 _conn 后按对象比对自动重开
+        self._sftp = None
+        self._sftp_conn = None
 
     @staticmethod
     def _default_password_prompt(label: str) -> str:
@@ -278,7 +281,33 @@ class SshPtySession(BasePtySession):
     async def send_raw(self, data: bytes) -> None:
         await self._write_raw(data)
 
+    async def sftp_client(self):
+        """返回可用的 SFTP 客户端（懒打开、按连接缓存）。
+
+        断线重连会重建 self._conn：这里按对象比对失效旧客户端，因此无需
+        侵入 _recover_connection 主流程。文件传输走独立通道，不碰输出泵
+        与哨兵捕获机制。
+        """
+        if self._conn is None:
+            raise RuntimeError("SSH 会话未连接，无法打开 SFTP")
+        if self._sftp is not None and self._sftp_conn is self._conn:
+            return self._sftp
+        if self._sftp is not None:
+            try:
+                self._sftp.exit()
+            except Exception:
+                pass
+        self._sftp = await self._conn.start_sftp_client()
+        self._sftp_conn = self._conn
+        return self._sftp
+
     async def close(self) -> None:
+        if self._sftp is not None:
+            try:
+                self._sftp.exit()
+            except Exception:
+                pass
+        self._sftp = self._sftp_conn = None
         if self._proc is not None:
             try:
                 self._proc.close()
