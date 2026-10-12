@@ -32,6 +32,13 @@ connections.toml
 /docs/superpowers/
 /docs/prototype/
 /docs/design-single-pipeline.md
+/docs/bug.md
+/docs/card_duplicate.md
+/docs/summary_card_lost.md
+/docs/merge-handoff-keymap-fix.md
+/docs/patch_file.patch
+/docs/fix-pw-autofill-keymap.patch
+/docs/*.png
 /scripts/smoke_*.py
 /scripts/run_main_worktree_web.py
 /.mcp.json
