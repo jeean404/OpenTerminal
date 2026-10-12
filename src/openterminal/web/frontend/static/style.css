@@ -200,25 +200,25 @@ body.sidebar-collapsed #sidebar { display: none; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* 总结卡（.scard）：配色对齐 main 分支的 final 橙系（.ablock.final）——
-   橙左边框 + 橙点 + 「总结」标签；mdLite 渲染 markdown 表格（v4：echarts 移除）。
+/* 总结卡（.scard）：青系（--cyan #39c5cf 同族，沉稳不刺眼）——青左边框 +
+   青点 + 「总结」标签、底色青调深色；mdLite 渲染 markdown 表格（v4：echarts 移除）。
    宿主宽度由 app.js 设为全宽 calc(100% - 12px) */
 .scard {
   margin-left: 0; padding: 7px 12px 8px;
-  border: 1px solid rgba(255, 106, 0, 0.38);
-  border-left: 3px solid var(--accent);
-  border-radius: 4px; background: #191411;
+  border: 1px solid rgba(57, 197, 207, 0.35);
+  border-left: 3px solid var(--cyan);
+  border-radius: 4px; background: #0e1618;
   max-width: calc(100% - 12px);
   font: 13px/1.75 var(--sans);
 }
 .scard .ahead {
   display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
   font-family: var(--sans); font-size: 11px; font-weight: 650;
-  letter-spacing: 0.06em; color: var(--accent);
+  letter-spacing: 0.06em; color: var(--cyan);
 }
 .scard .adot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-  background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--cyan); box-shadow: 0 0 0 3px rgba(57, 197, 207, 0.15);
 }
 /* mdLite 表格：整表圆角外框 + 蓝色渐变表头（对齐 main .atext .mtable） */
 .scard .mtable {
@@ -583,6 +583,12 @@ body.sidebar-collapsed #sidebar { display: none; }
   box-shadow: -6px 0 18px rgba(0, 0, 0, 0.35);
 }
 .files-panel[hidden] { display: none; }
+/* 面板打开时终端让出面板宽度自适应收缩（不再被面板盖住）；面板仍是
+   absolute 覆盖层不改 DOM 结构，只靠 .term 的 margin 让位。min() 与面板
+   width/max-width 对齐——窄窗口面板压到 90% 时终端同样只留 10%。
+   列宽同步走 fit()（fitAddon → onResize → 后端 resize），与窗口 resize
+   同一条链路，卡片重贴不旁路。 */
+.pane.fp-open > .term { margin-right: min(340px, 90%); }
 /* 头部两行：标题+来源徽标一行，操作按钮一行并允许换行——按钮一多塞单行
    会把标题挤成三行、右侧按钮溢出面板（真机截图） */
 .fp-head {

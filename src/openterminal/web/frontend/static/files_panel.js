@@ -1,6 +1,6 @@
 // 文件面板：远程目录浏览/上传/下载（走 REST，不占 WebSocket）。
-// 抽屉式覆盖在 pane 右侧，打开时按 pane-head/statusbar 实际高度定位，
-// 不改 .term 布局（避开 xterm fit 的敏感链路）。
+// 面板仍是 absolute 覆盖层（不改 DOM 结构），但打开时终端让位收缩：
+// pane.fp-open → .term margin-right，fit() 同步 PTY 列宽与卡片重贴。
 //
 // 三条硬约束：
 //  1. **面板与终端完全独立**：面板自带一条 SSH 直连（不借终端的连接、
@@ -35,12 +35,16 @@ class FilePanel {
     if (!this._built) this._build();
     this._wantOpen = this.el.hidden;
     this.el.hidden = !this._wantOpen;
+    // 终端让位：面板打开时 .term 收缩（pane.fp-open → margin-right），
+    // fit() 走窗口 resize 同一条链把新 cols 同步给 PTY 与卡片重贴
+    this.pane.classList.toggle("fp-open", this._wantOpen);
     if (this._wantOpen) {
       this._place();
       this.open();
     } else {
       clearTimeout(this._retryT);
     }
+    if (this.s.fit) this.s.fit();
   }
 
   /** 会话类型探测后由 app.js 调用：本机终端没有「最终服务器」，不给入口。 */
@@ -50,6 +54,7 @@ class FilePanel {
     if (!ok && this.el) {
       this.el.hidden = true;
       this._wantOpen = false;
+      this.pane.classList.remove("fp-open");
     }
   }
 
