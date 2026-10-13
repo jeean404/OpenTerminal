@@ -222,19 +222,19 @@ def test_files_identity_prefers_prompt_user_and_inner_ssh_host():
     from openterminal.core.pipeline import PipelineCore
 
     class Stub:
-        _target_host = "111.230.11.36"
+        _target_host = "203.0.113.11"
         _target_user = "ubuntu"
-        _cur_prompt = "[root@VM-0-11-centos /root]#"
+        _cur_prompt = "[root@test-host /root]#"
         nested = type("N", (), {
             "ssh_frame_target": staticmethod(
-                lambda: ("101.33.233.232", "xiaojian", None))})()
+                lambda: ("203.0.113.10", "testuser", None))})()
 
     ident = PipelineCore.files_identity.fget(Stub())
-    assert ident["host"] == "101.33.233.232"     # 真机，不是跳板机
+    assert ident["host"] == "203.0.113.10"     # 真机，不是跳板机
     assert ident["nested"] is True
     assert ident["effective_user"] == "root"     # su 之后的身份排最前
     assert ident["users"][0] == "root"
-    assert "xiaojian" in ident["users"] and "ubuntu" in ident["users"]
+    assert "testuser" in ident["users"] and "ubuntu" in ident["users"]
 
 
 def test_files_identity_keeps_inner_host_after_sudo_su():
@@ -243,43 +243,43 @@ def test_files_identity_keeps_inner_host_after_sudo_su():
     from openterminal.core.pipeline import PipelineCore
 
     class Stub:
-        _target_host = "111.230.11.36"          # 跳板机
+        _target_host = "203.0.113.11"          # 跳板机
         _target_user = "ubuntu"
-        _cur_prompt = "[root@VM-0-11-centos /tmp]#"
+        _cur_prompt = "[root@test-host /tmp]#"
 
         class nested:
             # 真实语义对照：nested_ssh_target「最内层非 ssh 即止」→ None
             nested_ssh_target = staticmethod(lambda: (None, None, None))
             ssh_frame_target = staticmethod(
-                lambda: ("101.33.233.232", "xiaojian", None))
+                lambda: ("203.0.113.10", "testuser", None))
 
     ident = PipelineCore.files_identity.fget(Stub())
-    assert ident["host"] == "101.33.233.232"     # 真机，不是 111.230.11.36
+    assert ident["host"] == "203.0.113.10"     # 真机，不是 203.0.113.11
     assert ident["effective_user"] == "root"
     assert ident["users"][0] == "root"
     assert ident["nested"] is True
 
 
 def test_files_identity_real_tracker_after_ssh_then_sudo_su():
-    """用户真机场景逐帧复现：跳板机上 `ssh xiaojian@101.33.233.232` 开帧，
+    """用户真机场景逐帧复现：跳板机上 `ssh testuser@203.0.113.10` 开帧，
     再 `sudo su -` 开帧（最内层非 ssh）。旧实现走 nested_ssh_target（最内层
-    非 ssh 即止）→ 返回 None → 面板退回跳板机 111.230.11.36，用户看到的
+    非 ssh 即止）→ 返回 None → 面板退回跳板机 203.0.113.11，用户看到的
     是跳板机的家目录。文件面板必须走 ssh_frame_target 认出真机。"""
     from openterminal.core.nested_ssh import NestedSshTracker
     from openterminal.core.pipeline import PipelineCore
 
     class Stub:
-        _target_host = "111.230.11.36"
+        _target_host = "203.0.113.11"
         _target_user = "ubuntu"
-        _cur_prompt = "[root@VM-0-11-centos /tmp]#"
-        _open_cmds = {1: "ssh xiaojian@101.33.233.232", 2: "sudo su -"}
+        _cur_prompt = "[root@test-host /tmp]#"
+        _open_cmds = {1: "ssh testuser@203.0.113.10", 2: "sudo su -"}
         nested = NestedSshTracker(type("C", (), {})())   # 只用它的解析方法
 
     Stub.nested.core = Stub()
     # 对照：给密码代答用的严格语义在这里确实是 None
     assert Stub.nested.nested_ssh_target() == (None, None, None)
     ident = PipelineCore.files_identity.fget(Stub())
-    assert ident["host"] == "101.33.233.232", ident
+    assert ident["host"] == "203.0.113.10", ident
     assert ident["users"][0] == "root"
     assert ident["effective_user"] == "root"
     assert ident["nested"] is True
@@ -290,16 +290,16 @@ def test_files_identity_no_nested_jump_stays_on_session_host():
     from openterminal.core.pipeline import PipelineCore
 
     class Stub:
-        _target_host = "101.33.233.232"
-        _target_user = "xiaojian"
-        _cur_prompt = "[xiaojian@VM-0-11-centos ~]$"
+        _target_host = "203.0.113.10"
+        _target_user = "testuser"
+        _cur_prompt = "[testuser@test-host ~]$"
         nested = type("N", (), {
             "ssh_frame_target": staticmethod(lambda: (None, None, None))})()
 
     ident = PipelineCore.files_identity.fget(Stub())
-    assert ident["host"] == "101.33.233.232"
+    assert ident["host"] == "203.0.113.10"
     assert ident["nested"] is False
-    assert ident["effective_user"] == "xiaojian"
+    assert ident["effective_user"] == "testuser"
 
 
 def test_state_home_is_dot_not_term_cwd():
@@ -321,8 +321,8 @@ def test_state_defaults_prefer_inner_ssh_target():
     IP 要预填真机、用户要预填 su 之后的那个（root）。"""
 
     class Idented(FakeWorker):
-        files_identity = {"host": "101.33.233.232", "port": None,
-                          "users": ["root", "xiaojian"],
+        files_identity = {"host": "203.0.113.10", "port": None,
+                          "users": ["root", "testuser"],
                           "effective_user": "root", "nested": True}
 
     tabs, _ = ssh_tabs()
@@ -330,8 +330,8 @@ def test_state_defaults_prefer_inner_ssh_target():
     with make_client(tabs) as client:
         d = client.get("/api/tabs/t2/files/state",
                        headers={"x-ot-token": "secret"}).json()["defaults"]
-        assert d["host"] == "101.33.233.232"
-        assert d["users"] == ["root", "xiaojian"]      # su 之后的 root 排最前
+        assert d["host"] == "203.0.113.10"
+        assert d["users"] == ["root", "testuser"]      # su 之后的 root 排最前
         assert d["user"] == "root" and d["nested"] is True
 
 
@@ -722,7 +722,7 @@ def patch_connect(monkeypatch, sftp=None, fail=None):
     return calls, holder
 
 
-def connect(client, host="VM-0-11-centos", user="root", port=None, **extra):
+def connect(client, host="test-host", user="root", port=None, **extra):
     """四栏登录（IP/端口/用户名/密码）。"""
     return client.post("/api/tabs/t1/files/connect",
                        json={"host": host, "user": user, "port": port, **extra},
@@ -745,7 +745,7 @@ def test_connect_then_endpoints_walk_panel_sftp(monkeypatch):
     calls, holder = patch_connect(monkeypatch, sftp=cs)
     with make_client(tabs) as client:
         r = connect(client, password="pw")
-        assert r.status_code == 200 and r.json()["host"] == "VM-0-11-centos"
+        assert r.status_code == 200 and r.json()["host"] == "test-host"
         # 直连：**不再有 tunnel**，显式用户/密码
         assert "tunnel" not in calls[0]
         assert calls[0]["user"] == "root"
@@ -753,7 +753,7 @@ def test_connect_then_endpoints_walk_panel_sftp(monkeypatch):
         assert calls[0]["confirm_host_key"] is False
         st = client.get("/api/tabs/t1/files/state",
                         headers={"x-ot-token": "secret"}).json()
-        assert st["connected"] is True and st["host"] == "VM-0-11-centos"
+        assert st["connected"] is True and st["host"] == "test-host"
         r = client.get("/api/tabs/t1/files/list", params={"path": "/data"},
                        headers={"x-ot-token": "secret"})
         assert r.status_code == 200
@@ -779,11 +779,11 @@ def test_connect_accepts_legacy_target_string(monkeypatch):
     calls, _ = patch_connect(monkeypatch)
     with make_client(tabs) as client:
         r = client.post("/api/tabs/t1/files/connect",
-                        json={"target": "root@VM-0-11-centos:2222",
+                        json={"target": "root@test-host:2222",
                               "password": "pw"},
                         headers={"x-ot-token": "secret"})
         assert r.status_code == 200
-        assert calls[0]["host"] == "VM-0-11-centos"
+        assert calls[0]["host"] == "test-host"
         assert calls[0]["user"] == "root" and calls[0]["port"] == 2222
 
 
@@ -796,7 +796,7 @@ def test_connect_unknown_host_428_then_confirm(monkeypatch):
         calls.append(kw)
         if not kw.get("confirm_host_key"):
             raise files_api_mod.HostKeyUnknown(
-                "VM-0-11-centos", "ssh-ed25519", "FPabc")
+                "test-host", "ssh-ed25519", "FPabc")
         conn = FakePanelConn(cascade_sftp())
         holder["conn"] = conn
         return conn, conn._sftp
@@ -847,9 +847,9 @@ def test_blank_password_reads_keyring_alias_and_remember_writes(monkeypatch):
     with make_client(tabs) as client:
         connect(client)                       # 无密码 -> 查凭据库
         assert calls[0]["password"] == "PW-from-db"
-        assert stored["load"] == [("VM-0-11-centos", "root", None)]
+        assert stored["load"] == [("test-host", "root", None)]
         connect(client, password="fresh", remember=True)
-        assert stored["save"] == [("VM-0-11-centos", "root", None, "fresh")]
+        assert stored["save"] == [("test-host", "root", None, "fresh")]
 
 
 def test_connect_nondefault_port_key_is_exact(monkeypatch):
@@ -863,10 +863,10 @@ def test_connect_nondefault_port_key_is_exact(monkeypatch):
     patch_connect(monkeypatch)
     with make_client(tabs) as client:
         connect(client, port=2223, password="fresh", remember=True)
-        assert stored["save"] == [("VM-0-11-centos", "root", 2223, "fresh")]
+        assert stored["save"] == [("test-host", "root", 2223, "fresh")]
         stored["save"].clear()
         connect(client, port=22, password="fresh", remember=True)
-        assert stored["save"] == [("VM-0-11-centos", "root", None, "fresh")]
+        assert stored["save"] == [("test-host", "root", None, "fresh")]
 
 
 def test_disconnect_closes_conn(monkeypatch):

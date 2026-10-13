@@ -40,13 +40,13 @@ function makeSession() {
   s.term = {write: data => s.writes.push(
     typeof data === "string" ? data : new TextDecoder().decode(data))};
   s._welcomeText = "已连接 1.2.3.4（CentOS Stream 9）。…";
-  s._welcomeNeed = "[xiaojian@VM-0-11-centos ~]$";
+  s._welcomeNeed = "[testuser@test-host ~]$";
   s._welcomeHold = {raw: null, cleared: 0, at: 0};
   return s;
 }
 
 const CLEAR = new TextEncoder().encode("\x1b[H\x1b[2J");
-const PROMPT = new TextEncoder().encode("[xiaojian@VM-0-11-centos ~]$ ");
+const PROMPT = new TextEncoder().encode("[testuser@test-host ~]$ ");
 
 test("横幅未落屏前 PTY 字节一律扣住不写终端", () => {
   const s = makeSession();
@@ -65,7 +65,7 @@ test("提示符出现 → 先写横幅、再重放清屏之后的字节", () => 
   assert.ok(s.writes[0].includes("已连接 1.2.3.4"), "第一笔必须是横幅");
   assert.strictEqual(
     s.writes.slice(1).join(""),
-    "[xiaojian@VM-0-11-centos ~]$ ",
+    "[testuser@test-host ~]$ ",
     "清屏前的字节丢弃，提示符原样重放");
   assert.ok(!s.writes.join("").includes("\x1b[2J"), "清屏序列不得再落屏");
 });
@@ -76,7 +76,7 @@ test("无清屏序列时全部字节原样重放", () => {
   assert.strictEqual(s._holdWelcome(plain), true);
   assert.strictEqual(s._holdWelcome(PROMPT), true);
   assert.ok(s.writes[0].includes("已连接"));
-  assert.strictEqual(s.writes.slice(1).join(""), "Last login: ...\r\n[xiaojian@VM-0-11-centos ~]$ ");
+  assert.strictEqual(s.writes.slice(1).join(""), "Last login: ...\r\n[testuser@test-host ~]$ ");
 });
 
 test("提示符对不上 → 1.5s 超时释放，横幅照写、字节不丢", () => {
@@ -98,7 +98,7 @@ test("status 文案未到（1.5s 超时）→ 只重放字节、不写空横幅"
   s._welcomeHold.at = -2000;
   assert.strictEqual(s._holdWelcome(PROMPT), true);
   assert.strictEqual(s.writes.length, 1);
-  assert.strictEqual(s.writes[0], "[xiaojian@VM-0-11-centos ~]$ ");
+  assert.strictEqual(s.writes[0], "[testuser@test-host ~]$ ");
 });
 
 test("未进入扣留态（非交互/无提示符文本）→ 字节直写", () => {
@@ -128,9 +128,9 @@ test("产线初始化：ready(interactive) + status → 进入扣留态，提示
   s.term = Object.assign(s.term, {cols: 80, rows: 24});
 
   s.handleMsg({type: "ready", host: "1.2.3.4", distro: "CentOS Stream 9",
-               interactive: 1, prompt: "[xiaojian@VM-0-11-centos ~]$ "});
+               interactive: 1, prompt: "[testuser@test-host ~]$ "});
   assert.strictEqual(s._awaitWelcome, true, "interactive ready 应等横幅文案");
-  assert.strictEqual(s._welcomeNeed, "[xiaojian@VM-0-11-centos ~]$");
+  assert.strictEqual(s._welcomeNeed, "[testuser@test-host ~]$");
   assert.strictEqual(s._welcomeHold, null, "ready 还不建扣留态（文案未到）");
 
   s.handleMsg({type: "status", text: "已连接 1.2.3.4（CentOS Stream 9）。…"});
@@ -142,7 +142,7 @@ test("产线初始化：ready(interactive) + status → 进入扣留态，提示
   assert.strictEqual(s._holdWelcome(PROMPT), true);
   assert.ok(s.writes[0].includes("已连接 1.2.3.4"), "第一笔必须是横幅");
   assert.strictEqual(s.writes.slice(1).join(""),
-                     "[xiaojian@VM-0-11-centos ~]$ ");
+                     "[testuser@test-host ~]$ ");
 });
 
 // 真机 bug2 的「无法输入任何文字」：提示符之后 PTY 静默，_holdWelcome 再也

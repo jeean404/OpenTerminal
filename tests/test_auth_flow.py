@@ -322,7 +322,7 @@ def test_modal_cancel_ends_verify_window():
     asyncio.run(main())
 
 
-def _remember_core(session, *, open_cmds, target_host="172.25.104.182"):
+def _remember_core(session, *, open_cmds, target_host="10.0.0.11"):
     c = _pw_core(session)
     c._open_cmds = dict(open_cmds)
     c._target_host = target_host
@@ -355,7 +355,7 @@ def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10", 2: "sudo su -"})
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
@@ -363,7 +363,7 @@ def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
         await asyncio.sleep(0)
         # 落键 = sudo@<最近 ssh 帧目标>（sudo 就跑在那台机上），非会话
         # 目标主机（那是跳板），更不是 ssh 键 pe@…
-        assert c._pw_capture_key == ("172.25.105.150", "sudo", None)
+        assert c._pw_capture_key == ("10.0.0.10", "sudo", None)
         await c._on_keys(b"s3cret\r")
         assert sent == [b"s3cret\r"]            # 手输照常直达远端
         assert c._pw_verifying                  # 回车即进验证窗
@@ -372,9 +372,9 @@ def test_sudo_typed_password_offers_remember_and_stores_sudo_key(monkeypatch):
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         asks = [m for m in msgs if m.type == "ask_remember"]
         assert len(asks) == 1, "验证成功后应发出一次记忆询问"
-        assert "sudo@172.25.105.150" in asks[0].text
+        assert "sudo@10.0.0.10" in asks[0].text
         await c.auth._finish_remember(True)
-        assert stored == [("172.25.105.150", "sudo", None, "s3cret")]
+        assert stored == [("10.0.0.10", "sudo", None, "s3cret")]
     asyncio.run(main())
 
 
@@ -407,7 +407,7 @@ def test_sudo_wrong_password_never_offers_or_stores(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10", 2: "sudo su -"})
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
@@ -425,7 +425,7 @@ def test_sudo_wrong_password_never_offers_or_stores(monkeypatch):
         asks = [m for m in msgs if m.type == "ask_remember"]
         assert len(asks) == 1, "只有验证通过的那次才询问"
         await c.auth._finish_remember(True)
-        assert stored == [("172.25.105.150", "sudo", None, "right")]
+        assert stored == [("10.0.0.10", "sudo", None, "right")]
     asyncio.run(main())
 
 
@@ -438,7 +438,7 @@ def test_sudo_remember_decline_stores_nothing(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10", 2: "sudo su -"})
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
@@ -462,7 +462,7 @@ def test_sudo_verify_timeout_never_offers(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10", 2: "sudo su -"})
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
@@ -485,10 +485,10 @@ def test_sudo_autofill_stored_key_no_ask(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10", 2: "sudo su -"})
     _patch_pw_io(monkeypatch, stored,
                  load=lambda h, u, p: "cached" if (h, u, p) ==
-                 ("172.25.105.150", "sudo", None) else None)
+                 ("10.0.0.10", "sudo", None) else None)
 
     async def main():
         c.auth._detect_password_prompt(b"[sudo] password for pe: ")
@@ -512,13 +512,13 @@ def test_nested_ssh_typed_password_offers_remember_prompt_key(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10"})
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c.auth._detect_password_prompt(b"pe@172.25.105.150's password: ")
+        c.auth._detect_password_prompt(b"pe@10.0.0.10's password: ")
         await asyncio.sleep(0)
-        assert c._pw_capture_key == ("172.25.105.150", "pe", None)
+        assert c._pw_capture_key == ("10.0.0.10", "pe", None)
         await c._on_keys(b"s3cret\r")
         assert sent == [b"s3cret\r"]
         c.auth._detect_password_prompt(b"\r\nLast login: Tue Oct  6\r\n"
@@ -526,9 +526,9 @@ def test_nested_ssh_typed_password_offers_remember_prompt_key(monkeypatch):
         await asyncio.sleep(cmod._PW_REMEMBER_DELAY + 0.15)
         asks = [m for m in msgs if m.type == "ask_remember"]
         assert len(asks) == 1
-        assert "pe@172.25.105.150" in asks[0].text
+        assert "pe@10.0.0.10" in asks[0].text
         await c.auth._finish_remember(True)
-        assert stored == [("172.25.105.150", "pe", None, "s3cret")]
+        assert stored == [("10.0.0.10", "pe", None, "s3cret")]
     asyncio.run(main())
 
 
@@ -541,11 +541,11 @@ def test_nested_ssh_remember_decline_stores_nothing(monkeypatch):
             sent.append(data)
 
     c, msgs, stored = _remember_core(
-        _Session(), open_cmds={1: "ssh pe@172.25.105.150"})
+        _Session(), open_cmds={1: "ssh pe@10.0.0.10"})
     _patch_pw_io(monkeypatch, stored)
 
     async def main():
-        c.auth._detect_password_prompt(b"pe@172.25.105.150's password: ")
+        c.auth._detect_password_prompt(b"pe@10.0.0.10's password: ")
         await asyncio.sleep(0)
         await c._on_keys(b"s3cret\r")
         c.auth._detect_password_prompt(b"\r\n[pe@inner ~]$ ")

@@ -1,5 +1,5 @@
 // 真机复现：保存连接「腾讯云主机」的连接后命令集
-//   ssh xiaojian@101.33.233.232 / sudo su - / cd /tmp
+//   ssh testuser@203.0.113.10 / sudo su - / cd /tmp
 // 用户预期：① sudo su - 回显也青色；② cd /tmp 上屏执行；③ 光标停在提示符。
 // 采集：屏幕时间线 / 命令集状态 / 光标位置 / 命令行 DOM 颜色 / 存活探针。
 // 用法: node tools/verify-web/repro-nested-cmdset.cjs [port]
@@ -114,7 +114,7 @@ async function main() {
 
     console.log("\n########## 里程碑（时间线 ms） ##########");
     for (const n of ["'s password:", "Last login", "sudo su -", "pts/",
-                     "root@VM-0-11-centos", "cd /tmp", "ZZPROBE"]) {
+                     "root@test-host", "cd /tmp", "ZZPROBE"]) {
       console.log("  " + n + " -> " + sampler.firstAt(n));
     }
     console.log("\n########## 命令集状态 ##########");
@@ -124,7 +124,7 @@ async function main() {
     console.log("\n########## 屏幕尾 12 行 ##########");
     console.log(final.split("\n").filter(l => l.trim()).slice(-12).join("\n"));
     console.log("\n########## 颜色 DOM ##########");
-    console.log("  ssh 行:", JSON.stringify(await rowColors(page, "ssh xiaojian@")));
+    console.log("  ssh 行:", JSON.stringify(await rowColors(page, "ssh testuser@")));
     console.log("  sudo 行:", JSON.stringify(await rowColors(page, "sudo su -")));
     console.log("  cd 行:", JSON.stringify(await rowColors(page, "cd /tmp")));
 

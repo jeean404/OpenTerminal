@@ -234,7 +234,7 @@ class CmdsetRunner:
             return f"{m.group(1)}@{m.group(2)}" if m else None
         # 尾窗一个非空行都没有（命令集第一条：连接后还没有泵输出进尾窗）→ 退回
         # 路由最近一次 B 标记捕获的提示符。否则基线永远种不下：第二条命令时
-        # base is None → ubuntu→xiaojian 的换壳判不出来 → sudo su - 打进裸壳、
+        # base is None → ubuntu→testuser 的换壳判不出来 → sudo su - 打进裸壳、
         # 回显白色不青（真机 2026-10-08 run4：ident= None base= None）。
         # 只在尾窗全空时退回：末个非空行是输出文本（Last login 等）时宁返回
         # None——_cur_prompt 只在装了 hook 的壳里更新，拿它记账会把「刚跳进

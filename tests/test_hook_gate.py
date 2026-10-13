@@ -338,8 +338,8 @@ def _stale_core(session) -> PipelineCore:
         _nested_pw_attempts=0, _nested_pw_ctx=None,
         _pw_capture_key=None, _pw_typed=bytearray(),
         _pw_remember_candidate=None, _pw_remember_pending=None,
-        _target_host="101.33.233.232",
-        _open_cmds={1: "ssh xiaojian@101.33.233.232"}, _open_cmd_at={1: 10.0},
+        _target_host="203.0.113.10",
+        _open_cmds={1: "ssh testuser@203.0.113.10"}, _open_cmd_at={1: 10.0},
         _exec_stack=[], _last_mark_at=11.0, _interactive=True,
         _hook_gone=False, _hook_report_pending=None, _fallback_task=None,
         _intr_swallow_until=0.0, _intr_pending=b"",
@@ -376,13 +376,13 @@ def test_hook_stale_after_enter_yields_text_without_markers():
     c = _stale_core(_Session())
 
     async def main():
-        # 用户在 xiaojian 逐字敲 `sudo su -` 再回车（纯按键透传，无 submit）
+        # 用户在 testuser 逐字敲 `sudo su -` 再回车（纯按键透传，无 submit）
         for ch in (b"s", b"u", b"d", b"o", b" ", b"s", b"u", b" ", b"-"):
             await c._on_keys(ch)
         await c._on_keys(b"\r")
         assert sent[-1] == b"\r"
         # root#1 已死、root#2 是裸壳：sudo 提示与新提示符全是纯文本，零标记
-        await c.exec._on_stream_event(("live", "[sudo] password for xiaojian: "))
+        await c.exec._on_stream_event(("live", "[sudo] password for testuser: "))
         await c.exec._on_stream_event(("live", "root@host:~# "))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
         assert not c.hook._hook_ok(), "死壳留下的 _last_mark_at 不得再当 hook 活凭据"
@@ -410,7 +410,7 @@ def test_hook_stale_after_enter_yields_text_without_markers():
 def test_hook_stale_latch_self_heals_on_marker():
     """外层集成壳重新画出提示符（OSC 标记到达）→ 陈旧判定即撤销。
 
-    正常拓扑里 root#1 退出后落回的是**带 hook 的** xiaojian：它的提示符标记
+    正常拓扑里 root#1 退出后落回的是**带 hook 的** testuser：它的提示符标记
     一到，健康路径必须立刻恢复，否则每次自然语言都白付一次探测+分片注入。"""
     class _Session:
         async def send_raw(self, data):
@@ -423,7 +423,7 @@ def test_hook_stale_latch_self_heals_on_marker():
         await c.exec._on_stream_event(("live", "root@host:~# "))
         await asyncio.sleep(_HOOK_LIVENESS + 0.2)
         assert not c.hook._hook_ok()
-        await c.exec._on_stream_event(("prompt", "[xiaojian@host ~]$ "))
+        await c.exec._on_stream_event(("prompt", "[testuser@host ~]$ "))
         assert c.hook._hook_ok(), "标记一到即自愈，健康路径恢复"
         await c._on_keys(b"\r")
         await c.exec._on_stream_event(("prompt_start", 100000))
@@ -460,7 +460,7 @@ def test_hook_watch_not_armed_at_password_prompt():
             pass
 
     c = _stale_core(_Session())
-    c._pw_at_end = True          # 尾窗正停在 `[sudo] password for xiaojian: `
+    c._pw_at_end = True          # 尾窗正停在 `[sudo] password for testuser: `
 
     async def main():
         await c._on_keys(b"\r")
