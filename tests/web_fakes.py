@@ -84,11 +84,21 @@ class PassthroughSession(FakeSession):
         raise asyncio.TimeoutError()
 
 
+def _configured_env():
+    """测试用 .env：协议已配齐 → model_from_env 不产生 errors。"""
+    return {"ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+            "ANTHROPIC_API_KEY": "test-key"}
+
+
 async def _make_worker(monkeypatch, target="web01",
                        session=None, user="root", commands=None):
     import openterminal.web.worker as wmod
     from openterminal.config import TargetConfig
 
+    # 隔离环境 .env，并假定协议已配：没配协议时 Config.load 会把
+    # 「未配置模型协议」写进 cfg.errors，pipeline 连上后按启动期配置错误
+    # 出 alert 红卡事件——会污染 worker 用例的事件序列断言。
+    monkeypatch.setattr("openterminal.config.load_env", _configured_env)
     cfg = Config.load()
     cfg.targets["web01"] = TargetConfig(name="web01", mode="ssh",
                                         host="10.0.0.20", user=user)
@@ -108,6 +118,12 @@ async def _make_worker(monkeypatch, target="web01",
     monkeypatch.setattr(wmod, "probe_profile", _fake_probe)
     monkeypatch.setattr(wmod, "build_agent",
                         lambda *a, **k: (None, set(), None))
+    # build_chat_model 必须与 build_agent 成对打桩：_build_agent_now →
+    # _load_agent_stack 对 None 名字会真导入 langchain 栈（热 4s/冷 19s+），
+    # 同步堵死事件循环——2s 等待的 deadline 在阻塞期无法按时触发，恢复后
+    # 「定时器补跑 vs 消息送达」回调顺序竞态 = test_worker_change_model
+    # 时好时坏的 TimeoutError 根因（桩了就走桩，零导入）。
+    monkeypatch.setattr(wmod, "build_chat_model", lambda *a, **k: None)
     w = TabWorker(cfg, target)
     sink = FakeSink()
     w.attach(sink)
@@ -172,6 +188,10 @@ class FakeRunner:
     def __init__(self, agent, thread_id, *, max_tool_turns=10, on_event=None):
         self.on_event = on_event
 
+    def claim_seq(self, name, command):
+        # 审批认领表（真实 TaskRunner 同名接口）：假任务无工具宣告，恒无卡
+        return None
+
     async def run(self, text):
         if self.on_event:
             self.on_event(SimpleNamespace(kind="think", text="推理中"))
@@ -193,6 +213,47 @@ async def _drain_fallback(w):
             await t
         except asyncio.CancelledError:
             pass
+
+
+async def _drain_inbox(w, timeout=2.0):
+    """等 _inbox 排空（submit 现入队与按键保序，handle_client 返回≠已处理）。"""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        await asyncio.sleep(0.01)
+        if w._inbox.empty():
+            await asyncio.sleep(0.02)   # 允许在途 _dispatch（get 后队列即空）跑完
+            return
+    raise asyncio.TimeoutError("inbox 未排空")
+
+
+async def _submit(w, **kw):
+    """submit 走 _inbox 保序：发完等 dispatch 起任务。
+
+    返回本次起跑的 _ai_flow 任务引用（或 None）——FakeRunner 秒完成会在
+    finally 里清空 w._ai_task，等排空就抓不到了（真机断言「任务先行」用）。
+    """
+    from openterminal.core import ClientMsg
+    started = []
+    flow = w.ai
+    orig = flow._start_ai
+
+    def _spy(line, hooked=False):
+        orig(line, hooked)
+        started.append(w._ai_task)
+
+    flow._start_ai = _spy
+    try:
+        await w.handle_client(ClientMsg(type="submit", **kw))
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 2.0:
+            await asyncio.sleep(0.01)
+            if started or w._inbox.empty():
+                if started or time.monotonic() - t0 > 0.05:
+                    break
+        await asyncio.sleep(0.02)   # 在途 dispatch 收尾
+    finally:
+        flow._start_ai = orig
+    return started[0] if started else None
 
 
 def _skip_reintegrate(w, monkeypatch):

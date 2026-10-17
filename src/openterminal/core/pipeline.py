@@ -160,6 +160,9 @@ class PipelineCore:
     # pad 指纹扫描窗开关：类级默认 False——测试可直接构造实例不跑 __init__，
     # live 分支读它时属性必须存在
     _pad_inflight = False
+    # 事件节奏分流：False=逐 token 流式（CLI 直播）；True=段攒流（Web：
+    # 每段一条完整 ai_result + 心跳，前端不攒 token 流）。由子类覆写。
+    paced_display: bool = False
 
     def __init__(self, cfg: Config, target_name: str, *,
                  policy: Policy | None = None) -> None:
@@ -484,9 +487,10 @@ class PipelineCore:
             self._boundary_ack.set()
         elif msg.type == "submit":
             # 外部触发链：前端拦截的自然语言整行（不再经 shell hook 分类，
-            # su - 等 login shell 重置 hook 后依然可用）
-            if self.session is not None and msg.text:
-                await self.ai._on_frontend_line(msg.text, msg.dirty)
+            # su - 等 login shell 重置 hook 后依然可用）。
+            # 必须走 _inbox 与按键保序：此前内联处理会在 _dispatch 泵的两个
+            # 按键之间插进 \r，shell 只接到半行（真机「批准」被截成「批」）
+            await self._inbox.put(msg)
         elif msg.type == "rescue":
             # 失败救援卡决策（accept = 交给 AI）
             await self.ai._on_rescue_decision(msg.accept)
@@ -580,19 +584,15 @@ class PipelineCore:
         return val
 
 
-    # 审批理由中属「无害」的白名单：仅命中这些 → normal（蓝框），其余高危（红框）
-    _BENIGN_APPROVE_REASONS = frozenset({"重定向覆盖文件", "用户 approve_extra 规则"})
-
     def _approval_risk(self, command: str) -> str:
-        """审批风险级：删除/提权/写改/无法判定等 → high；仅无害理由 → normal。"""
-        reasons = set(self.policy.classify(command).reasons)
-        return "normal" if reasons and reasons <= self._BENIGN_APPROVE_REASONS else "high"
+        """审批风险级（单一来源在 Policy.risk：删除/提权/写改/无法判定等 → high）。"""
+        return self.policy.risk(command)
 
     async def ask_approval(self, command: str, reasons: str, host: str,
-                           risk: str = "high") -> dict:
+                           risk: str = "high", id: int = 0) -> dict:
         msg = ServerMsg(
             type="approval", command=command, reasons=reasons, host=host,
-            risk=risk)
+            risk=risk, id=id)
         self._pending_approval = msg
         try:
             await self.emit_msg(msg)
@@ -657,6 +657,11 @@ class PipelineCore:
             type="status",
             text=f"已连接 {self._target_host}"
                  f"（{self.profile.distro or self.profile.os_family}）。{hint}"))
+        # 启动期配置错误（协议二选一冲突/都缺）→ 红色警告卡（真机约定：
+        # 报错信息都进红卡）；顺序在 ready 后，前端 island 已可挂卡
+        for err in (getattr(self.cfg, "errors", None) or []):
+            self._emit_nowait(ServerMsg(
+                type="event", event={"kind": "alert", "text": err}))
         self.pump.start()
         if self._interactive:
             # 注入期的提示符字节被 setup 消化掉了：Ctrl+L 让 shell 重画提示符
@@ -792,6 +797,28 @@ class PipelineCore:
             shell, flag = parse_probe(r.output or "")
             _dbg("setup probe out=", repr((r.output or "")[:120]),
                  "exit=", r.exit_code)
+            if not shell:
+                # 慢 shell 宽限重试（真机 2026-10-16：Windows conda profile
+                # 初始化实测 40s+，首轮 10s 探测必超时/读空重连 → 集成脚本
+                # 不注入 → __ot_pad 无 hook → 补差熔断 → 卡片被夹紧截断）。
+                # 只对「探测没跑成」重试：超时中断（exit 130）/读空重连
+                # （reconnected）。探测跑成但答非所问（旧 shell/怪 shell）
+                # 重试无意义，直接降级直通——也避免测试桩（恒回 "hello"）
+                # 被无谓拖一轮。
+                probe_ran = not (
+                    r.exit_code == 130
+                    or getattr(r, "reconnected", False)
+                    or not (r.output or "").strip())
+                if probe_ran:
+                    _dbg("setup: probe 未识别 shell → 纯终端直通")
+                    return
+                _dbg("setup: probe 未跑成，宽限重试")
+                await asyncio.sleep(3)
+                r = await self.session.run(
+                    probe_command(self.profile.os_family), timeout=45)
+                shell, flag = parse_probe(r.output or "")
+                _dbg("setup probe retry out=", repr((r.output or "")[:120]),
+                     "exit=", r.exit_code)
             if not shell:
                 _dbg("setup: probe 未识别 shell → 纯终端直通")
                 return
@@ -947,6 +974,10 @@ class PipelineCore:
     async def _dispatch(self, msg: ClientMsg) -> None:
         if msg.type == "raw":
             await self._on_keys(msg.data)
+        elif msg.type == "submit":
+            # 与按键同队列保序（feed_msg 只入队）：半行 \r 截断中文的根因修复
+            if self.session is not None and msg.text:
+                await self.ai._on_frontend_line(msg.text, msg.dirty)
         elif msg.type == "mode":
             await self.ai._switch_display(msg.text)
         elif msg.type == "resize":

@@ -12,9 +12,9 @@ from openterminal.web.worker import TabWorker
 
 from tests.web_fakes import (
     FakeRunner, FakeSession, FakeSink, PassthroughSession,
-    _drain_fallback, _event_kinds, _events, _install_fake_runner,
-    _make_worker, _profile, _run_failed_user_cmd, _sink_bytes,
-    _skip_reintegrate, _wait, _wait_json, _wire_presenter,
+    _drain_fallback, _drain_inbox, _event_kinds, _events, _install_fake_runner,
+    _configured_env, _make_worker, _profile, _run_failed_user_cmd, _sink_bytes,
+    _skip_reintegrate, _submit, _wait, _wait_json, _wire_presenter,
 )
 
 async def test_worker_connects_and_ready(monkeypatch):
@@ -36,6 +36,9 @@ async def test_worker_local_target_skips_probe(monkeypatch):
     import openterminal.web.worker as wmod
 
     cfg = Config.load()
+    # 隔离环境 .env 并假定协议已配：否则 cfg.errors 的「未配置模型协议」
+    # 会在连上后出 alert 红卡事件，污染下面的事件序列断言
+    monkeypatch.setattr("openterminal.config.load_env", _configured_env)
     monkeypatch.setattr(wmod, "load_password", lambda *a: None)
 
     async def _fake_open(*a, **k):
@@ -48,6 +51,7 @@ async def test_worker_local_target_skips_probe(monkeypatch):
     monkeypatch.setattr(wmod, "probe_profile", _boom_probe)
     monkeypatch.setattr(wmod, "build_agent",
                         lambda *a, **k: (None, set(), None))
+    monkeypatch.setattr(wmod, "build_chat_model", lambda *a, **k: None)
     w = TabWorker(cfg, "default")
     sink = FakeSink()
     w.attach(sink)
@@ -62,6 +66,9 @@ async def test_worker_connect_failure_sends_closed(monkeypatch):
     from openterminal.config import TargetConfig
 
     cfg = Config.load()
+    # 隔离环境 .env 并假定协议已配：否则 cfg.errors 的「未配置模型协议」
+    # 会在连上后出 alert 红卡事件，污染下面的事件序列断言
+    monkeypatch.setattr("openterminal.config.load_env", _configured_env)
     cfg.targets["web01"] = TargetConfig(name="web01", mode="ssh",
                                         host="10.0.0.20", user="root")
     monkeypatch.setattr(wmod, "load_password", lambda *a: None)
@@ -73,6 +80,7 @@ async def test_worker_connect_failure_sends_closed(monkeypatch):
     monkeypatch.setattr(wmod, "probe_profile", lambda s, h: _profile())
     monkeypatch.setattr(wmod, "build_agent",
                         lambda *a, **k: (None, set(), None))
+    monkeypatch.setattr(wmod, "build_chat_model", lambda *a, **k: None)
     w = TabWorker(cfg, "web01")
     sink = FakeSink()
     w.attach(sink)
@@ -354,7 +362,9 @@ class FakeEstRunner(FakeRunner):
 
 
 async def test_worker_task_flow_events(monkeypatch):
-    """任务事件流：task_start → ai_think/ai_token → final+ai_card → usage。"""
+    """任务事件流（Phase 1 paced 契约）：task_start → progress 心跳 + ai_result
+    段式下发 → final+ai_card → task_end → usage。token/think 攒段一次性
+    ai_result（浏览器零压力），final 吞正文留思考（不烧两遍）。"""
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     await _install_fake_runner(monkeypatch)
@@ -365,8 +375,14 @@ async def test_worker_task_flow_events(monkeypatch):
         x.get("event", {}).get("kind") == "task_start"
         and x["event"]["text"] == "看看磁盘占用" for x in m))
     await _wait(lambda: w._ai_task is None)
+    await _wait_json(sink, lambda m: any(   # 末位事件送达再断言全序列
+        x.get("event", {}).get("kind") == "task_end" for x in m))
     kinds = _event_kinds(sink)
-    assert kinds == ["task_start", "ai_think", "ai_token", "final", "ai_card"], kinds
+    assert kinds == ["task_start", "progress", "ai_result", "final",
+                     "ai_card", "task_end"], kinds
+    result = _events(sink, "ai_result")[0]
+    assert result["text"] == ""            # 红行：final 吞正文，只烧总结卡一遍
+    assert result["think"] == "推理中"      # 红行：思考非空冲「仅思考段」
     final = _events(sink, "final")[0]
     card = _events(sink, "ai_card")[0]
     assert final["text"] == "磁盘 80%"
@@ -387,12 +403,12 @@ async def test_worker_tool_card_events(monkeypatch):
     w.ai._start_ai("读一下 notes.txt")
     await _wait(lambda: w._ai_task is None)
     # 工具事件走 _emit_nowait 入 outbox：sender 泵可能晚于 _ai_task 清空
-    # 才送达 sink，按末位事件到达再断言全序列，否则抢跑看到半截 kinds
+    # 才送达 sink，按末位事件（task_end）到达再断言全序列，否则抢跑看到半截 kinds
     await _wait_json(sink, lambda m: any(
-        x.get("event", {}).get("kind") == "ai_card" for x in m))
+        x.get("event", {}).get("kind") == "task_end" for x in m))
     kinds = _event_kinds(sink)
     assert kinds == ["task_start", "ai_collapse", "ai_tool", "ai_tool",
-                     "final", "ai_card"], kinds
+                     "final", "ai_card", "task_end"], kinds
     tools = [x["event"] for x in sink.json()
              if x.get("event", {}).get("kind") == "ai_tool"]
     assert tools[0]["phase"] == "start"
@@ -815,7 +831,7 @@ async def test_worker_submit_healthy_routes_through_hook(monkeypatch):
     w._last_mark_at = 1.0          # 本会话见过标记 → hook 在位
     w._last_live_at = 2.0          # 按键回显新于标记：不得误判绝迹（真机重复回显根因）
 
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    await _submit(w, text="帮我查询系统资源")
     assert ("raw", b"\r") in w.session.calls
     assert not any(d == b"\x03" for k, d in w.session.calls if k == "raw")
     assert w._hook_report_pending == "帮我查询系统资源"
@@ -835,7 +851,7 @@ async def test_worker_submit_ai_report_starts_task(monkeypatch):
     _wire_presenter(w)
     _skip_reintegrate(w, monkeypatch)
 
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    await _submit(w, text="帮我查询系统资源")
     await w.exec._on_stream_event(("report", 1, "AI", "帮我查询系统资源"))
     assert w._hook_report_pending is None
     await asyncio.wait_for(w._ai_task, timeout=2)
@@ -859,7 +875,7 @@ async def test_worker_submit_cmd_report_cancels_fallback(monkeypatch):
     _wire_presenter(w)
     _skip_reintegrate(w, monkeypatch)
 
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    await _submit(w, text="帮我查询系统资源")
     assert w._hook_report_pending == "帮我查询系统资源"
     await w.exec._on_stream_event(("report", 1, "CMD", "帮我查询系统资源"))
     assert w._hook_report_pending is None
@@ -971,7 +987,7 @@ async def test_worker_submit_dirty_hook_alive_routes_through_hook(monkeypatch):
     _wire_presenter(w)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
-    await w.handle_client(ClientMsg(type="submit", text="的别名", dirty=True))
+    await _submit(w, text="的别名", dirty=True)
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
     assert raws == [b"\r"], "hook 在位只补发回车，真行交给 hook 上报"
     assert w._hook_report_pending is None, "镜像不可信不挂兜底等待"
@@ -1002,12 +1018,11 @@ async def test_worker_submit_dirty_hook_dead_silent_start(monkeypatch):
     _skip_reintegrate(w, monkeypatch)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
-    await w.handle_client(ClientMsg(type="submit", text="的别名", dirty=True))
+    task = await _submit(w, text="的别名", dirty=True)
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
     assert "的别名\r".encode() not in raws, "残镜像不得当整行重发"
     assert w._hook_report_pending is None
-    assert w._ai_task is not None, "任务先行：不等清场/重注入"
-    task = w._ai_task
+    assert task is not None, "任务先行：不等清场/重注入"
     await asyncio.wait_for(task, timeout=2)
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
@@ -1034,12 +1049,11 @@ async def test_worker_submit_hook_dead_task_first(monkeypatch):
     _skip_reintegrate(w, monkeypatch)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    task = await _submit(w, text="帮我查询系统资源")
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
     assert "帮我查询系统资源\r".encode() not in raws, "降级不再整行重发"
     assert w._hook_report_pending is None
-    assert w._ai_task is not None, "任务先行：提交即起跑"
-    task = w._ai_task
+    assert task is not None, "任务先行：提交即起跑"
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
         and x["event"]["text"] == "帮我查询系统资源" for x in m))
@@ -1066,10 +1080,10 @@ async def test_worker_submit_hook_dead_reintegrate_fails_silent_start(monkeypatc
     monkeypatch.setattr(w.hook, "_ensure_integrated", _fail)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    task = await _submit(w, text="帮我查询系统资源")
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
     assert "帮我查询系统资源\r".encode() not in raws, "重注入失败不得重发行"
-    assert w._ai_task is not None, "任务先行：重注入失败不阻断起跑"
+    assert task is not None, "任务先行：重注入失败不阻断起跑"
     await _wait(lambda: w._ai_task is None)
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
@@ -1089,7 +1103,7 @@ async def test_worker_submit_fallback_fires_when_report_lost(monkeypatch):
     _wire_presenter(w)
     _skip_reintegrate(w, monkeypatch)
 
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    await _submit(w, text="帮我查询系统资源")
     await _wait(lambda: ("raw", b"\x03") in w.session.calls)
     assert w._hook_report_pending is None
     assert w._suppress_ai_report == "帮我查询系统资源"
@@ -1112,11 +1126,11 @@ async def test_worker_submit_non_ai_passthrough(monkeypatch):
     w._interactive = True
     w._last_mark_at = 1.0
 
-    await w.handle_client(ClientMsg(type="submit", text="ls -la /tmp"))
-    await w.handle_client(ClientMsg(type="submit", text="   "))
+    await _submit(w, text="ls -la /tmp")
+    await _submit(w, text="   ")
     loop = asyncio.get_running_loop()
     w._exec_future = loop.create_future()
-    await w.handle_client(ClientMsg(type="submit", text="帮我查询系统资源"))
+    await _submit(w, text="帮我查询系统资源")
     w._exec_future = None
     raws = [d for k, d in w.session.calls if k == "raw"]
     assert raws == [b"\r", b"\r", b"\r"]
@@ -1296,3 +1310,67 @@ async def test_task_stall_not_triggered_while_tool_pending(monkeypatch):
         await task
     except asyncio.CancelledError:
         pass
+
+
+class FakeExecRunner(FakeRunner):
+    """execute 命令卡 + HITL 审批关联（Phase 2）：tool_start 带完整
+    command/预判字段，interrupt_payload 按 (name,command) 认领对回命令卡。"""
+
+    def __init__(self, agent, thread_id, *, max_tool_turns=10, on_event=None):
+        self.on_event = on_event
+        self._claims = []      # (name, command, seq) 有序多重表（runner 同义）
+        self.resumed = None
+
+    def claim_seq(self, name, command):
+        for i, (n, c, s) in enumerate(self._claims):
+            if n == name and c == command:
+                return self._claims.pop(i)[2]
+        return None
+
+    async def run(self, text):
+        self.interrupt_payload = {"action_requests": [
+            {"name": "execute", "args": {"command": "rm -rf /tmp/old"},
+             "description": "删除文件"}]}
+        if self.on_event:
+            self.on_event(SimpleNamespace(
+                kind="tool_start", text="rm -rf /tmp/old", name="execute",
+                index=1, failed=False, command="rm -rf /tmp/old"))
+            self._claims.append(("execute", "rm -rf /tmp/old", 1))
+        return []
+
+    async def resume(self, decisions):
+        self.resumed = decisions
+        self.interrupt_payload = None
+        return []
+
+
+async def test_worker_command_card_prediction_and_approval_id(monkeypatch):
+    """命令卡二合一：ai_tool start 出生带完整 command+审批预判字段（谓词
+    单源 Policy），approval 消息带同卡 id（按钮摆进同一张命令卡）。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    await _install_fake_runner(monkeypatch, FakeExecRunner)
+    _wire_presenter(w)
+
+    w.ai._start_ai("清理旧日志")
+    msg = await _wait_json(sink, lambda m: any(
+        x.get("event", {}).get("kind") == "ai_tool"
+        and x["event"].get("phase") == "start" for x in m))
+    start = [x["event"] for x in msg
+             if x.get("event", {}).get("kind") == "ai_tool"][0]
+    assert start["command"] == "rm -rf /tmp/old"   # 红行：完整串（不截 120）
+    assert start["needs_approval"] is True
+    assert start["reasons"] == ["删除文件"]
+    assert start["risk"] == "high"
+    # 审批对回同卡：id 同源（认领 (name,command)→seq→卡 id）
+    msg = await _wait_json(sink, lambda m: any(x["type"] == "approval" for x in m))
+    ap = [x for x in msg if x["type"] == "approval"][0]
+    assert ap["id"] == start["id"]
+    assert ap["command"] == "rm -rf /tmp/old"
+    assert ap["reasons"] == "删除文件"   # approval 携 description 全文（str）
+    # 决策回流 → resume 收到 → task_end 收束
+    await w.handle_client(ClientMsg(type="decision",
+                                    decision={"type": "approve"}))
+    await _wait(lambda: w._ai_task is None)
+    await _wait_json(sink, lambda m: any(
+        x.get("event", {}).get("kind") == "task_end" for x in m))

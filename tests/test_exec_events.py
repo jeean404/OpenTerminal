@@ -5,7 +5,7 @@ import time
 import time as _time
 from openterminal.web.protocol import ClientMsg
 from openterminal.core import PipelineCore
-from tests.web_fakes import (FakeSession, PassthroughSession, _drain_fallback, _fake_ai_task, _install_fake_runner, _make_worker, _sink_bytes, _skip_reintegrate, _wait, _wait_json, _wire_presenter)
+from tests.web_fakes import (FakeSession, PassthroughSession, _drain_fallback, _fake_ai_task, _install_fake_runner, _make_worker, _sink_bytes, _skip_reintegrate, _submit, _wait, _wait_json, _wire_presenter)
 from tests.core_fakes import FakeCore, _bare_core
 
 
@@ -101,7 +101,7 @@ async def test_degraded_submit_repaints_nl_line_blue(monkeypatch):
 
     # 用户已把自然语言敲在提示符上（shell 自己回显的）
     await w.exec._on_stream_event(("live", "[root@x /tmp]# 查看正在运行的容器"))
-    await w.handle_client(ClientMsg(type="submit", text="查看正在运行的容器"))
+    task = await _submit(w, text="查看正在运行的容器")
     await asyncio.sleep(0.8)                # 后台清场（0.12+0.4s）落地
 
     raw = _sink_bytes(sink).decode("utf-8", "replace")
@@ -147,12 +147,11 @@ async def test_worker_submit_open_user_cmd_takes_degraded_path(monkeypatch):
     _skip_reintegrate(w, monkeypatch)
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
-    await w.handle_client(ClientMsg(type="submit", text="看看磁盘用量"))
+    task = await _submit(w, text="看看磁盘用量")
     raws = [d for k, d in w.session.calls if k == "raw"][n:]
     assert "看看磁盘用量\r".encode() not in raws, "降级不整行重发"
     assert w._hook_report_pending is None
-    assert w._ai_task is not None, "帧开着不走健康路径，但任务先行"
-    task = w._ai_task
+    assert task is not None, "帧开着不走健康路径，但任务先行"
     await _wait_json(sink, lambda m: any(
         x.get("event", {}).get("kind") == "task_start"
         and x["event"]["text"] == "看看磁盘用量" for x in m))
@@ -184,9 +183,8 @@ async def test_worker_degraded_settles_after_intr(monkeypatch):
             await w.session.send_raw(b" _ot_probe_line\r")
     monkeypatch.setattr(w.hook, "_ensure_integrated", _fake_reintegrate)
 
-    await w.handle_client(ClientMsg(type="submit", text="看看磁盘用量"))
-    assert w._ai_task is not None
-    task = w._ai_task
+    task = await _submit(w, text="看看磁盘用量")
+    assert task is not None
     await asyncio.wait_for(task, timeout=2)
     await asyncio.sleep(0.8)       # 后台清场 + 重注入替身落地
     raws = [d for k, d in w.session.calls if k == "raw"]
@@ -227,9 +225,8 @@ async def test_worker_degraded_erases_echo_visibly(monkeypatch):
     w.emit_bytes = _emit
 
     n = len([c for c in w.session.calls if c[0] == "raw"])
-    await w.handle_client(ClientMsg(type="submit", text="帮我查看 docker容器"))
-    assert w._ai_task is not None, "任务先行"
-    task = w._ai_task
+    task = await _submit(w, text="帮我查看 docker容器")
+    assert task is not None, "任务先行"
     await asyncio.wait_for(task, timeout=2)
     await asyncio.sleep(0.8)       # 后台清场（0.12+0.4s）落地
     raws = [d for k, d in w.session.calls if k == "raw"][n:]

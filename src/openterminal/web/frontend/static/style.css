@@ -16,6 +16,7 @@
   --ok: #3fb950;
   --warn: #d29922;
   --danger: #f85149;
+  --violet: #bc8cff;     /* 编辑态（与红/橙/绿/灰区分） */
   --cyan: #39c5cf;        /* 用户输入文本 / 块状光标（workbench 青） */
   --ap-blue: #2f6feb;     /* 普通审批蓝框 / Agent 蓝点 */
   --mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
@@ -404,6 +405,70 @@ body.sidebar-collapsed #sidebar { display: none; }
 /* 已同意：命令置灰＝已定稿不可更改的观感（拒绝/编辑态保留原色） */
 .aprobe .apcode.locked { color: var(--muted); }
 
+/* --- Phase 2 命令卡（execute 工具卡+审批卡二合一） ---
+   四行全定高（name/命令/状态/操作），挂载后高度/行不再变化（红线④）：
+   状态行/操作行/理由槽渲染出即占位（空态也渲染定高元素），
+   按钮簇替换为回执不改变行高。*/
+.cmdcode {
+  height: 2.6em;          /* 定高 2 行 */
+  overflow: hidden;
+}
+.cmdstat {
+  display: flex; align-items: center; gap: 10px;
+  height: 1.9em;          /* 定高 1 行：理由槽+状态文案 */
+  overflow: hidden;
+}
+.cmdreason {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cmdacts {
+  display: flex; align-items: center; gap: 7px;
+  height: 1.9em;          /* 定高 1 行：按钮簇→回执同高替换 */
+  overflow: hidden;
+  /* 还原原版布局：按钮簇在卡头右侧（aphead 内 margin-left:auto 右推） */
+  margin-left: auto;
+}
+/* 卡头不换行：按钮簇超宽由 .cmdacts 裁剪，不得挤到第二行撑高卡体 */
+.cmdhead { flex-wrap: nowrap; min-width: 0; }
+.cmdhead .alabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdacts .apbtns {
+  display: flex; align-items: center; gap: 7px;
+  flex-wrap: nowrap;      /* 定高槽内不换行（换行被裁＝按钮失踪） */
+  margin-left: 0;
+}
+.cmdacts .apexec { position: relative; display: flex; gap: 7px; }
+
+/* 命令卡状态配色（真机约定，盖过 .aprobe.high 的统一红框）：
+   等待审批红 / 编辑紫 / 拒绝灰 / 完成绿 / 失败橙 */
+.cmdcard.waiting { border-color: var(--danger); background: #1c1113; }
+.cmdcard.waiting .aphead { background: rgba(248, 81, 73, 0.14); }
+.cmdcard.editing { border-color: var(--violet); background: #181028; }
+.cmdcard.editing .aphead { background: rgba(188, 140, 255, 0.13); }
+.cmdcard.rejected { border-color: var(--muted); background: var(--panel); }
+.cmdcard.rejected .aphead { background: rgba(154, 160, 166, 0.12); }
+.cmdcard.done { border-color: var(--ok); background: #101a13; }
+.cmdcard.done .aphead { background: rgba(63, 185, 80, 0.13); }
+.cmdcard.failed { border-color: var(--warn); background: #1c1608; }
+.cmdcard.failed .aphead { background: rgba(210, 153, 34, 0.14); }
+/* 状态徽标配色：等待红 / 拒绝灰 / 失败橙 / 编辑紫（ok 沿用绿） */
+.apstate.waiting { color: var(--danger); }
+/* 红色警告卡：配置错误/系统异常（模型超时、工具超时等） */
+.alertcard { border-color: var(--danger); background: #1c1113; }
+.alertcard .aphead { background: rgba(248, 81, 73, 0.14); }
+.alertcard .aphead .apq { color: var(--danger); }
+.apstate.rejected { color: var(--muted); }
+.apstate.fail { color: var(--warn); }
+.apstate.edit, .apreceipt.edit { color: var(--violet); }
+.apreceipt {
+  font-size: 12px; font-weight: 650;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+}
+.apreceipt.ok { color: var(--ok); }
+.apreceipt.edit { color: var(--warn); }
+.apreceipt.fail { color: var(--danger); }
+
 /* --- 开启新会话（唯一入口，状态栏；此前内嵌每张审批卡已删） --- */
 .statusbar .status-newtask {
   padding: 2px 9px; font-size: 12px; font-family: var(--sans);
@@ -514,13 +579,14 @@ body.sidebar-collapsed #sidebar { display: none; }
 /* --- 模态框 --- */
 #modal-root { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); z-index: 50; }
 #modal-root:empty { display: none; }
-.modal { width: min(440px, 92vw); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+.modal { width: min(440px, 92vw); max-height: 85vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
 .modal h3 { margin: 0 0 8px; font-size: 14px; }
+.modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .modal-body p { margin: 0 0 8px; color: var(--text); white-space: pre-wrap; }
 .modal-body input { width: 100%; padding: 6px 10px; }
 .modal-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
 .modal-check input { width: auto; padding: 0; }
-.modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; flex-shrink: 0; }
 .modal-btns button { padding: 4px 14px; border: 1px solid var(--border); border-radius: 4px; }
 .modal-btns button:hover { background: var(--panel2); }
 .modal-btns button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }

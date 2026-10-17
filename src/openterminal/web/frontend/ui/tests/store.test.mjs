@@ -1,346 +1,341 @@
-// CardsStore 单测：卡片流状态机（换装/定格/审批决策/快捷键）。
+// CardsStore 单测：卡片流状态机（Phase 1「定格一发入魂」契约）。
+// 分析段 ai_result 一次性入完整内容（出生即 done，挂载后高度/行不再变化）；
+// token 批累积/原地换装/trimMd 裁尾已随流式契约删除。
 // 运行：cd frontend/ui && npm test
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { CardsStore } from "../src/store.js";
 
 function make() {
-  const s = new CardsStore();
-  vi.useFakeTimers();
-  return s;
+  return new CardsStore();
 }
 
 describe("CardsStore", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("task_start 建 think 卡，首个 token 转流式", () => {
-    const s = new CardsStore();
+  it("task_start 只重置去重状态，不预建流式分析卡", () => {
+    const s = make();
     s.handle({ kind: "task_start", id: 1 });
-    expect(s.getSnapshot().cards[0]).toMatchObject({ id: 1, type: "analysis", think: true });
-    s.handle({ kind: "ai_token", text: "正在检查" });
-    vi.runAllTimers();
+    expect(s.getSnapshot().cards).toEqual([]);
+  });
+
+  it("ai_result 一次性入完整分析段：出生即 done，text/reason/failed 全量入卡", () => {
+    const s = make();
+    s.handle({ kind: "task_start" });
+    s.handle({ kind: "ai_result", id: 7, text: "正文", reason: "推理中", failed: false });
     const c = s.getSnapshot().cards[0];
-    expect(c.think).toBe(false);
-    expect(c.text).toBe("正在检查");
+    expect(c).toMatchObject({
+      id: 7, type: "analysis", text: "正文", reason: "推理中",
+      done: true, failed: false,
+    });
   });
 
-  it("ai_think 思考流式入卡：转流式态、累进 reason、不占 text", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 2 });
-    s.handle({ kind: "ai_think", text: "先看磁盘" });
-    vi.runAllTimers();
-    const c = s.getSnapshot().cards[0];
-    expect(c.think).toBe(false);
-    expect(c.reason).toBe("先看磁盘");
-    expect(c.text).toBe("");
-    // 后续正文 token 照常进 text，思考不混入
-    s.handle({ kind: "ai_token", text: "正文" });
-    vi.runAllTimers();
-    expect(s.getSnapshot().cards[0].reason).toBe("先看磁盘");
-    expect(s.getSnapshot().cards[0].text).toBe("正文");
+  it("ai_result 空段跳过（text/reason 均空不成卡）", () => {
+    const s = make();
+    s.handle({ kind: "task_start" });
+    s.handle({ kind: "ai_result", text: "", reason: "" });
+    s.handle({ kind: "ai_result", failed: true });
+    expect(s.getSnapshot().cards).toEqual([]);
   });
 
-  it("token 批冲刷：多次 token 合并一次出快照", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 3 });
-    const spy = vi.fn();
-    s.subscribe(spy);
-    spy.mockClear();
-    s.handle({ kind: "ai_token", text: "a" });
-    s.handle({ kind: "ai_token", text: "b" });
-    vi.runAllTimers();
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(s.getSnapshot().cards[0].text).toBe("ab");
+  it("ai_result failed 标记落到卡上（limit/error 尾段）", () => {
+    const s = make();
+    s.handle({ kind: "ai_result", text: "半截", failed: true });
+    expect(s.getSnapshot().cards[0]).toMatchObject({ done: true, failed: true });
   });
 
-  it("ai_card 换装：活分析卡原地变总结卡（同 id）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 4 });
-    s.handle({ kind: "ai_token", text: "分析中" });
-    const id = s.getSnapshot().cards[0].id;
-    s.handle({ kind: "ai_card", md: "| 列 |\n| --- |\n| 值 |" });
-    const c = s.getSnapshot().cards[0];
-    expect(c.id).toBe(id);
-    expect(c.type).toBe("summary");
-    expect(c.text).toContain("| 列 |");
-    expect(c.done).toBe(true);
+  it("挂载后快照不再变化：重复读取/时间推进均不动卡内容（高度行数同理）", () => {
+    const s = make();
+    s.handle({ kind: "ai_result", id: 1, text: "abc", reason: "r" });
+    const snap1 = s.getSnapshot().cards[0];
+    const before = JSON.stringify(snap1);
+    vi.advanceTimersByTime(1000);
+    expect(JSON.stringify(s.getSnapshot().cards[0])).toBe(before);
   });
 
-  it("收束后 final 只定格，总结由 ai_card 携 id 挂载（不回旧卡）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 5 });
-    s.handle({ kind: "ai_think", text: "思考" });
-    s.handle({ kind: "ai_collapse" });            // 首个命令执行 → 分析卡定格
-    s.handle({ kind: "final", md: "# 总结" });     // 无活卡：只定格，不挂卡
-    let cards = s.getSnapshot().cards;
+  it("ai_collapse 是 no-op：事件留线（CLI 依赖）但不动卡片", () => {
+    const s = make();
+    s.handle({ kind: "ai_result", id: 1, text: "abc" });
+    const before = JSON.stringify(s.getSnapshot().cards);
+    s.handle({ kind: "ai_collapse" });
+    expect(JSON.stringify(s.getSnapshot().cards)).toBe(before);
+  });
+
+  it("ai_card 挂总结卡（出生即完整）", () => {
+    const s = make();
+    s.handle({ kind: "ai_card", id: 3, md: "# 总结" });
+    expect(s.getSnapshot().cards[0]).toMatchObject(
+      { id: 3, type: "summary", text: "# 总结", done: true });
+  });
+
+  it("final 挂总结卡；ai_card 与 final 同文连发只出一张（去重）", () => {
+    const s = make();
+    s.handle({ kind: "ai_card", id: 4, md: "# 总结" });
+    s.handle({ kind: "final", id: 4, md: "# 总结" });
+    const cards = s.getSnapshot().cards;
     expect(cards).toHaveLength(1);
-    expect(cards[0]).toMatchObject({ id: 5, type: "analysis", done: true, reason: "思考" });
-    expect(cards[0].zone).toBeUndefined();
-    s.handle({ kind: "ai_card", md: "# 总结", id: 6 });  // 新 id 挂载
-    cards = s.getSnapshot().cards;
-    expect(cards).toHaveLength(2);
-    expect(cards[1]).toMatchObject({ id: 6, type: "summary", text: "# 总结" });
-    expect(cards[1].zone).toBeUndefined();
-    expect(cards[0].type).toBe("analysis");       // 分析卡整卡长留
+    expect(cards[0]).toMatchObject({ id: 4, type: "summary" });
   });
 
-  it("未收束（纯问答）final 原地换装，ai_card 同文去重", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 7 });
-    s.handle({ kind: "ai_token", text: "答案" });
-    const id = s.getSnapshot().cards[0].id;
-    s.handle({ kind: "final", md: "# 答案" });
-    let cards = s.getSnapshot().cards;
-    expect(cards).toHaveLength(1);
-    expect(cards[0]).toMatchObject({ id, type: "summary", text: "# 答案" });
-    expect(cards[0].zone).toBeUndefined();
-    s.handle({ kind: "ai_card", md: "# 答案", id: 8 });  // 去重：不再新挂
-    expect(s.getSnapshot().cards).toHaveLength(1);
+  it("task_start 重置去重状态：新一轮同文总结照常成卡", () => {
+    const s = make();
+    s.handle({ kind: "final", md: "# 总结" });
+    s.handle({ kind: "task_start" });
+    s.handle({ kind: "final", md: "# 总结" });
+    expect(s.getSnapshot().cards).toHaveLength(2);
   });
 
-  it("final 无活卡只定格不挂卡，总结由 ai_card 挂载", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "final", md: "# 结论" });
-    expect(s.getSnapshot().cards).toHaveLength(0);   // 等 ai_card 携 id 挂载
-    s.handle({ kind: "ai_card", md: "# 结论", id: 9 });
-    expect(s.getSnapshot().cards).toHaveLength(1);
-    expect(s.getSnapshot().cards[0].type).toBe("summary");
-    expect(s.getSnapshot().cards[0].id).toBe(9);
-    expect(s.getSnapshot().cards[0].zone).toBeUndefined();
+  it("tool_start 非 execute → 小工具卡；tool_end 徽标收束（卡高不变）", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: "tool1", name: "read_file", args: "a.txt" });
+    expect(s.getSnapshot().cards[0]).toMatchObject(
+      { id: "tool1", type: "tool", done: false });
+    s.handle({ kind: "tool_end", id: "tool1", failed: true });
+    expect(s.getSnapshot().cards[0]).toMatchObject(
+      { id: "tool1", done: true, failed: true });
+    // 幂等：重复 end 不再改状态
+    s.handle({ kind: "tool_end", id: "tool1", failed: false });
+    expect(s.getSnapshot().cards[0].failed).toBe(true);
   });
 
-  it("task_fail 定格分析卡为失败", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 10 });
-    s.handle({ kind: "ai_token", text: "部分" });
-    vi.runAllTimers();
-    s.handle({ kind: "task_fail", reason: "limit" });
+  it("tool_start execute → 命令卡（二合一）：出生带 needsApproval/未武装", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute",
+               command: "ls -la", needs_approval: true, reasons: "敏感路径",
+               risk: "high" });
     const c = s.getSnapshot().cards[0];
-    expect(c.done).toBe(true);
-    expect(c.failed).toBe(true);
+    expect(c).toMatchObject({
+      id: "cmd1", type: "command", command: "ls -la",
+      needsApproval: true, armed: false, decided: null, done: false,
+    });
   });
 
-  it("审批：决策写回执并回调 app.js", () => {
-    const s = new CardsStore();
+  it("命令卡状态机：出生→武装等待审批→✓ 同意；审批不至 tool_end 直通", () => {
+    const s = make();
+    // ① 出生 → 武装
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute",
+               command: "rm -rf /var/log", needs_approval: true });
+    expect(s.handle({ kind: "command_card_waiting", id: "cmd1",
+                      command: "rm -rf /var/log" })).toBe(true);
+    expect(s.getSnapshot().cards[0]).toMatchObject({ armed: true, decided: null });
+    // ② 同意 → 回执 + 执行中
     const onDecision = vi.fn();
     s.onDecision = onDecision;
-    s.handle({ kind: "approval", id: 11, command: "rm -rf /tmp/x", reasons: "删除", risk: "high" });
+    expect(s.handle({ kind: "decide", decision: "approve", id: "cmd1" })).toBe(true);
+    expect(s.getSnapshot().cards[0].decided).toMatchObject(
+      { text: "✓ 已同意", cls: "ok" });
+    expect(onDecision).toHaveBeenCalledWith(
+      { type: "approve" }, "✓ 已同意", "rm -rf /var/log", "cmd1");
+    // ③ tool_end 收束
+    s.handle({ kind: "tool_end", id: "cmd1", failed: false });
+    expect(s.getSnapshot().cards[0]).toMatchObject({ done: true, failed: false });
+    // 单发决策守卫：已决策卡不吃二次决策（幽灵决策防线）
+    expect(s.handle({ kind: "decide", decision: "reject", id: "cmd1" })).toBe(false);
+  });
+
+  it("命令卡状态机：✗ 拒绝 → rejected 终态（tool_end failed 不得覆盖）", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    s.handle({ kind: "command_card_waiting", id: "cmd1" });
+    s.handle({ kind: "decide", decision: "reject", id: "cmd1" });
+    expect(s.getSnapshot().cards[0]).toMatchObject({ rejected: true });
+    expect(s.getSnapshot().cards[0].decided).toMatchObject(
+      { text: "✗ 已拒绝", cls: "fail" });
+  });
+
+  it("命令卡：出生判定 needsApproval 假 → 武装失败（无操作行，不长高）", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute", command: "ls",
+               needs_approval: false });
+    expect(s.handle({ kind: "command_card_waiting", id: "cmd1" })).toBe(false);
+    expect(s.getSnapshot().cards[0].armed).toBe(false);
+  });
+
+  it("command_card_waiting 先于 tool_start：暂存受理，落卡即武装（真机竞态）", () => {
+    const s = make();
+    // 审批帧比挂载链快（真机 2026-10-16 冒烟实测）：武装先到、卡还没入店
+    expect(s.handle({ kind: "command_card_waiting", id: 5,
+                      command: "rm -rf /" })).toBe(true);
+    expect(s.getSnapshot().cards).toEqual([]);
+    // tool_start 落卡 → 自动补武装，按钮照常出生
+    s.handle({ kind: "tool_start", id: 5, name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    const c = s.getSnapshot().cards[0];
+    expect(c.armed).toBe(true);
+    expect(c.command).toBe("rm -rf /");
+    expect(s.handle({ kind: "decide", decision: "approve", id: 5 })).toBe(true);
+  });
+
+  it("暂存武装不跨任务：task_start 清空（残留不得给下一张同 id 卡误武装）", () => {
+    const s = make();
+    s.handle({ kind: "command_card_waiting", id: 5, command: "x" });
+    s.handle({ kind: "task_start" });
+    s.handle({ kind: "tool_start", id: 5, name: "execute",
+               command: "x", needs_approval: true });
+    expect(s.getSnapshot().cards[0].armed).toBe(false);
+  });
+
+  it("双同串命令按序配对：同时只武装一张（防幽灵决策/死锁）", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute",
+               command: "echo hi", needs_approval: true });
+    s.handle({ kind: "tool_start", id: "cmd2", name: "execute",
+               command: "echo hi", needs_approval: true });
+    s.handle({ kind: "command_card_waiting", id: "cmd1" });
+    s.handle({ kind: "command_card_waiting", id: "cmd2" });
+    const [c1, c2] = s.getSnapshot().cards;
+    expect(c2.armed).toBe(true);
+    expect(c1.armed).toBe(false);   // 防御性单武装：旧卡按钮撤下
+    // 决策落在 cmd2（FIFO：后武装者是当前审批）
+    s.handle({ kind: "decide", decision: "approve", id: "cmd2" });
+    expect(c2.decided).toMatchObject({ text: "✓ 已同意" });
+    expect(c1.decided).toBe(null);
+  });
+
+  it("tool_end 未知 id 静默：不炸也不入卡", () => {
+    const s = make();
+    s.handle({ kind: "tool_end", id: "ghost", failed: true });
+    expect(s.getSnapshot().cards).toEqual([]);
+  });
+
+  it("task_fail 非 interrupt：未决命令卡撤除（按钮悬空），未完毕工具标失败", () => {
+    const s = make();
+    const dropped = vi.fn();
+    s.onDrop = dropped;
+    s.handle({ kind: "tool_start", id: "tool1", name: "read_file", args: "a" });
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    s.handle({ kind: "command_card_waiting", id: "cmd1", command: "rm -rf /" });
+    s.handle({ kind: "task_fail", reason: "error" });
+    // 未决命令卡整卡撤除（点了也是幽灵决策）；工具卡标失败收束
+    expect(s.getSnapshot().cards.map(c => c.id)).toEqual(["tool1"]);
+    expect(s.getSnapshot().cards[0]).toMatchObject(
+      { id: "tool1", done: true, failed: true });
+    expect(dropped).toHaveBeenCalledWith(["cmd1"]);
+  });
+
+  it("task_fail interrupt：未完毕卡整卡移除（含命令卡，零残留）", () => {
+    const s = make();
+    const dropped = vi.fn();
+    s.onDrop = dropped;
+    s.handle({ kind: "ai_result", id: 1, text: "完整段" });
+    s.handle({ kind: "tool_start", id: "tool1", name: "read_file", args: "a" });
+    s.handle({ kind: "tool_start", id: "cmd1", name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    s.handle({ kind: "task_fail", reason: "interrupt" });
+    expect(s.getSnapshot().cards.map(c => c.id)).toEqual([1]);
+    expect(dropped).toHaveBeenCalledWith(["tool1", "cmd1"]);
+  });
+
+  it("sweep：迟到补挂的未完毕卡整卡移除（已决策卡不受影响）", () => {
+    const s = make();
+    const dropped = vi.fn();
+    s.onDrop = dropped;
+    s.handle({ kind: "tool_start", id: "tool1", name: "execute", args: "ls" });
+    s.handle({ kind: "tool_start", id: "tool2", name: "execute", args: "pwd" });
+    s.handle({ kind: "tool_end", id: "tool2", failed: false });
+    s.handle({ kind: "sweep" });
+    expect(s.getSnapshot().cards.map(c => c.id)).toEqual(["tool2"]);
+    expect(dropped).toHaveBeenCalledWith(["tool1"]);
+  });
+
+  it("drop：按 id 撤卡并回调 onDrop", () => {
+    const s = make();
+    const dropped = vi.fn();
+    s.onDrop = dropped;
+    s.handle({ kind: "ai_result", id: 1, text: "a" });
+    s.handle({ kind: "ai_result", id: 2, text: "b" });
+    s.handle({ kind: "drop", ids: [2] });
+    expect(s.getSnapshot().cards.map(c => c.id)).toEqual([1]);
+    expect(dropped).toHaveBeenCalledWith([2]);
+  });
+
+  it("decide 缺省 id：命中最新 armed 未决命令卡（模态/快捷键兜底路径）", () => {
+    const s = make();
+    const onDecision = vi.fn();
+    s.onDecision = onDecision;
+    s.handle({ kind: "tool_start", id: 5, name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    s.handle({ kind: "command_card_waiting", id: 5, command: "rm -rf /" });
     s.handle({ kind: "decide", decision: "approve" });
     const c = s.getSnapshot().cards[0];
-    expect(c.decided).toEqual({ text: "✓ 已同意", cls: "ok" });
-    // 第 4 个参数是卡 id：app.js 要在放行决策前先给这张卡结账垫高
-    expect(onDecision).toHaveBeenCalledWith({ type: "approve" }, "✓ 已同意", "rm -rf /tmp/x", 11);
+    expect(c.decided).toMatchObject({ text: "✓ 已同意", cls: "ok" });
+    expect(onDecision).toHaveBeenCalledWith(
+      { type: "approve" }, "✓ 已同意", "rm -rf /", 5);
   });
 
-  it("审批 edit 决策：回执命令替换为编辑后命令", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "approval", id: 12, command: "ls -la", reasons: "", risk: "normal" });
-    s.handle({ kind: "decide", decision: "edit", edited: "ls -lh" });
+  it("审批决策：edit 替换命令展示编辑后命令，reject 出拒绝回执", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: 5, name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    s.handle({ kind: "command_card_waiting", id: 5, command: "rm -rf /" });
+    s.handle({ kind: "decide", decision: "edit", edited: "rm -rf /tmp/x", id: 5 });
     const c = s.getSnapshot().cards[0];
-    expect(c.command).toBe("ls -lh");
-    expect(c.decided.cls).toBe("edit");
+    expect(c.command).toBe("rm -rf /tmp/x");
+    expect(c.decided).toMatchObject({ text: "✎ 已编辑", cls: "edit" });
   });
 
-  it("快捷键：Enter 同意 / Backspace 拒绝 / E 切编辑框", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "approval", id: 13, command: "systemctl restart x", reasons: "", risk: "high" });
-    s.handle({ kind: "approval_key", key: "e" });
+  it("审批快捷键：Enter=同意、e=编辑框、Backspace=拒绝", () => {
+    const s = make();
+    s.handle({ kind: "tool_start", id: 5, name: "execute",
+               command: "rm -rf /", needs_approval: true });
+    s.handle({ kind: "command_card_waiting", id: 5, command: "rm -rf /" });
+    expect(s.handle({ kind: "approval_key", key: "e" })).toBe(true);
     expect(s.getSnapshot().cards[0].editorOpen).toBe(true);
+    s.handle({ kind: "approval_key", key: "e" });
+    expect(s.getSnapshot().cards[0].editorOpen).toBe(false);
     s.handle({ kind: "approval_key", key: "Backspace" });
+    expect(s.getSnapshot().cards[0].decided).toMatchObject({ text: "✗ 已拒绝" });
+    // 已决策卡不吃快捷键（单次决策守卫）
+    expect(s.handle({ kind: "approval_key", key: "Enter" })).toBe(false);
     expect(s.getSnapshot().cards[0].decided.text).toBe("✗ 已拒绝");
   });
 
-  it("救援：非零退出挂卡，accept 写回执并回调 app.js", () => {
-    const s = new CardsStore();
+  it("救援卡：accept 「✓ 已交给 AI」/ignore「已忽略」，多张只决最新", () => {
+    const s = make();
     const onRescue = vi.fn();
     s.onRescue = onRescue;
-    s.handle({ kind: "rescue", id: 21, line: "帮我把ll=ls -al设置永久", ec: 127,
-               output: "-bash: 帮我把ll=ls: command not found" });
-    const c = s.getSnapshot().cards[0];
-    expect(c.type).toBe("rescue");
-    expect(c.line).toBe("帮我把ll=ls -al设置永久");
-    expect(c.ec).toBe(127);
-    expect(c.decided).toBeNull();
+    s.handle({ kind: "rescue", id: 1, line: "make", ec: 2 });
+    s.handle({ kind: "rescue", id: 2, line: "make", ec: 2 });
     s.handle({ kind: "rescue_decide", accept: true });
-    const c2 = s.getSnapshot().cards[0];
-    expect(c2.decided).toEqual({ text: "✓ 已交给 AI", cls: "ok" });
-    expect(onRescue).toHaveBeenCalledWith(true);
-  });
-
-  it("救援：ignore 决策写失败回执，回调 false", () => {
-    const s = new CardsStore();
-    const onRescue = vi.fn();
-    s.onRescue = onRescue;
-    s.handle({ kind: "rescue", id: 22, line: "gti status", ec: 1, output: "" });
+    expect(s.getSnapshot().cards[1].decided).toMatchObject({ text: "✓ 已交给 AI" });
+    expect(s.getSnapshot().cards[0].decided).toBe(null);
     s.handle({ kind: "rescue_decide", accept: false });
-    const c = s.getSnapshot().cards[0];
-    expect(c.decided).toEqual({ text: "已忽略", cls: "fail" });
-    expect(onRescue).toHaveBeenCalledWith(false);
+    expect(s.getSnapshot().cards[0].decided).toMatchObject({ text: "已忽略" });
+    expect(onRescue).toHaveBeenCalledTimes(2);
   });
 
-  it("救援：多张未决卡时只决策最新一张（与审批同规则）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "rescue", id: 23, line: "foo", ec: 1 });
-    s.handle({ kind: "rescue", id: 24, line: "bar", ec: 2 });
-    s.handle({ kind: "rescue_decide", accept: true });
-    const cards = s.getSnapshot().cards;
-    expect(cards[0].decided).toBeNull();
-    expect(cards[1].decided.text).toBe("✓ 已交给 AI");
+  it("new_session：本卡回执「✓ 新会话已开启」，重复点击无效", () => {
+    const s = make();
+    const onNewSession = vi.fn();
+    s.onNewSession = onNewSession;
+    s.handle({ kind: "final", id: 1, md: "# 总结" });
+    expect(s.handle({ kind: "new_session", id: 1 })).toBe(true);
+    expect(s.getSnapshot().cards[0].newSession).toBe(true);
+    expect(onNewSession).toHaveBeenCalledWith(1);
+    expect(s.handle({ kind: "new_session", id: 1 })).toBe(false);
   });
 
-  it("clear 清空全部卡片", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 14 });
-    s.handle({ kind: "approval", id: 15, command: "x", reasons: "", risk: "high" });
+  it("clear：卡片流整体清空", () => {
+    const s = make();
+    s.handle({ kind: "ai_result", id: 1, text: "a" });
+    s.handle({ kind: "final", md: "# 总结" });
     s.handle({ kind: "clear" });
-    expect(s.getSnapshot().cards).toHaveLength(0);
+    expect(s.getSnapshot().cards).toEqual([]);
   });
 
-  it("折叠机制已删除：卡片无 collapsed 字段，toggle 是 no-op（spec §3.4/§8）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 16 });          // 分析卡（流式）
-    s.handle({ kind: "ai_collapse" });                 // 冻结 → 无活卡
-    s.handle({ kind: "ai_card", md: "结论", id: 17 });  // 独立总结卡
-    const cards = s.getSnapshot().cards;
-    expect(cards.map(c => c.type)).toEqual(["analysis", "summary"]);
-    for (const c of cards) expect(c.collapsed).toBeUndefined();
-    s.handle({ kind: "toggle", id: 16 });   // 旧事件不再有任何效果
-    s.handle({ kind: "toggle", id: 17 });
-    expect(s.getSnapshot().cards.map(c => c.collapsed))
-      .toEqual([undefined, undefined]);
-  });
-
-  it("task_start 用调用方给定 id，不再有 zone 字段", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 42 });
-    const c = s.getSnapshot().cards[0];
-    expect(c.id).toBe(42);
-    expect(c.zone).toBeUndefined();
-  });
-
-  it("ai_collapse 带 trimMd：裁掉流进分析卡的总结正文尾（防同文重复）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 18 });
-    s.handle({ kind: "ai_token", text: "先看进程。" });
-    s.handle({ kind: "ai_token", text: "# 系统资源占用总览\n\n| 项目 | 数值 |\n| --- | --- |\n| CPU | 0% |" });
-    vi.runAllTimers();
-    s.handle({ kind: "ai_collapse", trimMd: "# 系统资源占用总览\n\n| 项目 | 数值 |\n| --- | --- |\n| CPU | 0% |" });
-    const c = s.getSnapshot().cards[0];
-    expect(c.done).toBe(true);
-    expect(c.text).toBe("先看进程。");   // 叙事保留，总结尾裁掉
-    expect(c.text).not.toContain("系统资源占用总览");
-  });
-
-  it("ai_collapse trimMd 不匹配（卡不以总结文结尾）时不动正文", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 19 });
-    s.handle({ kind: "ai_token", text: "叙事与总结文无尾随关系" });
-    vi.runAllTimers();
-    s.handle({ kind: "ai_collapse", trimMd: "# 另一份总结" });
-    expect(s.getSnapshot().cards[0].text).toBe("叙事与总结文无尾随关系");
-  });
-
-  it("ai_collapse trimMd 裁前先冲 100ms 尾批（缓冲里的 token 也参与匹配）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 20 });
-    s.handle({ kind: "ai_token", text: "开头" });
-    s.handle({ kind: "ai_token", text: "# 总结正文" });   // 留在 100ms 批缓冲里
-    s.handle({ kind: "ai_collapse", trimMd: "# 总结正文" });
-    const c = s.getSnapshot().cards[0];
-    expect(c.text).toBe("开头");   // 未 runAllTimers：flushNow 先冲再裁
-  });
-
-  it("tool_start 挂工具卡（不占 _activeId），tool_end 同 id 置状态徽标", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "task_start", id: 30 });
-    s.handle({ kind: "ai_think", text: "读文件" });
-    s.handle({ kind: "ai_collapse" });                  // 分析卡定格
-    s.handle({ kind: "tool_start", id: "tool1", name: "read_file", args: "notes.txt" });
-    let cards = s.getSnapshot().cards;
-    expect(cards).toHaveLength(2);
-    expect(cards[1]).toMatchObject({ id: "tool1", type: "tool",
-      name: "read_file", args: "notes.txt", done: false, failed: false });
-    // 工具卡不占流式位：后续 token 开新分析卡，不写进工具卡
-    s.handle({ kind: "tool_end", id: "tool1" });
-    s.handle({ kind: "ai_token", text: "读到了" });     // 无 ai_collapse 不会到这，仅防御
-    vi.runAllTimers();
-    cards = s.getSnapshot().cards;
-    expect(cards[1]).toMatchObject({ id: "tool1", done: true, failed: false });
-    expect(cards[0].done).toBe(true);                    // ai_collapse 已定格分析卡
-  });
-
-  it("tool_end failed 置失败徽标；未知 id 静默", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "tool_start", id: "tool2", name: "grep", args: "pattern" });
-    s.handle({ kind: "tool_end", id: "tool2", failed: true });
-    expect(s.getSnapshot().cards[0]).toMatchObject({ done: true, failed: true });
-    s.handle({ kind: "tool_end", id: "nope" });          // 不炸不挂卡
-    expect(s.getSnapshot().cards).toHaveLength(1);
-  });
-
-  it("task_fail 把未决工具卡标失败（⏳ 不得悬挂到任务结束）", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "tool_start", id: "tool3", name: "read_file", args: "x" });
-    s.handle({ kind: "tool_start", id: "tool4", name: "ls", args: "." });
-    s.handle({ kind: "tool_end", id: "tool4" });
-    s.handle({ kind: "task_fail", reason: "error" });
-    const cards = s.getSnapshot().cards;
-    expect(cards[0]).toMatchObject({ id: "tool3", done: true, failed: true });
-    expect(cards[1]).toMatchObject({ id: "tool4", done: true, failed: false });
-  });
-
-  it("task_fail interrupt：流式未完毕卡整卡移除，已收束卡留下", () => {
-    // 用户诉求：Ctrl+C 时未渲染完毕的卡不显示半截——活流卡/在跑工具卡整卡
-    // 消失；已收束的分析卡与已完成工具卡是完整卡，保留
-    const s = new CardsStore();
-    const onDrop = vi.fn();
-    s.onDrop = onDrop;
-    s.handle({ kind: "task_start", id: 40 });
-    s.handle({ kind: "ai_think", text: "第一段" });
-    s.handle({ kind: "ai_collapse" });                  // 分析卡 40 定格（已收束）
-    s.handle({ kind: "tool_start", id: "tool5", name: "execute", args: "ls" });
-    s.handle({ kind: "tool_end", id: "tool5" });        // 工具完成（✓）
-    s.handle({ kind: "tool_start", id: "tool6", name: "execute", args: "cat x" });  // 在跑
-    s.handle({ kind: "task_start", id: 41 });           // 阶段二流式卡（未完毕）
-    s.handle({ kind: "ai_token", text: "半截" });
-    vi.runAllTimers();
-    s.handle({ kind: "task_fail", reason: "interrupt" });
-    expect(s.getSnapshot().cards.map(c => c.id)).toEqual([40, "tool5"]);
-    expect(onDrop).toHaveBeenCalledWith(expect.arrayContaining(["tool6", 41]));
-  });
-
-  it("task_fail interrupt：未决审批卡一并撤除，已决策留回执", () => {
-    const s = new CardsStore();
-    s.handle({ kind: "approval", id: 51, command: "rm x", reasons: "", risk: "high" });
-    s.handle({ kind: "decide", decision: "reject" });   // 已决策：回执长留
-    s.handle({ kind: "approval", id: 50, command: "ls", reasons: "", risk: "normal" });
-    s.handle({ kind: "task_fail", reason: "interrupt" });
-    const cards = s.getSnapshot().cards;
-    expect(cards.map(c => c.id)).toEqual([51]);          // 未决 50 撤除
-    expect(cards[0].decided.text).toBe("✗ 已拒绝");
-  });
-
-  it("sweep 移除迟到补挂的未完毕卡（tool 无 end / analysis 未收束）", () => {
-    const s = new CardsStore();
-    const onDrop = vi.fn();
-    s.onDrop = onDrop;
-    s.handle({ kind: "task_start", id: 42 });
-    s.handle({ kind: "ai_collapse" });                  // 已收束：留下
-    s.handle({ kind: "tool_start", id: "tool7", name: "execute", args: "ls" });  // 无 end
-    s.handle({ kind: "task_start", id: 43 });           // 迟到 zombie 流式卡
-    s.handle({ kind: "sweep" });
-    expect(s.getSnapshot().cards.map(c => c.id)).toEqual([42]);
-    expect(onDrop).toHaveBeenCalledWith(expect.arrayContaining(["tool7", 43]));
-  });
-
-  it("drop 按 id 撤卡并回调 onDrop", () => {
-    const s = new CardsStore();
-    const onDrop = vi.fn();
-    s.onDrop = onDrop;
-    s.handle({ kind: "tool_start", id: "tool8", name: "execute", args: "ls" });
-    s.handle({ kind: "tool_end", id: "tool8" });
-    s.handle({ kind: "drop", ids: ["tool8"] });
-    expect(s.getSnapshot().cards).toHaveLength(0);
-    expect(onDrop).toHaveBeenCalledWith(["tool8"]);
+  it("快照不可变：订阅通知与快照引用仅在变更时推进", () => {
+    const s = make();
+    const listener = vi.fn();
+    const unsub = s.subscribe(listener);
+    const snap0 = s.getSnapshot();
+    s.handle({ kind: "ai_collapse" });   // no-op 不触发订阅
+    expect(s.getSnapshot()).toBe(snap0);
+    expect(listener).not.toHaveBeenCalled();
+    s.handle({ kind: "ai_result", id: 1, text: "a" });
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(s.getSnapshot()).not.toBe(snap0);
+    unsub();
   });
 });

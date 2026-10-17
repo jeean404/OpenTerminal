@@ -29,12 +29,12 @@ test("fmtSize 档位与空值", () => {
 });
 
 test("crumbTargets 每级自带 path（回归：闭包捕获 acc 致中段回退全指向末级）", () => {
-  const t = FilePanel.prototype._crumbTargets("/home/xiaojian/ot_test_dir");
+  const t = FilePanel.prototype._crumbTargets("/home/testuser/ot_test_dir");
   assert.deepEqual(t, [
     {label: "/", path: "/"},
     {label: "home", path: "/home"},
-    {label: "xiaojian", path: "/home/xiaojian"},
-    {label: "ot_test_dir", path: "/home/xiaojian/ot_test_dir"},
+    {label: "testuser", path: "/home/testuser"},
+    {label: "ot_test_dir", path: "/home/testuser/ot_test_dir"},
   ]);
 });
 

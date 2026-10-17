@@ -222,7 +222,7 @@ def v1_backfill_and_alias():
 
 def v2_sudo_remember():
     print("\n=== V2: P1-3 sudo 记忆询问 ===")
-    host = "172.25.105.150"
+    host = "10.0.0.10"
     pw = "s3cret-sudo-v2"
     sudo_key = display_name(host, "sudo", None)
 
@@ -230,8 +230,8 @@ def v2_sudo_remember():
     _rk_del(sudo_key)
 
     s = MockSession()
-    c = _bare_core(s, open_cmds={1: "ssh pe@172.25.105.150", 2: "sudo su -"},
-                   target_host="172.25.104.182")
+    c = _bare_core(s, open_cmds={1: "ssh pe@10.0.0.10", 2: "sudo su -"},
+                   target_host="10.0.0.11")
 
     async def main():
         # 模拟 sudo 密码提示符
@@ -280,7 +280,7 @@ def v3_nested_ssh_remember():
 
     s = MockSession()
     c = _bare_core(s, open_cmds={1: f"ssh {user}@{host}"},
-                   target_host="172.25.104.182")
+                   target_host="10.0.0.11")
 
     async def main():
         # 模拟嵌套 ssh 密码提示符
@@ -468,7 +468,7 @@ def v8_expired_credential_retry():
 
     s = MockSession()
     c = _bare_core(s, open_cmds={1: f"ssh {user}@{host}"},
-                   target_host="172.25.104.182")
+                   target_host="10.0.0.11")
 
     async def main():
         # 第一次密码提示 → 自动填充（用已存的过期密码）

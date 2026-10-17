@@ -67,6 +67,7 @@ function makeSettleSession() {
   const s = Object.create(Session.prototype);
   s._dead = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._lastByteAt = 0;
   s.refreshFires = false;   // 挂载期关掉 → 工具卡落 pendingMount（静默窗形态）
   s.refreshCalls = 0;

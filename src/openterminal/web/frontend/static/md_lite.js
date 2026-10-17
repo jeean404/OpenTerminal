@@ -62,11 +62,17 @@ function isBareSectionTitle(ln) {
   return [...t].length <= 24;
 }
 
-function mdLite(src) {
+// 分块渲染（打字机逐块揭示用）：把 markdown 切成自包含块——列表整段（含
+// 开闭标签）为一块，表格一块，其余逐行一块。mdLite = mdLiteBlocks 拼接，
+// 输出逐字节不变；块高度稳定（纯 opacity 揭示，绝不 clip/限高）。
+function mdLiteBlocks(src) {
   const lines = esc(String(src == null ? "" : src)).split("\n");
   const out = [];
   let list = null;
-  const closeList = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+  let items = [];
+  const closeList = () => {
+    if (list) { out.push("<" + list + ">" + items.join("") + "</" + list + ">"); list = null; items = []; }
+  };
   for (let i = 0; i < lines.length; i++) {
     const ln = lines[i];
     // 表格：管道行且下一行是分隔行（|---|:--:|）→ 整表吞并渲染
@@ -89,14 +95,14 @@ function mdLite(src) {
     }
     let m = ln.match(/^\s*(\d+)[.)]\s+(.*)$/);
     if (m) {
-      if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
-      out.push("<li>" + mdInline(m[2]) + "</li>");
+      if (list !== "ol") { closeList(); list = "ol"; }
+      items.push("<li>" + mdInline(m[2]) + "</li>");
       continue;
     }
     m = ln.match(/^\s*[-*]\s+(.*)$/);
     if (m) {
-      if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
-      out.push("<li>" + mdInline(m[1]) + "</li>");
+      if (list !== "ul") { closeList(); list = "ul"; }
+      items.push("<li>" + mdInline(m[1]) + "</li>");
       continue;
     }
     closeList();
@@ -108,10 +114,14 @@ function mdLite(src) {
     out.push("<div class=\"mline\">" + mdInline(ln) + "</div>");
   }
   closeList();
-  return out.join("");
+  return out;
+}
+
+function mdLite(src) {
+  return mdLiteBlocks(src).join("");
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = {esc, mdInline, mdLite, stripIncompleteMarkers,
+  module.exports = {esc, mdInline, mdLite, mdLiteBlocks, stripIncompleteMarkers,
                     isBareSectionTitle, _splitRow, _renderTable, isPipeRow};
 }

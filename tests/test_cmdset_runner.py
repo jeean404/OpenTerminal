@@ -168,7 +168,7 @@ async def test_cmdset_pause_on_unanswered_prompt_resumes_after_input(monkeypatch
     w, sink = await _make_worker(monkeypatch, session=sess,
                                  commands=["sudo su -", "cd /tmp"])
     await asyncio.sleep(0.05)
-    sess.push(b"sudo su -\r\n[sudo] password for xiaojian: ")
+    sess.push(b"sudo su -\r\n[sudo] password for testuser: ")
     # 暂停事件出现,且 cd /tmp 不被抢跑塞进密码提示
     msgs = await _wait_json(sink, lambda m: any(
         x.get("type") == "cmdset" and x.get("state") == "paused" for x in m),
@@ -176,7 +176,7 @@ async def test_cmdset_pause_on_unanswered_prompt_resumes_after_input(monkeypatch
     await asyncio.sleep(0.2)
     assert ("raw", b"cd /tmp\r") not in sess.calls
     # 模拟用户在终端输完密码(sudo 通过,提示消失,回到 root 提示符)
-    sess.push(b"\r\n[root@VM-0-11-centos ~]# ")
+    sess.push(b"\r\n[root@test-host ~]# ")
     await _wait(lambda: ("raw", b"cd /tmp\r") in sess.calls, timeout=5)
 
 
@@ -191,7 +191,7 @@ async def test_cmdset_resume_button_forces_continue(monkeypatch):
     w, sink = await _make_worker(monkeypatch, session=sess,
                                  commands=["sudo su -", "cd /tmp"])
     await asyncio.sleep(0.05)
-    sess.push(b"sudo su -\r\n[sudo] password for xiaojian: ")
+    sess.push(b"sudo su -\r\n[sudo] password for testuser: ")
     await _wait_json(sink, lambda m: any(
         x.get("type") == "cmdset" and x.get("state") == "paused" for x in m),
         timeout=3)
@@ -386,10 +386,10 @@ def test_cs_prompt_identity_falls_back_to_router_prompt():
 
 def test_cs_prompt_identity_prefers_tail_over_router_prompt():
     """尾窗有内容就以末个非空行为准（比 _cur_prompt 新鲜）。"""
-    tail = ("[xiaojian@VM-0-11-centos ~]$ " + chr(13) + chr(10)).encode()
+    tail = ("[testuser@test-host ~]$ " + chr(13) + chr(10)).encode()
     c = _bare_core(_cs_tail=bytearray(tail),
                    _cur_prompt="[ubuntu@VM-0-5-ubuntu ~]$ ")
-    assert c.cs._cs_prompt_identity() == "xiaojian@VM-0-11-centos"
+    assert c.cs._cs_prompt_identity() == "testuser@test-host"
 
 
 def test_cs_prompt_identity_no_fallback_when_tail_has_output():

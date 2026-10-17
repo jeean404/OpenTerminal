@@ -26,7 +26,10 @@ function blankRun(buf, startLine, limit) {
   while (startLine + n < end) {
     const line = buf.getLine(startLine + n);
     const s = line ? line.translateToString(true) : "";
-    if (s && s.trim()) break;
+    // pad 自身回显行（__ot_pad N）与垫行注入的提示符行（PS ...>/#/$）不打断
+    // 空白 run：hook 清显/量高竞态下残留——数进去等于把卡夹到 1 行
+    // （真机「卡片乱七八糟」根因：垫行落在提示符下方，提示符行截断空白）
+    if (s && s.trim() && !/__ot_pad/.test(s) && !/[>$#%]\s*$/.test(s.trim())) break;
     n++;
   }
   return n;

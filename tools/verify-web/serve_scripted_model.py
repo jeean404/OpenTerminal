@@ -59,16 +59,16 @@ SCENARIOS = {
         "calls": [
             ("execute", {"command": "uname -a && df -h"}),
         ],
-        "final": "## 巡检结论\\n\\n"
-                 "目标机巡检完成，磁盘与内核信息如下。\\n\\n"
-                 "| 项目 | 值 | 状态 | 说明 |\\n"
-                 "| --- | --- | --- | --- |\\n" +
-                 "\\n".join(
+        "final": "## 巡检结论\n\n"
+                 "目标机巡检完成，磁盘与内核信息如下。\n\n"
+                 "| 项目 | 值 | 状态 | 说明 |\n"
+                 "| --- | --- | --- | --- |\n" +
+                 "\n".join(
                      f"| 检查项 {i} | 值 {i} | 正常 | 第 {i} 行占位，"
                      f"让总结卡足够高以复现收束期补差链 |" for i in range(1, 25)) +
-                 "\\n\\n### 建议\\n\\n"
-                 "1. 磁盘水位正常，无需扩容。\\n"
-                 "2. 内核版本可接受。\\n"
+                 "\n\n### 建议\n\n"
+                 "1. 磁盘水位正常，无需扩容。\n"
+                 "2. 内核版本可接受。\n"
                  "3. 继续保持每周巡检。",
     },
     # 复现「下载远端文件到本机」现场（2026-10-11 write_file ×失败）：
@@ -81,6 +81,45 @@ SCENARIOS = {
                                         "\necho \"opentrimnal\"\n"})],
         ],
         "final": "已下载到本机：Downloads/smoke_print.sh（真实路径见下）。",
+    },
+    # ---- 用户两条预期的真机场景（verify-user-expect.cjs）----
+    # think+intro 在工具轮前出分析卡（打字机/流式观感）；命令按 policy 分级
+    # 凑出 免审/需审(normal)/需审(high) 三态。
+    "分析": {
+        "think": "用户想核对环境，先给出分析再执行只读命令。",
+        "intro": "我先分析一下当前的执行环境。\n\n"
+                 "从会话上下文看，目标机是本地 PowerShell 会话。\n\n"
+                 "### 初步判断\n\n"
+                 "- 终端会话正常，可以下发命令\n"
+                 "- 只读查询不需要审批\n\n"
+                 "下面执行一条只读命令确认。",
+        "calls": [("execute", {"command": "echo auto-ok"})],
+        "final": "分析完成：环境正常，只读命令已执行。",
+    },
+    "免审": {
+        "calls": [("execute", {"command": "echo auto-ok"})],
+        "final": "免审命令执行完毕。",
+    },
+    "批准": {
+        "calls": [("execute", {"command": "echo approve-run > $env:TEMP/ot-u1.txt"})],
+        "final": "已按批准执行写入。",
+    },
+    "拒绝": {
+        "calls": [("execute", {"command": "echo reject-run > $env:TEMP/ot-u2.txt"})],
+        "final": "该命令已被用户拒绝，未执行。",
+    },
+    "改令": {
+        "calls": [("execute", {"command": "echo edit-orig > $env:TEMP/ot-u3.txt"})],
+        "final": "已按编辑后的命令执行。",
+    },
+    "放行": {
+        "calls": [("execute", {"command": "echo allow-run > $env:TEMP/ot-u4.txt"})],
+        "final": "已按始终允许执行。",
+    },
+    "高危": {
+        "calls": [("execute", {"command":
+                               "Remove-Item $env:TEMP/ot-vh-target.txt -Force"})],
+        "final": "高危命令处理完毕。",
     },
 }
 _DEFAULT = SCENARIOS["单个"]
@@ -108,7 +147,14 @@ class ScriptedFlowModel(FakeModel):
         msg = self._reply(list(messages))
         mid = msg.id or ("ai-" + uuid.uuid4().hex[:8])
         calls = list(getattr(msg, "tool_calls", []) or [])
-        text = msg.content if isinstance(msg.content, str) else str(msg.content or "")
+        content = msg.content
+        if isinstance(content, list):
+            # 块列表（thinking/text 混排）：整条单 chunk 投递，
+            # runner._split_content 会拆出 think/token 两路
+            yield ChatGenerationChunk(message=AIMessageChunk(
+                content=content, tool_calls=calls, id=mid))
+            return
+        text = content if isinstance(content, str) else str(content or "")
         if not text:
             yield ChatGenerationChunk(message=AIMessageChunk(
                 content="", tool_calls=calls, id=mid))
@@ -120,7 +166,7 @@ class ScriptedFlowModel(FakeModel):
                 continue
             yield ChatGenerationChunk(message=AIMessageChunk(
                 content=chunk,
-                tool_calls=(calls if i == 0 else None),
+                tool_calls=(calls if i == 0 else []),
                 id=mid if i == 0 else mid + "-" + str(i)))
 
     def _reply(self, msgs):
@@ -152,7 +198,20 @@ class ScriptedFlowModel(FakeModel):
              "type": "tool_call"}
             for n, a in sc["calls"]
         ]
-        return AIMessage(content="", id=mid, tool_calls=calls)
+        return AIMessage(content=_intro_content(sc), id=mid, tool_calls=calls)
+
+
+def _intro_content(sc: dict):
+    """工具轮的正文/思考：think+intro 组成块列表（runner._split_content 拆），
+    仅 intro 时给纯字符串，都没有则空串（老场景行为不变）。"""
+    think = (sc.get("think") or "").strip()
+    intro = (sc.get("intro") or "").strip()
+    if think and intro:
+        return [{"type": "thinking", "thinking": think},
+                {"type": "text", "text": intro}]
+    if think:
+        return [{"type": "thinking", "thinking": think}]
+    return intro
 
 
 def _scenario_for(text: str) -> dict:

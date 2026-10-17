@@ -1,4 +1,8 @@
-"""配置加载：~/.openterminal/config.toml + 默认值。"""
+"""配置加载：.env（项目 > ~/.openterminal/.env）+ config.toml + 默认值。
+
+模型协议由 .env 的 ANTHROPIC_* / OPENAI_* 二选一决定（都配=报错，都没配=报错）；
+config.toml 只管 shell/policy/web/targets 与模型名（credentials 以 .env 为准）。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,70 @@ def app_dir() -> Path:
     return Path(
         os.environ.get("OPENTERMINAL_HOME", str(Path.home() / ".openterminal"))
     )
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """极简 .env 解析：KEY=VALUE 行、# 注释、可选引号。脏行跳过不打挂。"""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            out[key] = val
+    return out
+
+
+def load_env() -> dict[str, str]:
+    """合并 .env：项目 .env（cwd）优先 > ~/.openterminal/.env > 系统环境变量。
+
+    「当前项目 .env 优先级最高」（用户约定）：同名键项目覆盖家目录、家目录
+    覆盖系统环境。只读不动 os.environ——副作用留给调用方决定。
+    """
+    merged: dict[str, str] = {}
+    home_env = app_dir() / ".env"
+    for k, v in _parse_env_file(home_env).items():
+        merged[k] = v
+    project_env = Path.cwd() / ".env"
+    for k, v in _parse_env_file(project_env).items():
+        merged[k] = v
+    return merged
+
+
+def model_from_env(env: dict[str, str]) -> tuple[dict, list[str]]:
+    """按 ANTHROPIC_*/OPENAI_* 二选一定协议。返回 (model 字段覆盖, 错误列表)。
+
+    - 两套都配 → 报错（只能配一个）；都不配 → 报错（红色警告卡素材）；
+    - 配了哪套走哪套协议：base_url + api_key 成对才算「配了」。
+    """
+    ant = ("ANTHROPIC_BASE_URL" in env and "ANTHROPIC_API_KEY" in env)
+    oai = ("OPENAI_BASE_URL" in env and "OPENAI_API_KEY" in env)
+    if ant and oai:
+        return {}, ["模型协议冲突：ANTHROPIC_* 与 OPENAI_* 同时配置，只能配一个"]
+    if ant:
+        return {"provider": "anthropic",
+                "base_url": env["ANTHROPIC_BASE_URL"],
+                "api_key": env["ANTHROPIC_API_KEY"],
+                "model": env.get("ANTHROPIC_MODEL") or env.get("MODEL_ID", "")}, []
+    if oai:
+        return {"provider": "openai",
+                "base_url": env["OPENAI_BASE_URL"],
+                "api_key": env["OPENAI_API_KEY"],
+                "model": env.get("OPENAI_MODEL") or env.get("MODEL_ID", "")}, []
+    return {}, ["未配置模型协议：请在项目 .env 或 ~/.openterminal/.env 配置 "
+                "ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY 或 "
+                "OPENAI_BASE_URL+OPENAI_API_KEY"]
 
 
 _DEFAULT_MODELS = [
@@ -32,6 +100,8 @@ class ModelConfig:
     base_url: str = "http://127.0.0.1:15721"
     model: str = "claude-sonnet-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"
+    # .env 直配的密钥（优先于 api_key_env 间接寻址）；None=走环境变量
+    api_key: str | None = None
     # Web 状态栏模型下拉的可选模型（可在 config.toml [model] models 覆盖）
     models: list[str] = field(default_factory=lambda: list(_DEFAULT_MODELS))
 
@@ -77,6 +147,8 @@ class Config:
     targets: dict[str, TargetConfig] = field(
         default_factory=lambda: {"default": TargetConfig()}
     )
+    # 启动期配置错误（协议二选一冲突/都缺）：Web 端出红色警告卡展示
+    errors: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -87,6 +159,13 @@ class Config:
 
         m, s, p = data.get("model", {}), data.get("shell", {}), data.get("policy", {})
         w = data.get("web", {})
+        # 模型协议以 .env 为准（项目 .env > ~/.openterminal/.env > 系统环境）；
+        # config.toml [model] 只兜底模型名/下拉列表，credentials 不再从它取
+        env = load_env()
+        env_model, env_errors = model_from_env(env)
+        for k, v in env.items():
+            if k.endswith("_API_KEY") and v:
+                os.environ.setdefault(k, v)   # api_key_env 间接寻址要用
         # 协议 provider：anthropic（缺省）| openai（OpenAI 兼容协议）。脏值容错：
         # 未知值回落 anthropic，与 port 写坏只丢字段同一哲学——配置手误不
         # 打挂启动。provider 决定 base_url / model / api_key_env / models 的
@@ -126,16 +205,19 @@ class Config:
             )
         return cls(
             model=ModelConfig(
-                provider=provider,
-                base_url=m.get("base_url", "" if openai else ModelConfig.base_url),
-                model=m.get("model",
-                            _DEFAULT_MODEL_OPENAI if openai else ModelConfig.model),
+                provider=env_model.get("provider", provider),
+                base_url=env_model.get("base_url") or m.get(
+                    "base_url", "" if openai else ModelConfig.base_url),
+                model=env_model.get("model") or m.get(
+                    "model", _DEFAULT_MODEL_OPENAI if openai else ModelConfig.model),
                 api_key_env=m.get(
                     "api_key_env",
-                    "OPENAI_API_KEY" if openai else ModelConfig.api_key_env),
+                    ("OPENAI_API_KEY" if env_model.get("provider") == "openai"
+                     or openai else ModelConfig.api_key_env)),
                 models=list(m.get(
                     "models",
                     _DEFAULT_MODELS_OPENAI if openai else _DEFAULT_MODELS)),
+                api_key=env_model.get("api_key"),
             ),
             shell=ShellConfig(
                 timeout_default=int(s.get("timeout_default", 120)),
@@ -154,4 +236,5 @@ class Config:
                 token=w.get("token", WebConfig.token),
             ),
             targets=targets,
+            errors=env_errors,
         )

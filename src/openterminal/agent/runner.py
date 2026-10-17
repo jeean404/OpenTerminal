@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from .token_est import count_tokens
+from ..core.messages import _dbg
 
 # 任务卡死兜底（astream 自身无超时）：静默到点即中止任务并给前端 error 收尾，
 # 否则「AI 正在思考」永久不收。两档：无在途工具=模型挂起；有=工具没回。
@@ -50,6 +51,24 @@ def _tool_args_summary(name: str, args: dict) -> str:
     return next((v[:120] for v in args.values() if isinstance(v, str) and v), "")
 
 
+class _ToolClaimIndex:
+    """(name, command) → 有序 seq 队列：审批认领表。
+
+    HITL 的 ActionRequest 不带 tool_call id，无法直接对回工具宣告；
+    同串并行命令（模型一轮发两条同命令）按宣告序消歧——审批按进队序
+    配对到工具卡，不许错位。"""
+
+    def __init__(self) -> None:
+        self._q: dict[tuple[str, str], list[int]] = {}
+
+    def register(self, name: str, command: str, seq: int) -> None:
+        self._q.setdefault((name, command), []).append(seq)
+
+    def claim(self, name: str, command: str) -> int | None:
+        q = self._q.get((name, command))
+        return q.pop(0) if q else None
+
+
 class TaskRunner:
     """一次用户任务的执行器：处理流式事件、中断暴露、resume 与轮次预算。"""
 
@@ -66,6 +85,7 @@ class TaskRunner:
         # 非 execute 工具的 start/end 配对记账（前端工具调用小卡）
         self._tool_seq = 0
         self._pending_tools: dict[str, tuple[int, str]] = {}
+        self._claims = _ToolClaimIndex()   # 审批认领表（(name,command)→seq 序列）
         self._tool_seen: set[str] = set()   # 已宣告 tool_call_id（只增不减）
         self.input_tokens = 0    # 本次任务的累计输入 token（usage_metadata）
         self.output_tokens = 0   # 本次任务的累计输出 token
@@ -76,6 +96,10 @@ class TaskRunner:
         self._est_in: list[str] = []
         self._est_out: list[str] = []
         self._last_progress = time.monotonic()   # 最近一次流片段(静默判据)
+
+    def claim_seq(self, name: str, command: str) -> int | None:
+        """审批认领：(name, command) 按进队序弹出 tool_start 序号（无卡=None）。"""
+        return self._claims.claim(name, command)
 
     def _add(self, events: list[TaskEvent], ev: TaskEvent) -> None:
         """live 事件：收集进返回列表的同时实时投递给展示层。"""
@@ -107,6 +131,7 @@ class TaskRunner:
         run_cfg = {**self.cfg, "recursion_limit": self.max_tool_turns * 2 + 4}
         self._last_progress = time.monotonic()
         q: asyncio.Queue = asyncio.Queue()
+        _dbg("drive: astream start")
 
         async def _pump_stream() -> None:
             try:
@@ -176,7 +201,9 @@ class TaskRunner:
             feeder.cancel()
         self._flush_est()
 
+        _dbg("drive: astream done, querying state")
         state = await self.agent.aget_state(self.cfg)
+        _dbg("drive: state queried")
         for task in state.tasks:
             if task.interrupts:
                 self.interrupt_payload = task.interrupts[0].value
@@ -248,14 +275,20 @@ class TaskRunner:
                     ))
                     self._tool_seq += 1
                     self._pending_tools[tc["id"]] = (self._tool_seq, "execute")
+                    self._claims.register("execute", tc["args"].get("command", ""),
+                                          self._tool_seq)
                     self._add(events, TaskEvent(
                         "tool_start", name="execute",
+                        # 完整 command（不截）：审批关联按串匹配，截 120 字符
+                        # 会让长命令断链（text 仍是 120 字符展示摘要）
+                        command=tc["args"].get("command", ""),
                         text=tc["args"].get("command", "")[:120],
                         index=self._tool_seq,
                     ))
                 else:
                     self._tool_seq += 1
                     self._pending_tools[tc["id"]] = (self._tool_seq, tc["name"])
+                    self._claims.register(tc["name"], "", self._tool_seq)
                     self._add(events, TaskEvent(
                         "tool_start", name=tc["name"],
                         text=_tool_args_summary(tc["name"], tc.get("args", {})),

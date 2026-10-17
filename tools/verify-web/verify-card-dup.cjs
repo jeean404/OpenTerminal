@@ -2,7 +2,7 @@
 // 拓扑：docker ot-repro（ubuntu@127.0.0.1:2222，bash，pad 几何正常）+
 // 脚本化模型（serve_scripted_model.py，模型边界可复现；core/HITL/WS/卡片层/
 // PTY 全真实）；--real 走 15721 网关真模型。
-//   S1 并行 2 execute → 恰 2 张工具卡 + 2 张审批卡（逐个确认）→ 放行 →
+//   S1 并行 2 execute → 恰 2 张命令卡（含审批 UI，逐个确认）→ 放行 →
 //      输出后不长新卡 → 原卡原位徽标 → 总结后卡都还在（带徽标）
 //   S2 单工具 → 1 张工具卡、徽标原位
 //   S3 edit 决策 → 不长新卡；编辑后命令执行、原命令不执行；徽标在原卡
@@ -194,22 +194,28 @@ function eventSummary(ev) {
 }
 
 // ---- 页面探针 ----
+// Phase 2 后卡片模型：execute = 命令卡（.cmdcard，工具+审批二合一），
+// 其他工具仍是 .tcard；审批 UI 是命令卡内按钮簇（.cmdacts），没有独立审批卡。
+// "aps" 保留为「带审批 UI 的命令卡」视图，供审批等待/决策断言复用。
 const probe = page => page.evaluate(() => {
-  // 工具卡 .tcard；审批卡 .acard.aprobe:not(.tcard)（含已决策：问句换成徽标）；
-  // 总结卡 .scard（不是 .acard！）
-  const tools = Array.from(document.querySelectorAll(".tcard")).map(x => ({
+  // 工具卡 .tcard + 命令卡 .cmdcard；总结卡 .scard（不是 .acard！）
+  const tools = Array.from(document.querySelectorAll(".tcard, .cmdcard")).map(x => ({
     text: (x.innerText || "").replace(/\s+/g, " ").slice(0, 160),
     args: ((x.querySelector(".apcode") || {}).innerText || "").replace(/\s+/g, " ").trim(),
     badge: ((x.querySelector(".apstate") || {}).innerText || "").replace(/\s+/g, " ").trim(),
   }));
-  const aps = Array.from(document.querySelectorAll(".acard.aprobe:not(.tcard)")).map(x => {
-    const head = ((x.querySelector(".aphead") || {}).innerText || "");
-    if (!/是否同意|已同意|已编辑|已拒绝/.test(head)) return null;   // 救援卡等排除
+  const aps = Array.from(document.querySelectorAll(".cmdcard")).map(x => {
+    if (!x.querySelector(".cmdacts")) return null;   // 无操作行 = 无审批（needsApproval 假）
+    const state = ((x.querySelector(".apstate") || {}).innerText || "").replace(/\s+/g, " ").trim();
+    const receipt = ((x.querySelector(".apreceipt") || {}).innerText || "").replace(/\s+/g, " ").trim();
+    // 已决 = 回执有字，或状态行已落到终态（✓完成/✗失败/✗已拒绝——审批不至直通）
+    const decided = !!receipt || /✓|✗|已同意|已始终允许|已编辑|已拒绝/.test(state);
     return {
-      head: head.replace(/\s+/g, " ").slice(0, 120),
-      decided: !!x.querySelector(".apstate"),
-      state: ((x.querySelector(".apstate") || {}).innerText || "").replace(/\s+/g, " ").trim(),
+      head: state.slice(0, 120),
+      decided,
+      state: state || receipt,
       cmd: ((x.querySelector(".apcode") || {}).innerText || "").replace(/\s+/g, " ").trim(),
+      live: !!x.querySelector(".cmdacts button.primary"),
     };
   }).filter(Boolean);
   const think = document.querySelector('[id^="think-"]');
@@ -391,9 +397,12 @@ const waitNoUndecided = (page, timeout = 60000) =>
 async function clickApproveOnce(page) {
   return page.evaluate(() => {
     const txt = x => (x.innerText || "").replace(/\s+/g, "");
-    const heads = Array.from(document.querySelectorAll(".acard.aprobe:not(.tcard)"))
-      .filter(card => /是否同意/.test((card.querySelector(".aphead") || {}).innerText || ""))
-      .filter(card => !card.querySelector(".apstate"));
+    // Phase 2：命令卡操作行里的「执行」按钮（armed 后才渲染）
+    const heads = Array.from(document.querySelectorAll(".cmdcard"))
+      .filter(card => card.querySelector(".cmdacts button.primary"))
+      .filter(card => !/已同意|已编辑|已拒绝|✓|✗/.test(
+        ((card.querySelector(".apreceipt") || {}).innerText || "") +
+        ((card.querySelector(".apstate") || {}).innerText || "")));
     const head = heads[0];
     if (!head) return "none";
     const btns = Array.from(head.querySelectorAll("button"));
@@ -428,9 +437,8 @@ async function approveAll(page, want, needles, timeout = 60000) {
 async function editAndSave(page, newCmd) {
   const opened = await page.evaluate(() => {
     const txt = x => (x.innerText || "").replace(/\s+/g, "");
-    const heads = Array.from(document.querySelectorAll(".acard.aprobe:not(.tcard)"))
-      .filter(card => /是否同意/.test((card.querySelector(".aphead") || {}).innerText || ""))
-      .filter(card => !card.querySelector(".apstate"));
+    const heads = Array.from(document.querySelectorAll(".cmdcard"))
+      .filter(card => card.querySelector(".cmdacts button.primary"));
     const head = heads[0];
     if (!head) return "no-approval";
     const b = Array.from(head.querySelectorAll("button"))
@@ -552,17 +560,17 @@ async function runS1(page) {
   await say(page, "并行执行文件写入测试");
   const t1 = await waitTools(page, "ot-cc-aa", 1, 30000);
   const t2 = await waitTools(page, "ot-cc-bb", 1, 15000);
-  record("S1-1 两工具卡各自宣告一次", t1.ok && t2.ok,
+  record("S1-1 两命令卡各自宣告一次", t1.ok && t2.ok,
     `aa=${t1.ok ? 1 : (t1.last || {}).n} bb=${t2.ok ? 1 : (t2.last || {}).n}`);
   // 审批是**逐个确认**（core 串行 ask_approval，状态栏明示）：同一时刻只有
   // 1 张未决卡；「累计 2 张」在放行后成立（S1-7 验），这里只验首张及时出现
   const apr = await waitApprovalsFor(page, ["ot-cc-aa", "ot-cc-bb"], 1, 30000);
-  record("S1-2 首张审批卡出现（逐个确认）", apr.ok,
+  record("S1-2 首张命令卡审批出现（逐个确认）", apr.ok,
     apr.ok ? "已见 " + apr.total + " 张（总数到 2 由 S1-7 验）"
-           : "30s 内没有审批卡");
+           : "30s 内没有待审批命令卡");
   let p = await probe(page);
-  record("S1-3 宣告期恰 2 张工具卡（无第 3 张）", p.tools.length === 2,
-    "工具卡数=" + p.tools.length + " " + JSON.stringify(p.tools.map(t => t.args)));
+  record("S1-3 宣告期恰 2 张命令卡（无第 3 张）", p.tools.length === 2,
+    "命令卡数=" + p.tools.length + " " + JSON.stringify(p.tools.map(t => t.args)));
   await shot(page, "s1-a-announce");
 
   const acts = await approveAll(page, 2, ["ot-cc-aa", "ot-cc-bb"]);
@@ -588,7 +596,7 @@ async function runS1(page) {
     "工具卡数=" + p.tools.length + " 场景卡=" + s1Tools.length);
   record("S1-6 原卡原位收徽标", s1Tools.length === 2 && s1Tools.every(t => /✓|✗/.test(t.badge)),
     JSON.stringify(s1Tools.map(t => ({ cmd: t.args, badge: t.badge }))));
-  record("S1-7 审批卡原位决策", p.aps.length === 2 && p.aps.every(a => a.decided),
+  record("S1-7 命令卡审批原位决策（二合一：无独立审批卡）", p.aps.length === 2 && p.aps.every(a => a.decided),
     JSON.stringify(p.aps.map(a => a.state)));
   await shot(page, "s1-b-badges");
 

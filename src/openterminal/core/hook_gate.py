@@ -259,7 +259,7 @@ class HookGate:
         TMOUT 自动登出、exit、logout 都不发任何标记，_hook_gone 的两个入口全
         够不着，而死壳留下的 _last_mark_at 会让 _inner_ssh_prompt_live 继续
         放行健康路径——补发的 \r 把自然语言整行送进落回来的裸壳执行（真机
-        跳板机 → xiaojian → sudo su - root → TMOUT 掉回 → 再 sudo su - 后
+        跳板机 → testuser → sudo su - root → TMOUT 掉回 → 再 sudo su - 后
         「输入自然语言就不行了」= -bash: 执行: command not found）。
         由回车看门狗置位，任一标记到达即撤销。"""
         return (self.core._interactive and not self.core._hook_gone

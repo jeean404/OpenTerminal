@@ -52,7 +52,12 @@ function makeApprovalSession(slot) {
   s._dead = false;
   s.tabId = "t1";
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._cardSeq = 0;
+  // 后端 tool_card_seq → 前端卡 id（showApproval 反查命令卡）；看门狗读 _slots
+  s._toolCards.set(1, 1);
+  s._toolCards.set(2, 2);
+  if (slot) { s._slots.set(1, slot); s._slots.set(2, slot); }
   s._taskCardId = null;      // 无活分析卡：跳过定格分支（真机事故形态）
   s._taskActive = true;
   s._approvalOpen = false;
@@ -76,12 +81,37 @@ function makeApprovalSession(slot) {
 
 const settle = ms => new Promise(r => setTimeout(r, ms));
 
+// 可点按钮几何桩：看门狗（持续型）直接查 DOM——「执行」按钮须在卡盒可视区内
+// （getBoundingClientRect 上下沿都落在 host 内）才算用户点得到。
+// clip=true 模拟「按钮被夹出卡盒」（裁切/钉死过矮）。
+function makeHost({clip = false, hasButton = true} = {}) {
+  const hostBox = {top: 100, bottom: 160, left: 0, right: 400, height: 60, width: 400};
+  const btnBox = clip
+    ? {top: 155, bottom: 215, left: 0, right: 80, height: 60, width: 80}
+    : {top: 130, bottom: 158, left: 0, right: 80, height: 28, width: 80};
+  const btn = {getBoundingClientRect: () => btnBox};
+  return {
+    isConnected: true,
+    style: {},
+    scrollHeight: 60,
+    getBoundingClientRect: () => hostBox,
+    querySelector: sel =>
+      (hasButton && sel === ".cmdacts button.primary") ? btn : null,
+  };
+}
+
+// 收尾：停掉持续巡检（生产里由决策/换令/关页自然退出；测试结束必须主动停，
+// 否则 200ms 轮询拖住事件循环）
+const stopWatch = s => { s._approvalResolved = true; };
+
 test("审批到达：_approvalOpen 置位 + 思考徽标换「等待审批」文案", async () => {
-  const {s, els} = makeApprovalSession({mounted: true, pinnedRows: null});
-  s.showApproval("rm -rf /tmp/x", "高危命令需要审批", "h", "high");
+  const {s, els} = makeApprovalSession(
+    {mounted: true, pinnedRows: null, host: makeHost()});
+  s.showApproval("rm -rf /tmp/x", "高危命令需要审批", "h", "high", 1);
   await settle(30);
+  // Phase 2：审批不再自挂卡，就地武装命令卡按钮（command_card_waiting）
   assert.deepStrictEqual(s.handled, [{
-    kind: "approval", id: 1, command: "rm -rf /tmp/x",
+    kind: "command_card_waiting", id: 1, command: "rm -rf /tmp/x",
     reasons: "高危命令需要审批", risk: "high",
   }]);
   assert.strictEqual(s._approvalOpen, true);
@@ -91,39 +121,88 @@ test("审批到达：_approvalOpen 置位 + 思考徽标换「等待审批」文
     "等审批期间不得照转「AI 正在思考」（真机假死无人知晓在等决策）");
   assert.match(badge.title, /Ctrl\+Enter/);
   assert.strictEqual(s.modals.length, 0, "卡可点时不得弹模态");
+  stopWatch(s);
 });
 
-test("看门狗：卡未 mounted/被夹紧 → grace 后 void 终端卡 + 模态接管", async () => {
-  const slot = {mounted: false, pinnedRows: 1};   // 静默期 pendingMount 形态
+test("看门狗：卡未 mounted/按钮缺位 → grace 后 disarm 命令卡 + 模态接管", async () => {
+  const slot = {mounted: false, pinnedRows: 1, host: makeHost({hasButton: false})};
   const {s} = makeApprovalSession(slot);
-  s.showApproval("rm -rf /tmp/y", "r", "h", "high");
+  s.showApproval("rm -rf /tmp/y", "r", "h", "high", 1);
   await settle(30);
   assert.strictEqual(s.modals.length, 0, "grace 内不得提前转模态");
   await settle(250);
   assert.deepStrictEqual(s.handled.slice(1), [{kind: "approval_void", id: 1}],
-    "终端卡应被 void（键盘路径随之无未决卡，防双决策）");
-  assert.deepStrictEqual(s.discards, [slot], "slot 应整体拆掉");
+    "命令卡应被 disarm（键盘路径随之无 armed 卡，防双决策）");
+  assert.strictEqual(s.discards.length, 0,
+    "disarm 不删卡：二合一卡的工具记录必须留屏");
   assert.deepStrictEqual(s.modals, ["rm -rf /tmp/y"], "模态应接管收决策");
+  stopWatch(s);
 });
 
-test("看门狗：fund 到位（mounted 且未夹紧）不转模态", async () => {
-  const {s} = makeApprovalSession({mounted: true, pinnedRows: null});
-  s.showApproval("rm -rf /tmp/z", "r", "h", "high");
+test("看门狗：按钮被夹出卡盒（持续失点）→ 转模态兜底", async () => {
+  // 出生可点 → resize/晚垫把按钮裁出可视区：一次采样放行的旧看门狗会漏掉
+  const host = makeHost();
+  const slot = {mounted: true, pinnedRows: null, host};
+  const {s} = makeApprovalSession(slot);
+  s.showApproval("rm -rf /tmp/clip", "r", "h", "high", 1);
+  await settle(50);
+  assert.strictEqual(s.modals.length, 0, "可点期不得弹模态");
+  // 按钮被裁出盒外（几何翻转）
+  host.querySelector = sel =>
+    (sel === ".cmdacts button.primary"
+      ? {getBoundingClientRect: () => ({top: 155, bottom: 215, height: 60})}
+      : null);
+  await settle(1400);   // 连续失点阈值（5 × 200ms）+ 裕量
+  assert.deepStrictEqual(s.modals, ["rm -rf /tmp/clip"],
+    "持续失点必须转模态——按钮不可点＝决策死锁（红线⑨）");
+  stopWatch(s);
+});
+
+test("看门狗：fund 到位（按钮在盒内）不转模态", async () => {
+  const {s} = makeApprovalSession(
+    {mounted: true, pinnedRows: null, host: makeHost()});
+  s.showApproval("rm -rf /tmp/z", "r", "h", "high", 1);
   await settle(300);
   assert.strictEqual(s.modals.length, 0);
   assert.strictEqual(s.discards.length, 0);
   assert.ok(!s.handled.some(e => e.kind === "approval_void"));
+  stopWatch(s);
 });
 
-test("attach 补发去重：同命令未决期间二次 approval 不叠第二张卡", async () => {
+test("看门狗：钉死但按钮仍在盒内（_floorRows 保底）不转模态", async () => {
+  // 钉死 ≠ 不可点：_floorRows 把钉死高抬到按钮行底后，按钮仍在盒内——
+  // 判定只认「按钮真实可见可点」，不看 pinnedRows（旧判定会误杀）
+  const {s} = makeApprovalSession(
+    {mounted: true, pinnedRows: 3, host: makeHost()});
+  s.showApproval("rm -rf /tmp/pin", "r", "h", "high", 1);
+  await settle(300);
+  assert.strictEqual(s.modals.length, 0, "按钮点得到就不许转模态");
+  assert.ok(!s.handled.some(e => e.kind === "approval_void"));
+  stopWatch(s);
+});
+
+test("attach 补发去重：同卡同令未决期间二次 approval 不二次武装", async () => {
   const {s} = makeApprovalSession({mounted: true, pinnedRows: null});
-  s.showApproval("rm -rf /tmp/d", "r", "h", "high");
+  s.showApproval("rm -rf /tmp/d", "r", "h", "high", 1);
   await settle(30);
-  s.showApproval("rm -rf /tmp/d", "r", "h", "high");   // WS 重挂补发同帧
+  s.showApproval("rm -rf /tmp/d", "r", "h", "high", 1);   // WS 重挂补发同帧
   await settle(30);
   assert.strictEqual(
-    s.handled.filter(e => e.kind === "approval").length, 1,
-    "同命令补发不得叠第二张未决卡");
+    s.handled.filter(e => e.kind === "command_card_waiting").length, 1,
+    "同卡同令补发不得二次武装");
+});
+
+// 去重键必须是 (卡 id, 命令串) 整键：旧全局命令串去重会把并行的同串命令
+// 第二条当重发挡掉，第二张卡永远等不到按钮＝死锁。
+test("去重键 (卡 id,命令)：同串并行命令不互挡", async () => {
+  const {s} = makeApprovalSession({mounted: true, pinnedRows: null});
+  s.showApproval("rm -rf /tmp/d", "r", "h", "high", 1);
+  await settle(30);
+  s.showApproval("rm -rf /tmp/d", "r", "h", "high", 2);   // 并行同串的第二条
+  await settle(30);
+  assert.strictEqual(
+    s.handled.filter(e => e.kind === "command_card_waiting").length, 2,
+    "同串不同卡必须各自武装（被挡＝第二张卡死锁）");
 });
 
 // 真机 2026-10-07 B1：审批卡被夹紧点不到，用户走 Ctrl+Enter 放行；3s 后看门狗
@@ -134,7 +213,7 @@ test("看门狗不得弹幽灵模态：grace 期内已下决策就不再转模�
   const {s} = makeApprovalSession(slot);
   s.sent = [];
   s.sendJson = m => s.sent.push(m);
-  s.showApproval("sc query com.docker.service", "r", "h", "high");
+  s.showApproval("sc query com.docker.service", "r", "h", "high", 1);
   await settle(30);
   assert.strictEqual(s._approvalResolved, false, "未决策前票是开的");
   // grace 期内用户按 Ctrl+Enter：走单发出口放行
@@ -153,10 +232,10 @@ test("看门狗不接顶掉的旧令：命令换了就不给旧令弹模态", as
   const {s} = makeApprovalSession(slot);
   s.sent = [];
   s.sendJson = m => s.sent.push(m);
-  s.showApproval("rm -rf /tmp/old", "r", "h", "high");
+  s.showApproval("rm -rf /tmp/old", "r", "h", "high", 1);
   await settle(30);
   // 下一令顶掉旧令（core 侧已换 ask_decision）
-  s.showApproval("rm -rf /tmp/new", "r", "h", "high");
+  s.showApproval("rm -rf /tmp/new", "r", "h", "high", 2);
   await settle(250);
   assert.ok(!s.modals.includes("rm -rf /tmp/old"),
     "旧令不得再弹模态（点下去的决策会发到下一令头上）");

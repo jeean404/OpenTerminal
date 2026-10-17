@@ -1,5 +1,5 @@
-// 真机浏览器复现：跳板机 → 远程机 xiaojian → sudo su - root → root 空闲自动
-// 登出掉回 xiaojian → 再 sudo su - → 输入自然语言失效（2026-10-07 用户反馈）
+// 真机浏览器复现：跳板机 → 远程机 testuser → sudo su - root → root 空闲自动
+// 登出掉回 testuser → 再 sudo su - → 输入自然语言失效（2026-10-07 用户反馈）
 //
 // 环境（全真链路，只有「远端主机」换成本地 docker）：
 //   真 Chromium + 真 xterm.js + 真 WebSocket + 真 PipelineCore
@@ -8,9 +8,9 @@
 //
 //   docker 容器 ot-repro（ubuntu:24.04 + openssh-server）扮演两台机器：
 //     ubuntu@容器    = 跳板机（app 的 ssh 目标）
-//     xiaojian@容器  = 远程机（连接后命令里 ssh 过去，= 嵌套 ssh 帧）
+//     testuser@容器  = 远程机（连接后命令里 ssh 过去，= 嵌套 ssh 帧）
 //     root           = sudo su - 之后；/etc/profile.d 给 root 挂 TMOUT=15，
-//                      复刻「很久没操作 root 自动退出、掉回 xiaojian」
+//                      复刻「很久没操作 root 自动退出、掉回 testuser」
 //
 // 用法: node tools/verify-web/repro-root-relogin.cjs [port]
 //   前置: docker 容器 ot-repro 已起（见 .tmp/repro/setup-container.sh）
@@ -25,7 +25,7 @@ const HOME = path.join(lib.OUT, "rootrelogin-home");
 const SSH_PORT = Number(process.env.OT_REPRO_SSH_PORT || 2222);
 const TARGET = "jump";
 
-const PW = { ubuntu: "ub123456", xiaojian: "xj123456", root: "root123456" };
+const PW = { ubuntu: "ub123456", testuser: "xj123456", root: "root123456" };
 const NL1 = "执行 echo MARK-AI-ONE 并把输出原样告诉我";
 const NL2 = "执行 echo MARK-AI-TWO 并把输出原样告诉我";
 // 上屏判据：MARK-* 至少出现两次 = 除自然语言回显外还有 echo 的**输出行**。
@@ -67,8 +67,8 @@ const probe = page => page.evaluate(() => {
 
 // ---- 模态代答（扮演用户：主机密钥信任 / 审批批准 / 密码填写）----
 const BUTLER_CFG = {
-  def: PW.xiaojian,   // sudo 的「密码: 」提示符不带主机信息
-  rules: [["ubuntu", PW.ubuntu], ["xiaojian", PW.xiaojian], ["root", PW.root]],
+  def: PW.testuser,   // sudo 的「密码: 」提示符不带主机信息
+  rules: [["ubuntu", PW.ubuntu], ["testuser", PW.testuser], ["root", PW.root]],
 };
 
 let butlerSig = null;
@@ -137,7 +137,7 @@ function pwForPrompt(tail) {
   if (!m) return null;
   const user = m[2] || m[4];
   if (user && PW[user]) return PW[user];
-  return PW.xiaojian;
+  return PW.testuser;
 }
 
 let termPwSig = null;
@@ -337,7 +337,7 @@ function seedSavedConnection() {
       OT_SEED_HOST: "127.0.0.1",
       OT_SEED_PORT: String(SSH_PORT),
       OT_SEED_USER: "ubuntu",
-      OT_SEED_COMMANDS: "ssh xiaojian@127.0.0.1|sudo su -|cd /root",
+      OT_SEED_COMMANDS: "ssh testuser@127.0.0.1|sudo su -|cd /root",
     },
     encoding: "utf8",
   });
@@ -406,7 +406,7 @@ async function main() {
 
   try {
     startButler(page);
-    console.log("\n########## 阶段 A：跳板机 → 远程 xiaojian → sudo su - root ##########");
+    console.log("\n########## 阶段 A：跳板机 → 远程 testuser → sudo su - root ##########");
     const picked = await lib.pickTarget(page, TARGET);
     record("A0 侧栏选中复现目标 " + TARGET, picked,
       picked ? "ok" : "侧栏没有该目标；pickTarget 会静默回退到 local，本轮作废");
@@ -445,17 +445,17 @@ async function main() {
     await waitTaskEnd(page, 120000);
     await sleep(1500);
 
-    console.log("\n########## 阶段 C：root 空闲 TMOUT 自动登出，掉回 xiaojian ##########");
+    console.log("\n########## 阶段 C：root 空闲 TMOUT 自动登出，掉回 testuser ##########");
     const loggedOut = await waitTail(
       page, /timed out waiting for input|auto-logout/, 60000);
     dump("rr-after-tmout.txt", loggedOut.text);
-    record("C1 root 空闲自动登出并掉回 xiaojian", loggedOut.ok,
+    record("C1 root 空闲自动登出并掉回 testuser", loggedOut.ok,
       loggedOut.ok ? `${loggedOut.waited}ms 命中 ${JSON.stringify(loggedOut.hit.slice(0, 60))}`
-                   : "60s 内没掉回 xiaojian；屏幕尾=" +
+                   : "60s 内没掉回 testuser；屏幕尾=" +
                      JSON.stringify(loggedOut.text.slice(-300)));
     await sleep(1500);
 
-    console.log("\n########## 阶段 D：从 xiaojian 再 sudo su - 切回 root ##########");
+    console.log("\n########## 阶段 D：从 testuser 再 sudo su - 切回 root ##########");
     // 尾部匹配会被 root#1 的旧提示符秒命中（第 3 轮 D1 只用 1ms，命中的是阶段 A
     // 的滚动历史）：先尽力清屏，再按 root 提示符的**出现次数增量**判落地。
     const ROOTP = /root@[A-Za-z0-9_.-]*[:#]/g;

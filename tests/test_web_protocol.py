@@ -73,17 +73,22 @@ def test_parse_submit_dirty_flag():
 
 
 def test_encode_event_kinds():
-    # 事件契约：task_start/ai_token/ai_think/ai_collapse/ai_card/final/denied/limit/error
+    # 事件契约：task_start/ai_result/ai_token/ai_think/ai_collapse/ai_card/final/
+    # progress/task_end/denied/limit/error（token/think/collapse 仍留线供 CLI）
     for kind, extra in (("task_start", {"text": "看看磁盘"}),
+                        ("ai_result", {"text": "分", "think": "思考", "failed": False}),
                         ("ai_token", {"text": "分"}),
                         ("ai_think", {"text": "思考"}),
                         ("ai_collapse", {"command": "df -h"}),
                         ("ai_card", {"markdown": "# 总结"}),
                         ("final", {"text": "完了"}),
+                        ("progress", {"chars": 36, "tokens_in": 0, "tokens_out": 0}),
+                        ("task_end", {}),
                         ("denied", {"text": "拒绝"}),
                         ("limit", {"text": "限流"}),
                         ("error", {"text": "出错"})):
         s = encode_server(ServerMsg(type="event", event={"kind": kind, **extra}))
         obj = json.loads(s)
         assert obj["type"] == "event" and obj["event"]["kind"] == kind
-        assert obj["event"][list(extra)[0]] == extra[list(extra)[0]]
+        if extra:
+            assert obj["event"][list(extra)[0]] == extra[list(extra)[0]]

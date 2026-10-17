@@ -99,6 +99,7 @@ function makePadSession(lines, cursor) {
   s._dead = false;
   s.term = term;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._holdDepth = 0;
   s._holdBuf = [];
   s._holdTags = [];

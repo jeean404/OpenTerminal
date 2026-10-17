@@ -52,9 +52,7 @@ def build_agent(
 
     def _when(req) -> bool:
         cmd = req.tool_call.get("args", {}).get("command", "")
-        if cmd in allowed:
-            return False
-        return policy.classify(cmd).level == "approve"
+        return policy.needs_approval(cmd, allowed)
 
     def _description(tc, state, runtime) -> str:
         cmd = tc.get("args", {}).get("command", "")

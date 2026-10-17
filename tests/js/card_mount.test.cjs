@@ -60,6 +60,7 @@ function makeMountSession({ refreshFiresOnRender }) {
   const s = Object.create(Session.prototype);
   s._dead = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._holdDepth = 0;
   s._holdBuf = [];
   s._lastByteAt = 0;
@@ -212,7 +213,7 @@ test("_discardSlot：同 id 被新槽顶替后，旧槽迟到 dispose 不得删�
   assert.ok(!s._slots.has(9), "本主 dispose 才真正出清");
 });
 
-test("ai_tool start→end：挂 tool 卡，tool_start/tool_end 依序进 feed 且不占 _taskCardId", async () => {
+test("ai_tool start→end：挂命令卡（id 统一经 _toolCards 映射），start/end 依序进 feed", async () => {
   const s = makeMountSession({refreshFiresOnRender: true});
   const handled = [];
   s._ensureFeed = () => Promise.resolve({
@@ -221,14 +222,16 @@ test("ai_tool start→end：挂 tool 卡，tool_start/tool_end 依序进 feed �
     unmount() {}, destroy() {},
   });
   s._cardReady = Promise.resolve();
-  s._onAiTool({phase: "start", id: 1, name: "read_file", args: "notes.txt"});
+  s._onAiTool({phase: "start", id: 1, name: "read_file", args: "notes.txt",
+               command: "", needs_approval: false, reasons: [], risk: ""});
   s._onAiTool({phase: "end", id: 1, failed: false});
   await s._cardReady;
+  const cardId = s._toolCards.get(1);
+  assert.ok(cardId != null, "ai_tool id → 卡 id 映射登记");
   assert.deepStrictEqual(handled, [
-    {kind: "tool_start", id: "tool1", name: "read_file", args: "notes.txt"},
-    {kind: "tool_end", id: "tool1", failed: false},
+    {kind: "tool_start", id: cardId, name: "read_file", args: "notes.txt",
+     command: "", needs_approval: false, reasons: [], risk: ""},
+    {kind: "tool_end", id: cardId, failed: false},
   ], "end 链在 start 挂载之后：store 收到的顺序即 worker 发送序");
-  assert.ok(s._slots.has("tool1"), "工具卡 slot 以 tool<id> 登记");
-  assert.strictEqual(s._taskCardId, undefined,
-    "工具卡不得占用流式分析卡位（后续 token 要开新分析卡）");
+  assert.ok(s._slots.has(cardId), "工具卡 slot 以映射后的卡 id 登记");
 });

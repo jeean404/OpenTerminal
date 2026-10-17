@@ -76,3 +76,24 @@
 }
 .scard .nsbtn:hover { color: var(--text); border-color: var(--muted); }
 .scard .nsstate { font-size: 12px; font-weight: 650; color: var(--ok); }
+
+/* ── 打字机逐块揭示（Phase 1）：纯 opacity 动画，高度/行永不变化 ──────
+   （红线：绝不 clip/max-height——高度必须可证不变；prefers-reduced-motion
+   直显。动画挂 .ot-card-host 下的 .ablk，宿主 .ot-reveal 类落定后启动，
+   避免出生窗口内空放。） */
+.ot-card-host .ablk {
+  opacity: 0;
+  animation: ot-reveal 0.25s both;
+  animation-delay: calc(var(--i, 0) * 60ms);
+  animation-play-state: paused;
+}
+.ot-card-host.ot-reveal .ablk { animation-play-state: running; }
+/* 揭示完成终态：动画只跑一次，滚动/重贴不得重播（真机「滑动时卡刷新加载」） */
+.ot-card-host.ot-revealed .ablk { animation: none; opacity: 1; }
+@keyframes ot-reveal {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ot-card-host .ablk { animation: none; opacity: 1; }
+}

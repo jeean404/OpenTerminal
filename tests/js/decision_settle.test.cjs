@@ -40,6 +40,7 @@ function makeSession() {
   s._dead = false;
   s._padFused = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s.seq = [];
   s.sent = [];
   s.sendJson = msg => { s.sent.push(msg); s.seq.push("send"); };

@@ -108,6 +108,7 @@ def _patch_core_ns(monkeypatch, sess):
     monkeypatch.setattr(cmod, "probe_profile", _fake_probe)
     monkeypatch.setattr(cmod, "build_agent",
                         lambda *a, **k: (None, set(), None))
+    monkeypatch.setattr(cmod, "build_chat_model", lambda *a, **k: None)
 
 
 def _cfg():
@@ -362,6 +363,7 @@ async def test_stored_password_passed_to_open_session(monkeypatch):
     monkeypatch.setattr(cmod, "probe_profile", lambda s, h: _profile())
     monkeypatch.setattr(cmod, "build_agent",
                         lambda *a, **k: (None, set(), None))
+    monkeypatch.setattr(cmod, "build_chat_model", lambda *a, **k: None)
     core = CliCore(_cfg(), "web01", frontend=None)
     frontend = TermFrontend(core, reader=_never_reader)
     core._frontend = frontend
@@ -388,6 +390,7 @@ async def test_no_stored_password_prompts_via_core(monkeypatch):
     monkeypatch.setattr(cmod, "probe_profile", lambda s, h: _profile())
     monkeypatch.setattr(cmod, "build_agent",
                         lambda *a, **k: (None, set(), None))
+    monkeypatch.setattr(cmod, "build_chat_model", lambda *a, **k: None)
     core = CliCore(_cfg(), "web01", frontend=None)
     frontend = TermFrontend(core, reader=_never_reader)
     core._frontend = frontend

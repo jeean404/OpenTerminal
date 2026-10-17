@@ -10,7 +10,7 @@
 //      否则测的是 5 秒计时器而不是恢复能力）。
 //
 // 环境同 repro-root-relogin.cjs：docker 容器 ot-repro（跳板机 ubuntu →
-// xiaojian → sudo su - root），TMOUT 已临时设为 5s。
+// testuser → sudo su - root），TMOUT 已临时设为 5s。
 //
 // 用法: node tools/verify-web/repro-approve-tmout.cjs [port]
 "use strict";
@@ -25,7 +25,7 @@ const NL = "\n";
 const HOME = path.join(lib.OUT, "approvetmout-home");
 const SSH_PORT = Number(process.env.OT_REPRO_SSH_PORT || 2222);
 const TARGET = "jump";
-const PW = { ubuntu: "ub123456", xiaojian: "xj123456", root: "root123456" };
+const PW = { ubuntu: "ub123456", testuser: "xj123456", root: "root123456" };
 
 // 带 `;` 的单条命令：裸壳下会被拆段，第一段报 command not found、第二段照常跑。
 // 修复后注入行是单引号包住的一条命令 + 一个字面参数，任何一段都不得执行。
@@ -82,7 +82,7 @@ const probe = page => page.evaluate(() => {
 });
 
 // ---- 模态代答：只管主机密钥/密码，**绝不点审批**（审批时机由本脚本控制）----
-const PW_RULES = [["ubuntu", PW.ubuntu], ["xiaojian", PW.xiaojian], ["root", PW.root]];
+const PW_RULES = [["ubuntu", PW.ubuntu], ["testuser", PW.testuser], ["root", PW.root]];
 let pwSig = null, pwAt = 0, pwCooldown = 0;
 
 async function pwTick(page) {
@@ -126,7 +126,7 @@ function pwForPrompt(tail) {
   const m = tail.match(PW_PROMPT_RE);
   if (!m) return null;
   const user = m[2] || m[4];
-  return (user && PW[user]) ? PW[user] : PW.xiaojian;
+  return (user && PW[user]) ? PW[user] : PW.testuser;
 }
 let termSig = null, termAt = 0, termCd = 0;
 
@@ -385,7 +385,7 @@ function prepareHome() {
       ...process.env, OPENTERMINAL_HOME: HOME, PYTHONIOENCODING: "utf-8",
       OT_SEED_NAME: TARGET, OT_SEED_HOST: "127.0.0.1",
       OT_SEED_PORT: String(SSH_PORT), OT_SEED_USER: "ubuntu",
-      OT_SEED_COMMANDS: "ssh xiaojian@127.0.0.1|sudo su -|cd /root",
+      OT_SEED_COMMANDS: "ssh testuser@127.0.0.1|sudo su -|cd /root",
     },
     encoding: "utf8",
   });

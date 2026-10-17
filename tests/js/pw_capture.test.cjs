@@ -82,7 +82,7 @@ function makeSession() {
   return s;
 }
 
-function askPassword(s, label = "xiaojian@1.2.3.4 密码: ") {
+function askPassword(s, label = "testuser@1.2.3.4 密码: ") {
   s.handleMsg({type: "ask_password", label, auth_kind: "password"});
 }
 
@@ -90,7 +90,7 @@ test("ask_password 不弹模态：提示符落终端、进入捕获态", () => {
   const s = makeSession();
   askPassword(s);
   assert.ok(!s._pwCapture.submitted);
-  assert.strictEqual(s.writes.join(""), "xiaojian@1.2.3.4 密码: ",
+  assert.strictEqual(s.writes.join(""), "testuser@1.2.3.4 密码: ",
                      "空终端光标在行首：不补换行，提示符原样落屏");
 });
 
@@ -99,13 +99,13 @@ test("输入无回显；退格删末字符；回车整行提交", () => {
   askPassword(s);
   s._feedData("secre");
   s._feedData("t");
-  assert.strictEqual(s.writes.join(""), "xiaojian@1.2.3.4 密码: ",
+  assert.strictEqual(s.writes.join(""), "testuser@1.2.3.4 密码: ",
                      "键入不回显");
   s._feedData("\x7f123");   // 退格删 t，再补 123 → "secre123"
   s._feedData("\r");
   assert.deepStrictEqual(s.sent, [{type: "auth", auth_kind: "password",
                                    text: "secre123", remember: false}]);
-  assert.strictEqual(s.writes.join(""), "xiaojian@1.2.3.4 密码: \r\n",
+  assert.strictEqual(s.writes.join(""), "testuser@1.2.3.4 密码: \r\n",
                      "回车只换行");
   assert.ok(s._pwCapture.submitted, "提交后保持捕获壳（等错密重讨）");
 });
@@ -117,7 +117,7 @@ test("错密重讨：补 Permission denied 行 + 新提示符，重新捕获", (
   askPassword(s);
   assert.ok(s.writes.join("").includes("Permission denied, please try again."),
             "补 OpenSSH 的 denied 行");
-  assert.ok(s.writes.join("").endsWith("xiaojian@1.2.3.4 密码: "));
+  assert.ok(s.writes.join("").endsWith("testuser@1.2.3.4 密码: "));
   s._feedData("right\r");
   assert.deepStrictEqual(s.sent[1], {type: "auth", auth_kind: "password",
                                      text: "right", remember: false});

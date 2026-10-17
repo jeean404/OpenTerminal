@@ -72,6 +72,7 @@ function makeSession({tabId = "t1", blank = true} = {}) {
   s._dead = false;
   s._padFused = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._holdDepth = 0;
   s._holdBuf = [];
   s._lastByteAt = 0;
@@ -272,16 +273,19 @@ test("_reanchor fund 分支：reserved ≥ rows 解钉放行，任务条全程�
   assert.strictEqual(s._regs["think-t1"].hidden, false, "任务未结束任务条常显");
 });
 
-test("_cardOnScreen 守卫：隐藏态挂载完成不算上屏（_phaseLive 不置位）", () => {
+test("打字机揭示类：隐藏态挂载不落 ot-reveal，_revealSlot 沿才落上（动画不提前放）", () => {
   const s = makeSession();
-  s._taskActive = true;
-  s._taskCardId = 1;
   const slot = makeSlot(s, 1);     // reserved 0 < rows 2：隐藏
-  s._cardOnScreen(1);
-  assert.strictEqual(s._phaseLive, false, "隐藏卡不得抢占徽标");
-  slot.reserved = 4;
-  s._cardOnScreen(1);
-  assert.strictEqual(s._phaseLive, true, "fund 后挂载完成才算上屏");
+  s._followBottom = () => {};
+  assert.ok(!slot.host.className.includes("ot-reveal"),
+    "隐藏态不得落揭示类（动画 paused 初始态 opacity:0）");
+  slot.reserved = 4;               // fund
+  s._blankSpan = () => 6;
+  s._capped = () => false;
+  s._reanchor(slot);
+  assert.strictEqual(slot.revealed, true);
+  assert.ok(slot.host.className.includes("ot-reveal"),
+    "揭示沿落下打字机类，块动画起跑");
 });
 
 test("冻结阀：frozen 超 2s 仍未 fund 的隐藏卡按夹紧路径放出", async () => {
