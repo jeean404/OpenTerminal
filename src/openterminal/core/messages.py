@@ -59,7 +59,8 @@ class ServerMsg:
     host: str = ""
     user: str = ""
     distro: str = ""
-    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_tool/ai_card/final/denied/limit/error
+    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_tool/ai_card/final/denied/limit/error；
+                                  # term_open/term_close = 命令执行边界括号（输出归属，见 core/exec_events.py）
     command: str = ""              # approval：待审批命令
     reasons: str = ""
     label: str = ""

@@ -5,7 +5,7 @@ import time
 import time as _time
 from openterminal.web.protocol import ClientMsg
 from openterminal.core import PipelineCore
-from tests.web_fakes import (FakeSession, PassthroughSession, _drain_fallback, _fake_ai_task, _install_fake_runner, _make_worker, _sink_bytes, _skip_reintegrate, _submit, _wait, _wait_json, _wire_presenter)
+from tests.web_fakes import (FakeSession, PassthroughSession, _drain_fallback, _events, _fake_ai_task, _install_fake_runner, _make_worker, _sink_bytes, _skip_reintegrate, _submit, _wait, _wait_json, _wire_presenter)
 from tests.core_fakes import FakeCore, _bare_core
 
 
@@ -439,6 +439,37 @@ async def test_shell_pad_fingerprint_dead_channel_stops_typing(monkeypatch):
     assert rows == [120, 3], "判死仍应答 padded（前端按缓冲实测夹紧）"
 
 
+async def test_shell_pad_not_yet_integrated_acks_deferred_no_fuse(monkeypatch):
+    r"""连接期 hook 尚未注入（`_last_mark_at` 仍是 0、`_hook_ok` 假）：pad 走
+    ack-only，但 ack **必须带 deferred**。
+
+    旧实现只按 `_reinject_pending` 判 deferred，把这一类报成非 deferred，前端
+    `_ensurePad` 对账「空白一行没长」连吃两次就 `_fusePads()` 把 pad 通道永久
+    焊死——此后每张卡都垫不满、全被夹紧成只剩卡头的细条（真机图一「⚠ 系统
+    警告只剩标题」的上游根因）。永久死通道（`_hook_gone`）才不带 deferred。
+    """
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 0.0        # 连接期：还没见到任何 OSC 标记
+    assert w.hook._hook_ok() is False
+    assert w._hook_gone is False
+
+    await w.handle_client(ClientMsg(type="pad", pad=7))
+    if w._pad_task is not None:
+        await asyncio.wait_for(w._pad_task, timeout=2)
+    raws = [d for k, d in w.session.calls if k == "raw"]
+    assert raws == [], "hook 未注入：不往壳里敲 pad"
+    msgs = await _wait_json(sink, lambda m: len([
+        x for x in m if x.get("type") == "event"
+        and x.get("event", {}).get("kind") == "padded"]) >= 1)
+    ev = [x["event"] for x in msgs if x.get("type") == "event"
+          and x.get("event", {}).get("kind") == "padded"][-1]
+    assert ev["rows"] == 7
+    assert ev.get("deferred") is True, (
+        "暂时垫不进必须 deferred，否则前端熔断焊死 pad 通道")
+
+
 async def test_shell_pad_reinject_pending_acks_deferred_no_typing(monkeypatch):
     r"""任务起跑的重注入在途（外部触发链至 _run_task 落地才清位）：pad 不往
     壳里敲（窗口内壳未痊愈，敲进去必撞裸壳 = 真机残迹「__ot_pad: command
@@ -602,3 +633,89 @@ def test_core_lazy_exec_property():
     from openterminal.core.pipeline import PipelineCore
     core = PipelineCore.__new__(PipelineCore)
     assert core.exec is core.exec
+
+
+
+def test_strip_pad_echo_drops_inject_echo_keeps_blank_lines():
+    r"""注入自身回显不外显，垫行空行必须原样放行（真机图一「无效命令输出」）。
+
+    hook 在位时它清掉自己的回显，用户看不到；hook 刚掉线（su - 换壳）时
+    _hook_ok 仍是陈旧真值，注入落进裸壳，`__ot_pad N` 回显 / `^Y` 控制字 /
+    `bash: __ot_pad: command not found` 全部外显。只滤这三样——hook 打出的
+    N 个空行是垫行本体，吞了 blankSpan 就永远数不满、卡被夹紧截断。
+    """
+    from openterminal.core.exec_events import _strip_pad_echo
+
+    # 裸壳现场：回显 + 控制字 + command not found 全滤掉
+    dirty = "sudo su -\r\n__ot_pad 7\r\n\x19last login: x\r\n-bash: __ot_pad: command not found\r\n"
+    assert _strip_pad_echo(dirty) == "sudo su -\r\nlast login: x\r\n"
+
+    # hook 在位现场：只有空行（垫行本体）→ 一行不丢
+    blanks = "\r\n\r\n\r\n"
+    assert _strip_pad_echo(blanks) == blanks
+
+    # 正文与空行混排：正文照常放行，只摘注入行
+    mixed = "hello\r\n\r\n__ot_pad 3\r\n\r\nworld\r\n"
+    assert _strip_pad_echo(mixed) == "hello\r\n\r\n\r\nworld\r\n"
+
+    # `^Y` 是  的终端回显字形，两种形态都要摘
+    assert _strip_pad_echo("^Y\r\n") == "\r\n"
+    assert _strip_pad_echo("\x19\r\n") == "\r\n"
+    assert _strip_pad_echo("") == ""
+
+
+async def test_term_brackets_follow_marker_line_not_queue(monkeypatch):
+    """输出归属括号 term_open/term_close：命令身份以 C 标记上报的 line 为准。
+
+    并行 tool_call 时 on_start 全部先到——登记序 = 宣告序；真实执行序却是
+    InteractiveRunner._runner_lock 的抢锁序。按队首认命令会把输出归属记到
+    别的命令头上（真机「四张工具卡只看得见一条输出」的同族根因）。
+    """
+    import openterminal.core.history as history_db
+    monkeypatch.setattr(history_db, "record", lambda *a, **k: None)
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+
+    # 宣告序 free/df/uptime/nproc，真实执行却是 df 先跑
+    w._pending_agent_cmds.extend(["free -h", "df -h", "uptime", "nproc"])
+    w._cur_prompt = "[root@x /tmp]#"      # B 标记捕获的提示符
+    w._exec_future = asyncio.get_running_loop().create_future()
+
+    w._pending_report = (100, "EXEC", "df -h")
+    await w.exec._on_exec_start(100)
+    await w.exec._on_exec_end(100, 0, "/tmp")
+
+    # outbox 送达是异步的：等括号成对到齐再断言
+    await _wait_json(sink, lambda ms: len(_events(sink, "term_close")) >= 1)
+    assert [e["command"] for e in _events(sink, "term_open")] == ["df -h"]
+    assert [e["command"] for e in _events(sink, "term_close")] == ["df -h"]
+    # 回显行由后端拼好带过去（前端读 xterm 缓冲是竞态，补不回来）
+    assert [e["echo"] for e in _events(sink, "term_open")] == ["[root@x /tmp]# df -h"]
+    # 同名登记就地销账，剩下的保持宣告序（不许连坐错认）
+    assert list(w._pending_agent_cmds) == ["free -h", "uptime", "nproc"]
+    assert w._agent_open_cmd is None
+
+
+async def test_term_brackets_fall_back_to_queue_when_line_unrecognized(monkeypatch):
+    """上报串（包装行）认不出登记时退回队首：认不出就不改判，只保证不空转。"""
+    import openterminal.core.history as history_db
+    monkeypatch.setattr(history_db, "record", lambda *a, **k: None)
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+
+    w._pending_agent_cmds.extend(["free -h", "uptime"])
+    w._cur_prompt = ""      # 提示符没捕获到：宁可没有回显行，也不瞎拼
+    w._exec_future = asyncio.get_running_loop().create_future()
+
+    w._pending_report = (100, "EXEC", "eval 注入 nproc")
+    await w.exec._on_exec_start(100)
+    await w.exec._on_exec_end(100, 0, "/tmp")
+
+    await _wait_json(sink, lambda ms: len(_events(sink, "term_close")) >= 1)
+    # 上报串对不上任何登记 → 退回队首（与卡片 $ 命令 口径一致，前端才贴得上）
+    assert [e["command"] for e in _events(sink, "term_open")] == ["free -h"]
+    assert [e["command"] for e in _events(sink, "term_close")] == ["free -h"]
+    assert [e["echo"] for e in _events(sink, "term_open")] == [""]
+    assert list(w._pending_agent_cmds) == ["uptime"]
