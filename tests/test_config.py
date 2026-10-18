@@ -177,3 +177,78 @@ def test_env_priority_project_over_home(tmp_path, monkeypatch):
     env = load_env()
     assert env["ANTHROPIC_BASE_URL"] == "proj-url"   # 项目覆盖家目录
     assert env["MODEL_ID"] == "home-model"           # 家目录兜底
+
+
+def test_model_auth_token_counts_as_credential():
+    """凭据认 ANTHROPIC_AUTH_TOKEN（真机：密钥只 export 这个，没有 *_API_KEY）。
+
+    旧实现只认 *_API_KEY，于是判「未配置模型协议」——模型其实一路跑得好好的。
+    """
+    from openterminal.config import model_from_env
+    over, errs = model_from_env({
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+        "ANTHROPIC_AUTH_TOKEN": "PROXY_MANAGED",
+    })
+    assert errs == []
+    assert over["provider"] == "anthropic"
+    assert over["base_url"] == "http://127.0.0.1:15721"
+    assert over["api_key"] == "PROXY_MANAGED"
+
+
+def test_default_base_url_without_model_section_is_not_an_error(tmp_path, monkeypatch):
+    """config.toml 没写 [model]、走内置缺省 base_url（本地网关免密）——不挂红卡。
+
+    真机红警告误报第二例：旧降噪判据只认「config.toml 显式写了 base_url」，
+    把「用户没覆盖缺省值」误当成「用户没配置」。判据要看**最终生效**的配置。
+    """
+    from openterminal.config import Config, ModelConfig
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text("[web]\nport = 8200\n", encoding="utf-8")
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(home))
+    monkeypatch.chdir(tmp_path)                      # 项目 .env 不存在
+    for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+              "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_AUTH_TOKEN", "MODEL_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr("openterminal.config._endpoint_reachable",
+                        lambda base, timeout=0.5: True)   # 本地网关是活的
+    cfg = Config.load()
+    assert cfg.errors == []
+    assert cfg.model.base_url == ModelConfig.base_url     # 生效的是内置缺省
+
+
+def test_unreachable_endpoint_keeps_warning(tmp_path, monkeypatch):
+    """真连不上时红卡照挂——降噪只做减法，不放过真问题。"""
+    from openterminal.config import Config
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text("[web]\nport = 8200\n", encoding="utf-8")
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+              "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_AUTH_TOKEN", "MODEL_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr("openterminal.config._endpoint_reachable",
+                        lambda base, timeout=0.5: False)  # 网关没起
+    cfg = Config.load()
+    assert any("未配置模型协议" in e for e in cfg.errors)
+
+
+def test_endpoint_http_error_counts_as_alive(monkeypatch):
+    """探活认「任何 HTTP 响应」：404 说明服务在，连接拒绝才算跑不起来。"""
+    import urllib.error
+    import urllib.request
+    from openterminal.config import _endpoint_reachable
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(
+            urllib.error.HTTPError("u", 404, "nf", {}, None)))
+    assert _endpoint_reachable("http://127.0.0.1:15721") is True
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
+    assert _endpoint_reachable("http://127.0.0.1:1") is False
+
+    assert _endpoint_reachable("") is False
