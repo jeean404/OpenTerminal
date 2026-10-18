@@ -47,7 +47,10 @@ def load_env() -> dict[str, str]:
     「当前项目 .env 优先级最高」（用户约定）：同名键项目覆盖家目录、家目录
     覆盖系统环境。只读不动 os.environ——副作用留给调用方决定。
     """
-    merged: dict[str, str] = {}
+    # 三层都要看：系统环境变量 < ~/.openterminal/.env < 项目 .env。
+    # 旧实现只读两份 .env 文件、漏了系统环境变量——用户把密钥 export 在
+    # shell 里时，模型明明跑得好好的却报「未配置模型协议」（真机红警告误报）
+    merged: dict[str, str] = {k: v for k, v in os.environ.items() if v}
     home_env = app_dir() / ".env"
     for k, v in _parse_env_file(home_env).items():
         merged[k] = v
@@ -92,6 +95,30 @@ _DEFAULT_MODEL_OPENAI = "gpt-5"
 _DEFAULT_MODELS_OPENAI = [
     "gpt-5", "gpt-5-mini", "o4-mini",
 ]
+
+
+def _prune_model_errors(errors, env_model, m, environ):
+    r"""去掉「未配置模型协议」的**误报**：模型真能用时不该挂红警告卡。
+
+    判据是「跑不跑得起来」，不是「.env 里有没有那两行」。真机上就踩到过：
+    config.toml [model] 给了 base_url、`api_key_env` 指向的环境变量也有值
+    （shell export / 网关免密），模型一路跑得好好的，卡头却挂着红色
+    「未配置模型协议」。二选一协议的**冲突**报错不在此列，照常报。
+    """
+    if env_model:
+        return list(errors)          # .env 配了协议：原样
+    key_env = str(m.get("api_key_env") or "ANTHROPIC_API_KEY")
+    # 「能跑」两条路占一条即可：① 密钥在环境变量里；② config.toml 显式写了
+    # base_url（本地网关可能根本不要密钥，模型照样跑得好好的）
+    usable = bool(environ.get(key_env)) or bool(m.get("base_url"))
+    if not usable:
+        return list(errors)
+    out = []
+    for e in errors:
+        if "未配置模型协议" in e:
+            continue
+        out.append(e)
+    return out
 
 
 @dataclass
@@ -236,5 +263,5 @@ class Config:
                 token=w.get("token", WebConfig.token),
             ),
             targets=targets,
-            errors=env_errors,
+            errors=_prune_model_errors(env_errors, env_model, m, os.environ),
         )
