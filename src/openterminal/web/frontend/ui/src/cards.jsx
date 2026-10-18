@@ -49,8 +49,37 @@ function Head({ card, label }) {
 
 // 正文按块渲染：每块一个 .ablk（opacity 打字机，--i 逐块延迟）。
 // 列表/表格在 mdLiteBlocks 内聚成整块，此处不再拆散。
-function Blocks({ src, strip, base = 0 }) {
-  return mdLiteBlocks(strip ? stripIncompleteMarkers(src) : src).map((b, i) => (
+// 流式打字机：把已到手的整段文本按块逐字揭示。块布局下卡片长高只是把下面
+// 的内容往下推（没有占位行/夹紧那套），所以「边打字边长高」是安全的——
+// 这正是原来做不到流式的根本原因，现在可以做了。
+function useTypewriter(src, on) {
+  const text = src || "";
+  const [n, setN] = useState(on ? 0 : text.length);
+  useEffect(() => {
+    if (!on) { setN(text.length); return undefined; }
+    if (!text.length) { setN(0); return undefined; }
+    setN(0);
+    let i = 0;
+    const step = Math.max(2, Math.ceil(text.length / 55));   // 约 55 帧播完
+    const t = setInterval(() => {
+      i = Math.min(text.length, i + step);
+      setN(i);
+      if (i >= text.length) clearInterval(t);
+    }, 22);
+    return () => clearInterval(t);
+  }, [text, on]);
+  return text.slice(0, n);
+}
+
+// typed=true 时按打字机揭示（只在卡片首次成型时打一次，之后不再重播）
+function Typed({ src, on, children }) {
+  const shown = useTypewriter(src, on);
+  return children(shown);
+}
+
+function Blocks({ src, strip, base = 0, typed }) {
+  const shown = useTypewriter(src, typed);
+  return mdLiteBlocks(strip ? stripIncompleteMarkers(shown) : shown).map((b, i) => (
     <div
       key={i}
       className="ablk"
@@ -62,16 +91,29 @@ function Blocks({ src, strip, base = 0 }) {
 
 function AnalysisCard({ card, dispatch }) {
   const label = card.failed ? "分析 · 已中止" : "分析";
+  // 「AI 思考中」加载态：Enter 后卡片立即弹出，模型未回前先占住位
+  if (card.loading) {
+    return (
+      <div className="ablock think">
+        <Head card={card} label={label} />
+        <div className="atext think">AI 思考中</div>
+      </div>
+    );
+  }
+  // 思考过程一律默认折叠（用户决策）：不管有没有结论都收起
   return (
     <div className={"ablock" + (card.done ? " done" : "") +
                     (card.failed ? " failed" : "")}>
       <Head card={card} label={label} />
       <div className="atext">
         {card.reason
-          ? <div className="areason ablk" style={{ "--i": 0 }}>{card.reason}</div>
+          ? <details className="areason-wrap ablk" style={{ "--i": 0 }}>
+              <summary>思考过程</summary>
+              <div className="areason">{card.reason}</div>
+            </details>
           : null}
         {card.text
-          ? <Blocks src={card.text} strip base={card.reason ? 1 : 0} />
+          ? <Blocks src={card.text} strip base={card.reason ? 1 : 0} typed={!card.noType} />
           : null}
       </div>
     </div>
@@ -82,7 +124,7 @@ function SummaryCard({ card, dispatch }) {
   return (
     <div className="scard">
       <Head card={card} label="总结" />
-      <div className="sbody"><Blocks src={card.text} /></div>
+      <div className="sbody"><Blocks src={card.text} typed={!card.noType} /></div>
       <div className="sfoot">
         {card.newSession
           ? <span className="nsstate">✓ 新会话已开启</span>
@@ -230,7 +272,8 @@ function RescueCard({ card, dispatch }) {
 // 审批蓝/高危红。tool_end 只换徽标不增内容 → 卡高不变，零 pad 往返。
 function ToolCard({ card }) {
   return (
-    <div className="acard aprobe tcard">
+    <div className={"acard aprobe tcard" +
+                    (card.done ? (card.failed ? " failed" : " done") : "")}>
       <div className="aphead">
         <span className="apq">调用工具：{card.name}</span>
         {card.done

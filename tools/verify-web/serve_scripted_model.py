@@ -121,6 +121,17 @@ SCENARIOS = {
                                "Remove-Item $env:TEMP/ot-vh-target.txt -Force"})],
         "final": "高危命令处理完毕。",
     },
+    # 复现「4 张工具卡只显示一条命令执行结果」现场（2026-10-18 真机截图）：
+    # 一轮并行 4 个 execute，命令与截图同名同序（free -h / df -h / uptime / nproc）
+    "四条": {
+        "calls": [
+            ("execute", {"command": "free -h"}),
+            ("execute", {"command": "df -h"}),
+            ("execute", {"command": "uptime"}),
+            ("execute", {"command": "nproc"}),
+        ],
+        "final": "四条命令执行完毕。",
+    },
 }
 _DEFAULT = SCENARIOS["单个"]
 

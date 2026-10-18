@@ -229,12 +229,56 @@ test("救援卡钉死高度不低于 .aphead 首行（按钮在首行，底线�
   T.rows = 5;                // 内容 5 行 → short
   T.pinnedRows = null;
   T.host = makeFakeEl(75);
+  // 救援卡的按钮就在 .aphead 首行里（RescueCard 的 .apbtns → <button>）：
+  // fixture 必须如实带出按钮，否则量的是「无交互行的卡头」，与产品 DOM 不符
   T.host.querySelector = sel => (sel === ".aphead"
-    ? {getBoundingClientRect: () => ({height: 45})}   // 按钮行 3 行
+    ? {getBoundingClientRect: () => ({height: 45}),   // 按钮行 3 行
+       querySelector: q => (q === "button" ? {} : null)}
     : null);
   s._reanchor(T);
   assert.strictEqual(T.pinnedRows, 3,
     "钉死不得低于按钮行高度——细条态按钮不可点＝审批死锁");
+});
+
+test("无按钮的卡头不给交互底线（警告/工具卡头只有标签，正文不许被裁）", () => {
+  const {s, T} = makeCapSession();
+  s._floorRows = Object.getPrototypeOf(s)._floorRows.bind(s);
+  // AlertCard/ToolCard 的 .aphead 里只有 .apq 标签与徽标，没有 button：
+  // 旧实现把任何 .aphead 都当交互行，夹紧恒钉在卡头高、正文永远被裁出盒
+  //（真机图一「⚠ 系统警告」只剩标题、错误正文整段不可见）
+  T.host = makeFakeEl(78);
+  T.host.querySelector = sel => (sel === ".aphead"
+    ? {getBoundingClientRect: () => ({height: 45}),
+       querySelector: () => null}
+    : null);
+  assert.strictEqual(s._floorRows(T), 0,
+    "卡头里没有按钮就不该有交互底线");
+});
+
+test("钉死高每帧兜底到交互底线（按钮换行长高后不许裁出盒）", () => {
+  const {s, T} = makeCapSession();
+  const proto = Object.getPrototypeOf(s);
+  for (const m of ["_styleHost", "_hostAlive", "_floorRows", "_blankSpan"]) {
+    s[m] = proto[m].bind(s);
+  }
+  s._lineHeight = () => 15;
+  s._cellWidth = () => 8;
+  s._fixHostVisibility = () => {};
+  // clamp 那一刻按钮还没布局完，pinnedRows 记成 3；按钮随后换行长到 4 行底。
+  // 只在武装时抬一次底线不够——_styleHost 必须每帧取当前 _floorRows 兜底，
+  // 否则按钮行被 overflow:hidden 裁出盒 = 真鼠标点不到 = 决策死锁（红线⑨）
+  T.pinnedRows = 3;
+  T.rows = 8;
+  T.host = makeFakeEl(120);
+  T.host.style = {};
+  T.host.getBoundingClientRect = () => ({top: 100, bottom: 220, height: 120});
+  T.host.querySelector = sel => (sel === ".cmdacts"
+    ? {getBoundingClientRect: () => ({top: 100, bottom: 155, height: 55})}
+    : null);
+  s._styleHost(T);
+  // 底线 = ceil((155-100)/15) = 4 行 → 盒高必须抬到 60px，不能停在 3 行 45px
+  assert.strictEqual(T.host.style.height, "60px",
+    "钉死高不得低于当前按钮行底——按钮被裁＝审批死锁");
 });
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));

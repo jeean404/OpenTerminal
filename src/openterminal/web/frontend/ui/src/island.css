@@ -97,3 +97,17 @@
 @media (prefers-reduced-motion: reduce) {
   .ot-card-host .ablk { animation: none; opacity: 1; }
 }
+
+/* 思考过程默认收起（分析卡）：只留结论，点开看模型原文 */
+.areason-wrap { margin-bottom: 4px; }
+.areason-wrap > summary {
+  cursor: pointer; font-family: var(--sans); font-size: 11px;
+  color: var(--muted); letter-spacing: 0.04em; user-select: none;
+  list-style: none;
+}
+.areason-wrap > summary::-webkit-details-marker { display: none; }
+.areason-wrap > summary::before {
+  content: "▸ "; display: inline-block; transition: transform .15s;
+}
+.areason-wrap[open] > summary::before { content: "▾ "; }
+.areason-wrap > summary:hover { color: var(--text); }

@@ -106,10 +106,22 @@ export class CardsStore {
   handle(evt) {
     switch (evt.kind) {
       case "task_start": {
-        // Phase 1：不再预建流式分析卡；分析段由 ai_result 成卡（出生即完整）
         this._lastSummaryMd = null;
         this._pendingArms.clear();   // 跨任务残留的暂存武装作废
         this._gen += 1;              // 新代：旧代收束扫尾不得碰本代卡
+        break;
+      }
+      case "analysis_boot": {
+        // Enter 后立即弹分析卡，模型未回前显示「AI 思考中」占位。
+        // id 由 app.js 给（与后续 ai_result 同一张、同一个 id）：store 自己
+        // 发号会对不上，卡片按 id 挂载找不到就是空白卡。
+        if (evt.id == null) return;
+        this.cards.push({
+          id: evt.id, type: "analysis", gen: this._gen,
+          text: "", reason: "", loading: true, done: false,
+        });
+        this._loadingId = evt.id;
+        this._emit();
         break;
       }
       case "ai_result": {
@@ -118,6 +130,19 @@ export class CardsStore {
         const text = evt.text || "";
         const reason = evt.reason || "";
         if (!text && !reason) return;
+        // 有「AI 思考中」占位卡就就地填满（同一张卡，不另开）
+        const boot = this._loadingId != null
+          ? this.cards.find(c => c.id === this._loadingId) : null;
+        if (boot && boot.loading) {
+          boot.text = text;
+          boot.reason = reason;
+          boot.loading = false;
+          boot.done = true;
+          boot.failed = !!evt.failed;
+          this._loadingId = null;
+          this._emit();
+          break;
+        }
         this.cards.push({
           id: evt.id != null ? evt.id : ++this._seq, type: "analysis", gen: this._gen,
           text, reason, done: true, failed: !!evt.failed,

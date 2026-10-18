@@ -760,3 +760,128 @@ body.sidebar-collapsed #sidebar { display: none; }
 }
 .fp-edit:focus { outline: none; border-color: var(--accent); }
 .fp-edit-hint { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
+
+/* --- 响应式：不同显示器宽度 / 系统缩放下布局收敛 ---
+   此前本文件没有任何 @media：264px 侧栏在小屏常驻会把终端挤成一条缝，
+   状态栏的次要元数据（token/尺寸/耗时）在窄窗口里把操作按钮挤出可视区。
+   原则是「终端优先」：先收侧栏宽度，再收浮层化，最后裁状态栏次要项；
+   任何档位都不改变卡片几何（卡宽恒 calc(100% - 12px)，量高由 JS 按实测）。 */
+@media (max-width: 1280px) {
+  #sidebar { width: 218px; }
+  .tab { max-width: 168px; }
+}
+@media (max-width: 1024px) {
+  #sidebar { width: 188px; }
+  .tab { max-width: 148px; }
+  .statusbar { gap: 8px; }
+  .statusbar .status-meta { gap: 8px; }
+}
+@media (max-width: 860px) {
+  /* 侧栏转浮层：终端拿满宽度，仍可从顶栏按钮唤出（配套 JS 在窄屏启动时
+     自动收起、跨过阈值变窄时也收起，只收不弹——不与用户手动展开抢状态） */
+  #sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 600;
+    width: min(78vw, 264px);
+    box-shadow: 0 0 28px rgba(0, 0, 0, 0.5);
+  }
+  /* 次要元数据让位给状态文案与操作钮 */
+  .statusbar .status-meta .status-tokens,
+  .statusbar .status-meta .status-size,
+  .statusbar .status-meta .status-time { display: none; }
+}
+@media (max-width: 640px) {
+  .statusbar { gap: 6px; padding: 3px 6px; }
+  .statusbar .status-text { display: none; }
+  .pane-head { gap: 6px; padding: 5px 8px; }
+  .seg button { padding: 3px 8px; }
+  #tabs { padding: 4px 6px 0; }
+  .tab { max-width: 118px; padding: 5px 6px 5px 8px; }
+}
+
+/* --- 块流布局（Phase 1）：卡片块与文本块是平级兄弟节点，不再贴在 xterm 网格行上 ---
+   这样三条硬约束同时消失：不遮挡（兄弟节点不重叠）、不裁切（没有 clamp）、
+   无大空白（没有 pad，也就没有「不可回吐的垫行」）。 */
+/* 单一滚动面：块区与活动终端是同一个流，不能各滚各的——两套滚动条会让
+   卡片滚出可视区却被当「在屏内」量几何（真机 C2 按钮 hit=null/DIV 的根因） */
+.ot-stage {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  position: relative; background: var(--term-bg);
+  overflow-y: auto; overflow-x: hidden;
+}
+/* 冻结块区：历史文本块 + 卡片块。空时不占位 */
+.ot-blocks {
+  flex: 0 0 auto; overflow: visible;
+  background: var(--term-bg);
+}
+.ot-blocks:empty { display: none; }
+.ot-stage .term { flex: 0 0 auto; position: relative; }
+
+/* 文本块 / 过渡段 / 横幅 */
+.ot-blk { position: relative; }
+.ot-blk-body {
+  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  color: var(--text); white-space: pre-wrap; word-break: break-word;
+  padding: 2px 12px;
+}
+.ot-blk-banner .ot-blk-body { color: var(--muted); }
+/* 过渡段（sudo su - / ssh 跳板）：紫色左边线标注，内容照常显示 */
+.ot-blk-transition { border-left: 2px solid rgba(188, 140, 255, 0.55); margin: 4px 0; }
+.ot-blk-transition .ot-blk-body { color: var(--muted); }
+
+/* 卡片块：高度由内容自撑——这是「不裁切」的结构来源 */
+.ot-blk-card { padding: 0 0 2px; }
+.ot-flow-host {
+  overflow: visible !important;   /* 覆盖 island.css 的 overflow:hidden */
+  height: auto !important;
+  max-height: none !important;
+  margin: 6px 12px 4px;
+}
+.ot-flow-host > * { margin-top: 0; }
+
+/* 块流里卡片高度自撑，不再需要「裁进网格行」。island.css 给 .acard/.ablock
+   的 overflow:hidden 原本是防卡片越过预留行盖住下方文本——块布局下兄弟节点
+   本就不重叠，留着它只会把高危两步确认的弹层、编辑浮层裁到看不见（真机
+   「点执行按钮没反应」的直接成因：弹层在按钮下方，被卡体裁掉）。 */
+.ot-flow-host .acard,
+.ot-flow-host .ablock,
+.ot-flow-host .scard,
+.ot-flow-host .aprobe,
+.ot-flow-host .dline {
+  overflow: visible;
+}
+/* 确认弹层压在卡体之上。**层级必须显式钉死**：.apcode/.cmdstat 是不透明底
+   （#0d1117）且 DOM 顺序在 .aphead 之后，一旦叠到弹层上面就把「高危命令，
+   确认执行？」整块盖住——真机 elementFromPoint 打到 PRE.apcode，用户看到的
+   就是「点执行按钮没反应」。卡头 z 3 > 正文 z 1，弹层再 z 10。 */
+.ot-flow-host .aphead { position: relative; z-index: 3; }
+.ot-flow-host .apcode,
+.ot-flow-host .cmdstat,
+.ot-flow-host .apreasons,
+.ot-flow-host .atext,
+.ot-flow-host .areason { position: relative; z-index: 1; }
+.ot-flow-host .apconfirm { position: absolute; z-index: 10; }
+/* 整条卡头链不许裁切：确认弹层挂在 .apexec 下方，一半落在 .aphead 盒外，
+   被裁掉后命中测试打到 .aphead 自己（Playwright：「.aphead intercepts
+   pointer events」）——真机「点执行按钮没反应」的最终成因。块布局下卡片
+   高度自撑，本来就没有任何裁切的必要。 */
+.ot-flow-host .aphead,
+.ot-flow-host .cmdhead,
+.ot-flow-host .cmdacts,
+.ot-flow-host .apbtns,
+.ot-flow-host .apexec,
+.ot-flow-host .adot,
+.ot-flow-host .alabel,
+.ot-flow-host .apstate {
+  overflow: visible;
+}
+
+/* 工具卡状态配色：完成绿 / 失败橙——与命令卡口径统一（真机反馈：
+   read_file 这类非 execute 工具卡一直是橙色，和「已完成」的语义对不上） */
+.tcard.done {
+  border-color: var(--ok);
+  border-left-color: var(--p-warn);
+  background: #101a13;
+}
+.tcard.done .aphead { background: rgba(63, 185, 80, 0.13); }
+.tcard.failed { border-color: var(--warn); background: #1c1608; }
+.tcard.failed .aphead { background: rgba(210, 153, 34, 0.14); }
