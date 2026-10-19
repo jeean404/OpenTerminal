@@ -1,10 +1,17 @@
-// 收束不变量回归（用户诉求 2026-10-09：「任何卡片都不应该中断或者结束后
-// 出现中间状态，显示一半。要么不显示，要么显示完整」）。
-// interrupt（Ctrl+C/⏹）收束：流式未完毕的卡整卡移除（store 撤内容 + onDrop
-// 丢槽），活流卡不做失败定格；任何收束：挂载链落定后逐槽结账，垫不满的
-// （盖帽/夹紧/pendingMount）整卡丢弃。审批卡豁免——按钮行底线夹紧是功能。
+// 收束不变量回归（Phase 4 后语义）。
+//
+// 演进：用户诉求 2026-10-09「要么不显示，要么显示完整」曾落地为「垫不满就
+// 整卡丢弃」——但贴纸拆了、pad 空行（append-only）回收不了，原位留洞（真机
+// 图二「消失留白」）。Phase 4 定格一发入魂后，卡**内容完整才挂载**，「半截
+// 尸块」在内容层已不可能；布局层收束改为「保留夹紧」：
+//   ① store 扫迟到补挂的未完毕内容卡（sweep——中断/异常残留，内容级）；
+//   ② 逐槽结账一次给「垫得进去」的卡补齐机会；
+//   ③ 仍不完整的卡**保留夹紧**（钉死到已垫高度 + 揭示放出），不丢弃、不留洞；
+//   ④ 仅「从未挂载成功」的槽（无 host、没写过 pad 行）走 _fallbackPlain 纯文本
+//      降级后拆除——不占预留行，拆了也不留洞，内容不丢。
+// 审批卡豁免——按钮行底线夹紧是功能（可点性优先）。
 // 这里把 store/pad/装饰重机械打桩，只验 _onTaskFail/_onFinal/_endSweep 的
-// 编排与「半截卡丢弃、完整卡保留」的收束判定。
+// 编排与收束判定。
 "use strict";
 
 const test = require("node:test");
@@ -45,6 +52,7 @@ function makeSession() {
   const s = Object.create(Session.prototype);
   s._dead = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._cardSeq = 0;
   s._taskActive = true;
   s._taskCardId = null;
@@ -55,19 +63,25 @@ function makeSession() {
   s.events = [];   // 假 feed.handle 收到的事件流
   s.settled = [];  // 结账调用记录
   s.revealed = [];
+  s.fallbacks = [];   // _fallbackPlain 降级记录
+  s.clampedIds = [];
   s._ensureFeed = () => Promise.resolve({
     handle: evt => s.events.push(evt),
     mount() {}, unmount() {}, destroy() {},
   });
   s._settleCard = slot => { s.settled.push(slot.id); return Promise.resolve(); };
   s._revealSlot = slot => { s.revealed.push(slot.id); slot.revealed = true; };
-  s._scheduleReanchor = () => {};
+  s._clampCard = slot => { s.clampedIds.push(slot.id); slot.clamped = true; };
+  s._applyDecoration = () => {};
+  s._fallbackPlain = slot => { s.fallbacks.push(slot.id); };
+  s._scheduleDrift = () => {};
   s._scheduleHeal = () => {};
   s._setStopVisible = () => {};
   s._startTimer = () => {};
   s._endTimer = () => {};
   s._refreshThink = () => {};
   s.setStatus = () => {};
+  s._progress = {chars: 0, tokensIn: 0, tokensOut: 0};
   return s;
 }
 
@@ -86,10 +100,11 @@ function addSlot(s, id, shape, kind = "phase") {
 
 const kinds = s => s.events.map(e => e.kind);
 
-test("interrupt 收束：活流卡不定格失败，扫尾丢半截、留完整、豁免审批卡", async () => {
+test("interrupt 收束：未完毕内容卡整卡移除（store sweep），布局层保留夹紧、降级 pending", async () => {
   const s = makeSession();
   const full = addSlot(s, 1, {});
-  const half = addSlot(s, 2, {pinnedRows: 1, clamped: true, reserved: 1, rows: 3});
+  const half = addSlot(s, 2, {pinnedRows: 1, clamped: true, reserved: 1, rows: 3,
+                              revealed: false});
   const pend = addSlot(s, 3, {mounted: false, pendingMount: true, reserved: 0, rows: 2});
   const ap = addSlot(s, 4, {pinnedRows: 2, clamped: true, reserved: 2, rows: 6}, "approval");
   s._taskCardId = 1;
@@ -98,45 +113,52 @@ test("interrupt 收束：活流卡不定格失败，扫尾丢半截、留完整�
   assert.ok(kinds(s).includes("task_fail"), "store 应收到 task_fail");
   assert.strictEqual(s.events.find(e => e.kind === "task_fail").reason, "interrupt");
   assert.ok(kinds(s).includes("sweep"), "收束应过 sweep 扫尾");
-  const drop = s.events.find(e => e.kind === "drop");
-  assert.deepStrictEqual([...drop.ids].sort(), [2, 3], "半截卡与从未上屏的卡应整卡丢弃");
+  // Phase 4：垫不满的卡**保留夹紧**，不再整卡丢弃（拆贴纸留洞＝真机图二）
+  assert.ok(s._slots.has(2), "垫不满的卡保留（夹紧钉死），不丢弃");
   assert.ok(s._slots.has(1), "完整卡保留");
   assert.ok(s._slots.has(4), "审批卡豁免（按钮行底线夹紧是功能）");
-  assert.ok(!s._slots.has(2) && !s._slots.has(3));
+  assert.ok(!s._slots.has(3), "从未上屏的槽拆除（没占预留行，不留洞）");
+  const drop = s.events.find(e => e.kind === "drop");
+  assert.deepStrictEqual(drop && [...drop.ids], [3],
+    "drop 只发给从未挂载成功的槽");
+  assert.deepStrictEqual(s.fallbacks, [3],
+    "pendingMount 槽走纯文本降级，内容不丢");
+  assert.ok(s.revealed.includes(2), "保留的夹紧卡放出（不留隐形卡）");
   assert.strictEqual(full.frozen, undefined, "interrupt 不做失败定格（整卡移除语义）");
-  assert.deepStrictEqual(s.settled.sort(), [1, 2, 3],
+  assert.deepStrictEqual([...s.settled].sort(), [1, 2, 3],
     "扫尾给每个非审批卡一次结账机会（垫得进去的补齐）");
 });
 
-test("error/limit 收束：活卡仍定格失败态（既有语义不变），扫尾照丢半截", async () => {
+test("error/limit 收束：失败态由 store failed 承担，垫不满的卡保留夹紧", async () => {
   const s = makeSession();
   const live = addSlot(s, 10, {});
   const half = addSlot(s, 11, {pinnedRows: 1, clamped: true, reserved: 1, rows: 4});
-  s._taskCardId = 10;
   s._onTaskFail("limit", "预算用尽");
   await s._sweepQ; await tick();
-  assert.strictEqual(live.frozen, true, "非 interrupt 收束仍定格失败态");
-  assert.ok(!s._slots.has(11), "半截卡照丢");
-  assert.ok(s._slots.has(10), "定格卡完整显示则保留");
+  assert.ok(kinds(s).includes("task_fail"), "store 应收到 task_fail");
+  assert.ok(s._slots.has(11), "垫不满的卡保留（不丢弃、不留洞）");
+  assert.ok(s.clampedIds.includes(11), "夹紧钉死到已垫高度");
+  assert.ok(s._slots.has(10), "完整卡保留（出生即冻结，无事后定格语义）");
 });
 
-test("final 收束：扫尾等总结挂载落定（半截总结不许挂着）", async () => {
+test("final 收束：扫尾等总结挂载落定，垫不满的总结卡保留夹紧", async () => {
   const s = makeSession();
   let mountDone = false;
   s._mountSummary = () => new Promise(r => setTimeout(() => {
     mountDone = true;
-    addSlot(s, 20, {pinnedRows: 1, clamped: true, reserved: 1, rows: 5}, "summary");
+    addSlot(s, 20, {pinnedRows: 1, clamped: true, reserved: 1, rows: 5,
+                    revealed: false}, "summary");
     r();
   }, 5));
   s._onFinal("# 总结");
   await s._sweepQ; await tick();
   assert.ok(mountDone, "扫尾必须等总结卡挂载完");
-  assert.ok(!s._slots.has(20), "垫不满的总结卡也整卡消失（要么不显示要么显示完整）");
-  const drop = s.events.find(e => e.kind === "drop");
-  assert.deepStrictEqual(drop.ids, [20]);
+  assert.ok(s._slots.has(20), "垫不满的总结卡保留夹紧（要么完整显示要么被裁，绝不消失留洞）");
+  assert.ok(s.clampedIds.includes(20));
+  assert.ok(s.revealed.includes(20), "收束不留隐形卡");
 });
 
-test("收束后迟到的工具宣告不再挂卡（半截卡只减不增）", async () => {
+test("收束后迟到的工具宣告不再挂卡（残留只减不增）", async () => {
   const s = makeSession();
   let mounts = 0;
   s._mountCard = async id => { mounts++; addSlot(s, id, {}); return s._slots.get(id); };

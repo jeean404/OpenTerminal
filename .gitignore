@@ -20,6 +20,9 @@ ot_web_debug.log*
 # 前端 island 构建依赖
 node_modules/
 
+# playwright CLI 本地调试日志
+.playwright-cli/
+
 # superpowers 调试工作区(计划台账/评审包/复现探针,本地临时)
 .superpowers/
 
@@ -36,8 +39,10 @@ connections.toml
 /docs/card_duplicate.md
 /docs/summary_card_lost.md
 /docs/merge-handoff-keymap-fix.md
+/docs/learn-m365-agent-sdk-copilot-stack.md
 /docs/patch_file.patch
 /docs/fix-pw-autofill-keymap.patch
+/docs/*.patch
 /docs/*.png
 /scripts/smoke_*.py
 /scripts/run_main_worktree_web.py

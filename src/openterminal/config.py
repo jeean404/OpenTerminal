@@ -1,9 +1,15 @@
-"""配置加载：~/.openterminal/config.toml + 默认值。"""
+"""配置加载：.env（项目 > ~/.openterminal/.env）+ config.toml + 默认值。
+
+模型协议由 .env 的 ANTHROPIC_* / OPENAI_* 二选一决定（都配=报错，都没配=报错）；
+config.toml 只管 shell/policy/web/targets 与模型名（credentials 以 .env 为准）。
+"""
 
 from __future__ import annotations
 
 import os
 import tomllib
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,16 +20,157 @@ def app_dir() -> Path:
     )
 
 
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """极简 .env 解析：KEY=VALUE 行、# 注释、可选引号。脏行跳过不打挂。"""
+    out: dict[str, str] = {}
+    if not path.exists():
+        return out
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            out[key] = val
+    return out
+
+
+# 凭据变量名：*_API_KEY 是 SDK 正式名；*_AUTH_TOKEN 是 Anthropic 生态与各类
+# 网关的另一个标准凭据名（Claude Code、Codex 代理、本地免密网关都用它）。
+# 真机踩过：密钥只 export 了 ANTHROPIC_AUTH_TOKEN，旧实现只认 *_API_KEY，
+# 于是判「未配置模型协议」——模型其实一路跑得好好的（红警告误报）。
+_ANTHROPIC_KEY_ENVS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+_OPENAI_KEY_ENVS = ("OPENAI_API_KEY", "OPENAI_AUTH_TOKEN")
+_ALL_KEY_ENVS = _ANTHROPIC_KEY_ENVS + _OPENAI_KEY_ENVS
+
+
+def _pick_key(env: dict[str, str], names: tuple[str, ...]) -> str | None:
+    """按优先级取第一个有值的凭据变量名；空值不当「配了」。"""
+    for n in names:
+        if env.get(n):
+            return n
+    return None
+
+
+def load_env() -> dict[str, str]:
+    """合并 .env：项目 .env（cwd）优先 > ~/.openterminal/.env > 系统环境变量。
+
+    「当前项目 .env 优先级最高」（用户约定）：同名键项目覆盖家目录、家目录
+    覆盖系统环境。只读不动 os.environ——副作用留给调用方决定。
+    """
+    # 三层都要看：系统环境变量 < ~/.openterminal/.env < 项目 .env。
+    # 旧实现只读两份 .env 文件、漏了系统环境变量——用户把密钥 export 在
+    # shell 里时，模型明明跑得好好的却报「未配置模型协议」（真机红警告误报）
+    merged: dict[str, str] = {k: v for k, v in os.environ.items() if v}
+    home_env = app_dir() / ".env"
+    for k, v in _parse_env_file(home_env).items():
+        merged[k] = v
+    project_env = Path.cwd() / ".env"
+    for k, v in _parse_env_file(project_env).items():
+        merged[k] = v
+    return merged
+
+
+def model_from_env(env: dict[str, str]) -> tuple[dict, list[str]]:
+    """按 ANTHROPIC_*/OPENAI_* 二选一定协议。返回 (model 字段覆盖, 错误列表)。
+
+    - 两套都配 → 报错（只能配一个）；都没配 → 报错（红色警告卡素材）；
+    - 配了哪套走哪套协议：base_url + 凭据成对才算「配了」，凭据认
+      *_API_KEY 与 *_AUTH_TOKEN 两种标准名。
+    """
+    ant_url = env.get("ANTHROPIC_BASE_URL") or ""
+    oai_url = env.get("OPENAI_BASE_URL") or ""
+    ant_key_env = _pick_key(env, _ANTHROPIC_KEY_ENVS)
+    oai_key_env = _pick_key(env, _OPENAI_KEY_ENVS)
+    ant = bool(ant_url) and bool(ant_key_env)
+    oai = bool(oai_url) and bool(oai_key_env)
+    if ant and oai:
+        return {}, ["模型协议冲突：ANTHROPIC_* 与 OPENAI_* 同时配置，只能配一个"]
+    if ant:
+        return {"provider": "anthropic",
+                "base_url": ant_url,
+                "api_key": env[ant_key_env],
+                "model": env.get("ANTHROPIC_MODEL") or env.get("MODEL_ID", "")}, []
+    if oai:
+        return {"provider": "openai",
+                "base_url": oai_url,
+                "api_key": env[oai_key_env],
+                "model": env.get("OPENAI_MODEL") or env.get("MODEL_ID", "")}, []
+    return {}, ["未配置模型协议：请在项目 .env 或 ~/.openterminal/.env 配置 "
+                "ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY 或 "
+                "OPENAI_BASE_URL+OPENAI_API_KEY"]
+
+
 _DEFAULT_MODELS = [
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5",
 ]
 
 # provider = "openai"（OpenAI 兼容协议）时的缺省值：模型、下拉可选列表与
-# anthropic 各一套；config.toml 显式写了的字段一律优先
+# anthropic 各一套；config.toml [model] 显式写了的字段一律优先
 _DEFAULT_MODEL_OPENAI = "gpt-5"
 _DEFAULT_MODELS_OPENAI = [
     "gpt-5", "gpt-5-mini", "o4-mini",
 ]
+
+
+def _endpoint_reachable(base_url: str, timeout: float = 0.5) -> bool:
+    """生效 base_url 连不连得上：任何 HTTP 响应都算通（404 也说明服务在）。
+
+    这是「能跑就不挂红警告」的最终判据——免密网关、异形鉴权（AUTH_TOKEN、
+    网关内定 token）一并覆盖，不用猜用户把密钥写在哪。只发不带凭据的 GET。
+    """
+    if not base_url:
+        return False
+    try:
+        with urllib.request.urlopen(base_url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True          # 服务应答了，只是路径不对——端点是活的
+    except Exception:
+        return False         # 连接拒绝/超时/DNS 挂/URL 脏，都算跑不起来
+
+
+def _prune_model_errors(errors, env_model, model_cfg, environ):
+    r"""去掉「未配置模型协议」的**误报**：模型真能用时不该挂红警告卡。
+
+    判据是「跑不跑得起来」，不是「配置文件里有没有那两行」。真机踩过两回：
+    ① config.toml [model] 给了 base_url、密钥也在环境变量里，模型跑得好好的，
+       卡头却挂红「未配置模型协议」；
+    ② config.toml 压根没写 [model]，走内置缺省 base_url（本地网关免密），
+       模型一样跑得好好的——旧判据只认「config.toml 显式写了 base_url」，
+       把「用户没覆盖缺省值」误当成「用户没配置」。
+
+    故判据看**最终生效的** ModelConfig，且拿不准就探一下端点可达性。
+    二选一协议的**冲突**报错不在此列，照常报。
+    """
+    if env_model:
+        return list(errors)          # .env 配了协议：原样
+    key_env = str(model_cfg.api_key_env or "ANTHROPIC_API_KEY")
+    # 「能跑」两条路占一条即可：① 凭据到位（显式 api_key / 间接寻址的环境
+    # 变量 / *_AUTH_TOKEN 这类网关 token）；② 生效端点真连得上（本地网关可能
+    # 根本不要密钥，模型照样跑得好好的）
+    usable = (
+        bool(model_cfg.api_key)
+        or bool(environ.get(key_env))
+        or any(environ.get(n) for n in _ALL_KEY_ENVS)
+        or _endpoint_reachable(model_cfg.base_url)
+    )
+    if not usable:
+        return list(errors)
+    out = []
+    for e in errors:
+        if "未配置模型协议" in e:
+            continue
+        out.append(e)
+    return out
 
 
 @dataclass
@@ -32,6 +179,8 @@ class ModelConfig:
     base_url: str = "http://127.0.0.1:15721"
     model: str = "claude-sonnet-4-6"
     api_key_env: str = "ANTHROPIC_API_KEY"
+    # .env 直配的密钥（优先于 api_key_env 间接寻址）；None=走环境变量
+    api_key: str | None = None
     # Web 状态栏模型下拉的可选模型（可在 config.toml [model] models 覆盖）
     models: list[str] = field(default_factory=lambda: list(_DEFAULT_MODELS))
 
@@ -77,6 +226,8 @@ class Config:
     targets: dict[str, TargetConfig] = field(
         default_factory=lambda: {"default": TargetConfig()}
     )
+    # 启动期配置错误（协议二选一冲突/都缺）：Web 端出红色警告卡展示
+    errors: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -87,6 +238,13 @@ class Config:
 
         m, s, p = data.get("model", {}), data.get("shell", {}), data.get("policy", {})
         w = data.get("web", {})
+        # 模型协议以 .env 为准（项目 .env > ~/.openterminal/.env > 系统环境）；
+        # config.toml [model] 只兜底模型名/下拉列表，credentials 不再从它取
+        env = load_env()
+        env_model, env_errors = model_from_env(env)
+        for k, v in env.items():
+            if k in _ALL_KEY_ENVS and v:
+                os.environ.setdefault(k, v)   # api_key_env 间接寻址要用
         # 协议 provider：anthropic（缺省）| openai（OpenAI 兼容协议）。脏值容错：
         # 未知值回落 anthropic，与 port 写坏只丢字段同一哲学——配置手误不
         # 打挂启动。provider 决定 base_url / model / api_key_env / models 的
@@ -124,19 +282,25 @@ class Config:
                 port=port,
                 commands=commands,
             )
+        model = ModelConfig(
+            provider=env_model.get("provider", provider),
+            base_url=env_model.get("base_url") or m.get(
+                "base_url", "" if openai else ModelConfig.base_url),
+            model=env_model.get("model") or m.get(
+                "model", _DEFAULT_MODEL_OPENAI if openai else ModelConfig.model),
+            api_key_env=m.get(
+                "api_key_env",
+                ("OPENAI_API_KEY" if env_model.get("provider") == "openai"
+                 or openai else ModelConfig.api_key_env)),
+            models=list(m.get(
+                "models",
+                _DEFAULT_MODELS_OPENAI if openai else _DEFAULT_MODELS)),
+            api_key=env_model.get("api_key"),
+        )
+        # 降噪必须看**生效的** model，故先构造好再判（旧实现拿 config.toml
+        # 的原始 [model] dict 猜，内置缺省 base_url 于是永远算「没配」）
         return cls(
-            model=ModelConfig(
-                provider=provider,
-                base_url=m.get("base_url", "" if openai else ModelConfig.base_url),
-                model=m.get("model",
-                            _DEFAULT_MODEL_OPENAI if openai else ModelConfig.model),
-                api_key_env=m.get(
-                    "api_key_env",
-                    "OPENAI_API_KEY" if openai else ModelConfig.api_key_env),
-                models=list(m.get(
-                    "models",
-                    _DEFAULT_MODELS_OPENAI if openai else _DEFAULT_MODELS)),
-            ),
+            model=model,
             shell=ShellConfig(
                 timeout_default=int(s.get("timeout_default", 120)),
                 max_output_bytes=int(s.get("max_output_bytes", 102_400)),
@@ -154,4 +318,5 @@ class Config:
                 token=w.get("token", WebConfig.token),
             ),
             targets=targets,
+            errors=_prune_model_errors(env_errors, env_model, model, os.environ),
         )

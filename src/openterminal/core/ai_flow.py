@@ -25,6 +25,35 @@ from .messages import ServerMsg, _dbg
 from ..shell.integration import toggle_line
 
 
+class _SegBuffer:
+    """paced 段缓冲：Web 模式下 token/think 攒到段边界一次性下发（ai_result）。
+
+    前端不攒 token 流（浏览器零压力）；段边界 = tool_start（轮内文本先于
+    tool_start 全部到达）/ final（吞正文留思考）/ 失败路径（冲 failed 段）/
+    中断（不冲，零残留）。双空段不发（纯工具轮不长空分析卡）。
+    """
+
+    __slots__ = ("text", "think", "chars", "beat", "runner")
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.think = ""
+        self.chars = 0      # 累计字数（跨段，徽标显示用）
+        self.beat = 0.0     # 上次心跳时刻（monotonic）
+        self.runner = None  # TaskRunner（心跳读 token 计数）
+
+    def add(self, text: str, think: str) -> None:
+        self.text += text
+        self.think += think
+        self.chars += len(text) + len(think)
+
+    def take(self) -> tuple[str, str]:
+        text, think = self.text, self.think
+        self.text = ""
+        self.think = ""
+        return text, think
+
+
 class AiFlow:
     def __init__(self, core) -> None:
         self.core = core
@@ -106,15 +135,18 @@ class AiFlow:
                 type="event", event={"kind": "error",
                                      "text": f"处理失败：{type(e).__name__}: {e}"}))
         finally:
+            _dbg("ai_flow finally")
             self.core._ai_task = None
             self.core._reinject_pending = False
             try:
                 await self.core.exec._curtain_open()   # 任务收尾：扣住的提示符放行
+                _dbg("curtain opened")
             except Exception:                # noqa: BLE001 - 收尾放行不能盖错误
                 pass
             if self.core._ai_queue and not self.core._closed:
                 _q = self.core._ai_queue.pop(0)
                 self._start_ai(_q[0], _q[1] if len(_q) > 1 else False)
+            _dbg("ai_flow done")
 
     # --- Agent/Shell 显示模式切换 ---
     async def _on_ai_line(self, line: str, hooked: bool = False) -> None:
@@ -393,10 +425,43 @@ class AiFlow:
             await self.core._manual_system(line)
             return True
         return False
+    def _flush_seg(self, failed: bool = False) -> None:
+        """paced 段冲刷：一次性 ai_result。双空 no-op（幂等——limit/error 会
+        被 _live 与 _handle_events 双路过，第二发自然空转）。"""
+        seg = getattr(self, "_seg", None)
+        if seg is None:
+            return
+        text, think = seg.take()
+        if not text and not think:
+            return
+        self.core._emit_nowait(ServerMsg(
+            type="event",
+            event={"kind": "ai_result", "text": text, "think": think,
+                   "failed": failed}))
+
+    def _seg_beat(self, force: bool = False) -> None:
+        """徽标心跳（1s 节流）：累计字数 + token 计数（runner 逐调用更新）。"""
+        seg = getattr(self, "_seg", None)
+        if seg is None or not self.core.paced_display:
+            return
+        now = time.monotonic()
+        if not force and now - seg.beat < 1.0:
+            return
+        seg.beat = now
+        r = seg.runner
+        self.core._emit_nowait(ServerMsg(
+            type="event", event={
+                "kind": "progress", "chars": seg.chars,
+                "tokens_in": ((r.input_tokens or r.est_input_tokens) if r else 0),
+                "tokens_out": ((r.output_tokens or r.est_output_tokens) if r else 0)}))
+
     async def _run_task(self, text: str, hooked: bool = False) -> None:
         self.core.transcript.append("user", text=text)
         self.core._task_cmd_started = False
         self.core._tool_idx_map = {}   # 跨任务残留的局部 index 映射作废（序号不回绕）
+        # paced 段缓冲（Web 一次性落格用；CLI paced_display=False 不进缓冲）。
+        # 任务级 finally 清空：中断取消同样收口，残段不得泄进下个排队任务
+        self._seg = _SegBuffer()
         # task_start 先于 AI 栈导入/重注入：首任务 deepagents/langchain 秒级
         # 导入与换壳重注入不得挡在分析卡出场前（真机「输完自然语言等几秒
         # 才出卡」根因）；构建失败照发 error 事件，卡片原地定格为已中止
@@ -428,17 +493,29 @@ class AiFlow:
         def _live(ev) -> None:
             self.core._ai_ping_at = time.monotonic()   # 事件产出 = 任务在世，僵尸判据刷新
             if ev.kind == "token":
-                self.core._emit_nowait(ServerMsg(
-                    type="event",
-                    event={"kind": "ai_token", "text": ev.text}))
+                if self.core.paced_display:
+                    # 段攒流：不逐 token 下发（浏览器零压力），段边界一次性落格
+                    self._seg.add(ev.text, "")
+                    self._seg_beat()
+                else:
+                    self.core._emit_nowait(ServerMsg(
+                        type="event",
+                        event={"kind": "ai_token", "text": ev.text}))
             elif ev.kind == "think":
-                self.core._emit_nowait(ServerMsg(
-                    type="event",
-                    event={"kind": "ai_think", "text": ev.text}))
+                if self.core.paced_display:
+                    self._seg.add("", ev.text)
+                    self._seg_beat()
+                else:
+                    self.core._emit_nowait(ServerMsg(
+                        type="event",
+                        event={"kind": "ai_think", "text": ev.text}))
             elif ev.kind == "denied":
+                self._flush_seg()
                 self.core._emit_nowait(ServerMsg(
                     type="event", event={"kind": "denied", "text": ev.text}))
             elif ev.kind == "tool_start":
+                # 段边界：先落格（轮内 token 全部先于 tool_start），再宣告工具
+                self._flush_seg()
                 # 阶段边界先定格当前分析卡（工具卡挂流底，之后模型输出开新卡，
                 # 叙事节奏与分析卡→命令→分析卡一致）；再挂工具调用小卡。
                 # 工具执行期无 PTY 输出，不需要 boundary 门闩。execute 也发卡
@@ -453,7 +530,18 @@ class AiFlow:
                     type="event",
                     event={"kind": "ai_tool", "phase": "start",
                            "id": self.core._tool_card_seq,
-                           "name": ev.name, "args": ev.text}))
+                           "name": ev.name, "args": ev.text,
+                           # 命令卡出生预判（谓词单源 Policy）：needs_approval
+                           # 为真前端直接摆「等待审批」按钮簇；容忍审批不至
+                           #（allowed 只增，中途命中直通）——tool_end 直通 ✓ 合法迁移
+                           "command": ev.command,
+                           "needs_approval": bool(ev.command) and
+                               self.core.policy.needs_approval(
+                                   ev.command, self.core.allowed),
+                           "reasons": self.core.policy.classify(
+                               ev.command).reasons if ev.command else [],
+                           "risk": self.core.policy.risk(ev.command)
+                               if ev.command else ""}))
             elif ev.kind == "tool_end":
                 gid = self.core._tool_idx_map.pop(ev.index, None)
                 if gid is not None:
@@ -462,9 +550,11 @@ class AiFlow:
                         event={"kind": "ai_tool", "phase": "end", "id": gid,
                                "failed": ev.failed}))
             elif ev.kind == "limit":
+                self._flush_seg(failed=True)
                 self.core._emit_nowait(ServerMsg(
                     type="event", event={"kind": "limit", "text": ev.text}))
             elif ev.kind == "error":
+                self._flush_seg(failed=True)
                 self.core._emit_nowait(ServerMsg(
                     type="event", event={"kind": "error", "text": ev.text}))
 
@@ -476,20 +566,30 @@ class AiFlow:
             max_tool_turns=self.core.cfg.shell.max_tool_turns,
             on_event=_live,
         )
+        self._seg.runner = runner   # 心跳读 token 计数
         try:
             events = await runner.run(text)
             await self._handle_events(runner, events)
         except Exception as e:  # noqa: BLE001 - 任务异常发 error 事件让前端收尾
             # 不能只靠 _run 兜底的 status——前端靠 error/final 停计时、收卡片
+            self._flush_seg(failed=True)   # 残段落格标失败（非中断留痕）
             await self.core.emit_msg(ServerMsg(
                 type="event", event={"kind": "error",
                                      "text": f"任务失败：{type(e).__name__}: {e}"}))
             return
         finally:
+            _dbg("run_task finally")
+            self._seg = _SegBuffer()   # 清缓冲：中断取消同口径，残段不泄进下个任务
             self.core.backend.on_output = None
             self.core.backend.on_start = None
             self.core.backend.on_finish = None
             self.core.backend.on_boundary = None
+        # 收尾保证：final 空文（纯工具任务）也要关徽标/停计时/扫尾——
+        # 旧实现该路径什么都不发，徽标永转。CLI 忽略未知事件，Web 幂等收尾
+        _dbg("task_end emit")
+        await self.core.emit_msg(ServerMsg(
+            type="event", event={"kind": "task_end"}))
+        _dbg("task_end emitted")
         # 累计会话 token 用量并上报前端状态栏。口径：真实 usage_metadata
         # 优先；网关不回传时用 tiktoken 估算（token_est），前端以 ≈ 标注
         task_in = runner.input_tokens or runner.est_input_tokens
@@ -534,6 +634,19 @@ class AiFlow:
                     return
                 elif ev.kind == "final":
                     self.core.transcript.append("final", text=ev.text)
+                    # 吞正文留思考：缓冲 text 就是 final 答案本体（_final_text
+                    # 重读同一 AIMessage），再冲刷就是分析段+总结卡同文烧两遍。
+                    # 思考文本不丢：非空冲「仅思考段」。
+                    seg = getattr(self, "_seg", None)
+                    if seg is not None:
+                        think = seg.think
+                        seg.text = ""
+                        seg.think = ""
+                        if think.strip():
+                            self.core._emit_nowait(ServerMsg(
+                                type="event", event={
+                                    "kind": "ai_result", "text": "",
+                                    "think": think, "failed": False}))
                     await self.core.emit_msg(ServerMsg(
                         type="event",
                         event={"kind": "final", "text": ev.text}))
@@ -550,11 +663,22 @@ class AiFlow:
             decisions: list[dict] = []
             for req in requests:
                 command = req.get("args", {}).get("command", "")
+                name = req.get("name") or "execute"
+                # 认领工具卡（ActionRequest 无 tool_call id）：按 (name, command)
+                # 有序消歧，审批事件带卡 id，按钮摆进同一张命令卡（二合一）
+                seq = runner.claim_seq(name, command)
+                card_id = (self.core._tool_idx_map.get(seq, 0)
+                           if seq is not None else 0)
                 description = req.get("description") or "高危命令需要审批"
                 self.core.transcript.append("approval", command=command)
                 decision = await self.core.ask_approval(
                     command, description, self.core._target_host,
-                    self.core._approval_risk(command))
+                    self.core._approval_risk(command), id=card_id)
+                if isinstance(decision, dict) and decision.get("allow"):
+                    # 「始终允许」入会话免审集：同令后续直通（_when 同源谓词）。
+                    # 旧实现从不读 allow 字段——按钮等于「执行」（假功能修复）。
+                    self.core.allowed.add(command)
+                    decision = {k: v for k, v in decision.items() if k != "allow"}
                 decisions.append(decision)
             events = await runner.resume(decisions)
     async def _switch_display(self, mode: str) -> None:

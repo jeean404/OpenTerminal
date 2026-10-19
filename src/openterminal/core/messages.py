@@ -59,7 +59,8 @@ class ServerMsg:
     host: str = ""
     user: str = ""
     distro: str = ""
-    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_tool/ai_card/final/denied/limit/error
+    event: dict | None = None      # 事件：task_start/ai_token/ai_think/ai_collapse/ai_tool/ai_card/final/denied/limit/error；
+                                  # term_open/term_close = 命令执行边界括号（输出归属，见 core/exec_events.py）
     command: str = ""              # approval：待审批命令
     reasons: str = ""
     label: str = ""
@@ -69,6 +70,7 @@ class ServerMsg:
     models: list[str] | None = None   # 可切换模型列表（ready）
     prompt: str = ""               # ready：真实提示符纯文本（OSC 133 B 捕获）
     risk: str = ""                 # 审批风险级（approval）：high 红框 | normal 蓝框
+    id: int = 0                    # approval：关联命令卡 id（ai_tool start 同 id，无卡=0）
     tokens_in: int = 0             # 会话累计输入 token（usage）
     tokens_out: int = 0            # 会话累计输出 token（usage）
     estimated: bool = False        # usage：当前累计为 tiktoken 估算口径（前端加 ≈）

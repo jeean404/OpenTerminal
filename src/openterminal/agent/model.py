@@ -22,7 +22,8 @@ def build_chat_model(cfg: ModelConfig) -> Any:
     任何 OpenAI 兼容协议网关（base_url 留空则用 SDK 官方端点）。langchain_openai
     在分支内惰性导入：anthropic 配置既不付导入耗时也不要求安装该包。
     """
-    api_key = os.environ.get(cfg.api_key_env, "not-set")
+    # .env 直配的 key 优先（项目 .env > ~/.openterminal/.env）；否则走环境变量
+    api_key = cfg.api_key or os.environ.get(cfg.api_key_env, "not-set")
     if cfg.provider == "openai":
         from langchain_openai import ChatOpenAI
 

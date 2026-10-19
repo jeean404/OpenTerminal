@@ -22,13 +22,15 @@ export function createFeed(api) {
 
   return {
     handle: evt => store.handle(evt),
-    flush: () => store.flushNow(),
     mount(cardId, hostEl) {
       const prev = roots.get(cardId);
       if (prev) {
         if (prev.el === hostEl) return;
         // 重贴 decoration 会换新 host 元素：root 必须迁过去，否则 React 树
         // 留在已离屏的旧元素上——卡片真机空白（P0-1）
+        console.warn("[island] root 迁移重挂", cardId,
+          "prevConnected=", prev.el && prev.el.isConnected,
+          "sameParent=", prev.el && hostEl && prev.el.parentNode === hostEl.parentNode);
         roots.delete(cardId);
         try { prev.root.unmount(); } catch (e) {}
       }

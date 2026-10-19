@@ -21,6 +21,7 @@ function loadSessionClass() {
     createElement: () => ({style: {}, classList: {add() {}, remove() {}}}),
     addEventListener() {},
     getElementById: () => ({onclick: null, addEventListener() {}, value: ""}),
+    querySelector: () => null,
     querySelectorAll: () => [],
     head: {appendChild() {}},
     body: {classList: {toggle() {}}},
@@ -59,6 +60,9 @@ function makeSession() {
   const s = Object.create(Session.prototype);
   s._dead = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
+  s._cardSeq = 0;
+  s._taskClosed = false;
   s._holdDepth = 0;
   s._holdBuf = [];
   s._lastByteAt = 0;
@@ -128,29 +132,31 @@ test("并发 _mountCard：两张卡不得钉同一缓冲行（后贴纸者会盖
     `第二张卡必须钉在第一张预留区之下（实际 ${s.lines[0]} vs ${s.lines[1]}＝同锚重叠）`);
 });
 
-test("真入口竞态：ai_tool start 与 showApproval 同包到达，审批卡钉在工具卡之下", async () => {
+// Phase 2：审批不挂独立卡（按钮就地武装在命令卡上），「审批卡被工具卡盖住」
+// 事故形态从根上消失。替代不变量：同包到达时命令卡按宣告序挂载、
+// command_card_waiting 正确落到映射卡上，且全程零新增 slot。
+test("真入口竞态：ai_tool start 与 showApproval 同包到达，就地武装不加塞", async () => {
   const s = makeSession();
   const cmd = "docker exec vb_fwl_svc rm -rf /tmp/x";
-  s._onAiTool({phase: "start", id: 7, name: "execute", args: cmd});
-  s.showApproval(cmd, "删除操作", "host1", "high");
-  // 等两条挂载链都落定（审批卡 kind=approval）
+  s._onAiTool({phase: "start", id: 7, name: "execute", args: cmd, command: cmd});
+  s.showApproval(cmd, "删除操作", "host1", "high", 7);
+  // 等命令卡挂载链落定
   const t0 = Date.now();
   while (Date.now() - t0 < 3000) {
-    const kinds = [...s._slots.values()].map(x => x.kind);
-    if (kinds.includes("approval") && s._slots.has("tool7")) break;
+    if (s._slots.has(s._toolCards.get(7))) break;
     await s._sleep(20);
   }
-  const tool = s._slots.get("tool7");
-  const ap = [...s._slots.values()].find(x => x.kind === "approval");
-  assert.ok(tool && tool.marker, "工具卡应挂载");
-  assert.ok(ap && ap.marker, "审批卡应挂载");
-  assert.ok(ap.marker.line > tool.marker.line,
-    `审批卡须位于工具卡之下（实际 tool@${tool.marker.line} approval@${ap.marker.line}＝审批卡被工具卡盖住、按钮点不到）`);
-  // 视觉叠序由各 island 自己的 marker 行决定，与 feed.handle 序无关
-  // （showApproval 刻意「先入 store 再挂卡」，approval handle 早于挂载）
-  assert.ok(s.handled.some(e => e.kind === "tool_start") &&
-            s.handled.some(e => e.kind === "approval"),
-    "tool_start 与 approval 都应进 store");
+  await s._sleep(50);
+  const cardId = s._toolCards.get(7);
+  const tool = s._slots.get(cardId);
+  assert.ok(tool && tool.marker, "命令卡应挂载");
+  assert.strictEqual([...s._slots.values()].filter(x => x.kind === "approval").length, 0,
+    "审批不得另起卡（旧事故＝审批卡抢在宣告卡之前锚定）");
+  const wait = s.handled.find(e => e.kind === "command_card_waiting");
+  assert.ok(wait, "command_card_waiting 应进 feed");
+  assert.strictEqual(wait.id, cardId, "武装必须落到映射的那张命令卡上");
+  assert.ok(s.handled.some(e => e.kind === "tool_start"),
+    "tool_start 仍应进 store");
 });
 
 test("串行回归：顺序挂载仍各自钉流底（锁不改变单调用方语义）", async () => {

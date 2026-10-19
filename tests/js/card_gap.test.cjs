@@ -1,8 +1,9 @@
 // 卡间大缝隙回归（真机 2026-09-30：三张卡每张之间约 6 行空白）。根因二：
 // ① _fitNeed 的流式裕量 +5 对「挂载首测单次跳变」和「定格后结账」也生效，
-//    落地即不可回收＝每卡下定格 6 行空白；② 冻结卡多垫的空白尾不留给下一张
-//    卡复用，卡间永久留白。修法：裕量只认流式连续长高；挂载时冻结上游卡的
-//    空白尾被新卡 marker 复用（registerMarker 负偏移钉到空白尾首行）。
+//    落地即不可回收＝每卡下定格 6 行空白（Phase 4 已整体拆除 +5——出生即
+//    定型后不存在流式长高，need 恒为量高 + 1）；② 冻结卡多垫的空白尾不留给
+//    下一张卡复用，卡间永久留白。修法：挂载时冻结上游卡的空白尾被新卡
+//    marker 复用（registerMarker 负偏移钉到空白尾首行）。
 "use strict";
 
 const test = require("node:test");
@@ -62,6 +63,7 @@ function makeMountSession() {
   const s = Object.create(Session.prototype);
   s._dead = false;
   s._slots = new Map();
+  s._toolCards = new Map();   // Phase 2：ai_tool id → 卡 id 映射（构造器字段）
   s._holdDepth = 0;
   s._holdBuf = [];
   s._lastByteAt = 0;
@@ -100,7 +102,7 @@ function makeMountSession() {
   return s;
 }
 
-test("_fitNeed 裕量只认流式连续长高：首测/冻结不带 +5", () => {
+test("_fitNeed 无流式裕量：need 恒等于量高 + 1（+5 已随长高机械拆除）", () => {
   const Session = loadSessionClass();
   const s = Object.create(Session.prototype);
   s._dead = false;
@@ -108,18 +110,18 @@ test("_fitNeed 裕量只认流式连续长高：首测/冻结不带 +5", () => {
   s._hostAlive = () => true;
   const host = {scrollHeight: 90, style: {}, querySelector: () => null};
   const slot = {host, rows: 0, need: 0};
-  s._fitNeed(slot);                      // 挂载首测：6 行，单次跳变无裕量
+  s._fitNeed(slot);                      // 挂载首测：6 行
   assert.strictEqual(slot.rows, 6);
-  assert.strictEqual(slot.need, 7, "首测不得带流式裕量（落地即不可回收）");
-  host.scrollHeight = 120;               // 流式第二次长高 → 裕量生效
+  assert.strictEqual(slot.need, 7, "首测即完整量高，不带任何裕量（落地不可回收）");
+  host.scrollHeight = 120;               // 再次量高（resize 折行等）
   s._fitNeed(slot);
   assert.strictEqual(slot.rows, 8);
-  assert.strictEqual(slot.need, 14, "流式连续长高应带 +5 裕量防夹紧裁切");
+  assert.strictEqual(slot.need, 9, "任何情形都不带 +5 裕量——卡间不得定格空白");
   slot.frozen = true;
-  host.scrollHeight = 150;               // 定格后结账：不再带裕量
+  host.scrollHeight = 150;               // 冻结后结账量高
   s._fitNeed(slot);
   assert.strictEqual(slot.rows, 10);
-  assert.strictEqual(slot.need, 11, "冻结卡结账不得带裕量");
+  assert.strictEqual(slot.need, 11);
 });
 
 test("挂载复用冻结上游卡的空白尾：marker 负偏移钉空白尾首行", async () => {

@@ -27,7 +27,7 @@ from ..core.messages import (  # noqa: F401
 # import L340；InteractiveRunner/CommandResult 直名 import L699/722/740/757）。
 from ..core.pipeline import (  # noqa: F401
     CorePresenter as _WebPresenter, PipelineCore, SUBMIT_FALLBACK_DELAY,
-    _PROBE_TIMEOUT, build_agent, load_password, probe_profile,
+    _PROBE_TIMEOUT, build_agent, build_chat_model, load_password, probe_profile,
     store_password,
 )
 from ..connections import open_session  # noqa: F401
@@ -35,6 +35,8 @@ from .protocol import encode_server
 
 
 class TabWorker(PipelineCore):
+    paced_display = True   # Web：AI 文本攒到段边界一次性下发（ai_result）+ 心跳
+
     async def emit_msg(self, msg: ServerMsg) -> None:
         await self._outbox.put(("json", encode_server(msg)))
 

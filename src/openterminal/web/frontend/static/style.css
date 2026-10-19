@@ -16,6 +16,7 @@
   --ok: #3fb950;
   --warn: #d29922;
   --danger: #f85149;
+  --violet: #bc8cff;     /* 编辑态（与红/橙/绿/灰区分） */
   --cyan: #39c5cf;        /* 用户输入文本 / 块状光标（workbench 青） */
   --ap-blue: #2f6feb;     /* 普通审批蓝框 / Agent 蓝点 */
   --mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
@@ -97,7 +98,16 @@ body.sidebar-collapsed #sidebar { display: none; }
 /* --- 主区 --- */
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
+#tabbar { display: flex; flex: none; min-width: 0; background: var(--panel); }
+#btn-show-sidebar {
+  display: none; flex: none; align-self: center; margin: 0 4px;
+  padding: 4px 8px; border-radius: 4px; color: var(--muted); white-space: nowrap;
+}
+body.sidebar-collapsed #btn-show-sidebar { display: block; }
+#btn-show-sidebar:hover { background: var(--panel2); color: var(--text); }
+
 #tabs {
+  flex: 1; min-width: 0;
   display: flex; align-items: stretch; gap: 2px;
   padding: 6px 8px 0; background: var(--panel);
   border-bottom: 1px solid var(--border);
@@ -139,7 +149,7 @@ body.sidebar-collapsed #sidebar { display: none; }
 .term .xterm { height: 100%; }
 
 /* 连接中浮层：盖住终端区居中显示，两阶段文案（连接中 → 初始化 Agent），
-   ready 即撤；SSH 弹窗（modal z-index 50）须压在其上 */
+   ready 即撤；SSH 弹窗须压在连接浮层和文件抽屉之上 */
 .connect-overlay {
   position: absolute; inset: 0; z-index: 40;
   display: flex; align-items: center; justify-content: center; gap: 12px;
@@ -404,6 +414,71 @@ body.sidebar-collapsed #sidebar { display: none; }
 /* 已同意：命令置灰＝已定稿不可更改的观感（拒绝/编辑态保留原色） */
 .aprobe .apcode.locked { color: var(--muted); }
 
+/* --- Phase 2 命令卡（execute 工具卡+审批卡二合一） ---
+   四行全定高（name/命令/状态/操作），挂载后高度/行不再变化（红线④）：
+   状态行/操作行/理由槽渲染出即占位（空态也渲染定高元素），
+   按钮簇替换为回执不改变行高。*/
+.cmdcode {
+  height: 2.6em;          /* 定高 2 行 */
+  overflow: hidden;
+}
+.aprobe .cmdcode { color: var(--cyan); }
+.cmdstat {
+  display: flex; align-items: center; gap: 10px;
+  height: 1.9em;          /* 定高 1 行：理由槽+状态文案 */
+  overflow: hidden;
+}
+.cmdreason {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cmdacts {
+  display: flex; align-items: center; gap: 7px;
+  height: 1.9em;          /* 定高 1 行：按钮簇→回执同高替换 */
+  overflow: hidden;
+  /* 还原原版布局：按钮簇在卡头右侧（aphead 内 margin-left:auto 右推） */
+  margin-left: auto;
+}
+/* 卡头不换行：按钮簇超宽由 .cmdacts 裁剪，不得挤到第二行撑高卡体 */
+.cmdhead { flex-wrap: nowrap; min-width: 0; }
+.cmdhead .alabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdacts .apbtns {
+  display: flex; align-items: center; gap: 7px;
+  flex-wrap: nowrap;      /* 定高槽内不换行（换行被裁＝按钮失踪） */
+  margin-left: 0;
+}
+.cmdacts .apexec { position: relative; display: flex; gap: 7px; }
+
+/* 命令卡状态配色（真机约定，盖过 .aprobe.high 的统一红框）：
+   等待审批红 / 编辑紫 / 拒绝灰 / 完成绿 / 失败橙 */
+.cmdcard.waiting { border-color: var(--danger); background: #1c1113; }
+.cmdcard.waiting .aphead { background: rgba(248, 81, 73, 0.14); }
+.cmdcard.editing { border-color: var(--violet); background: #181028; }
+.cmdcard.editing .aphead { background: rgba(188, 140, 255, 0.13); }
+.cmdcard.rejected { border-color: var(--muted); background: var(--panel); }
+.cmdcard.rejected .aphead { background: rgba(154, 160, 166, 0.12); }
+.cmdcard.done { border-color: var(--ok); background: #101a13; }
+.cmdcard.done .aphead { background: rgba(63, 185, 80, 0.13); }
+.cmdcard.failed { border-color: var(--warn); background: #1c1608; }
+.cmdcard.failed .aphead { background: rgba(210, 153, 34, 0.14); }
+/* 状态徽标配色：等待红 / 拒绝灰 / 失败橙 / 编辑紫（ok 沿用绿） */
+.apstate.waiting { color: var(--danger); }
+/* 红色警告卡：配置错误/系统异常（模型超时、工具超时等） */
+.alertcard { border-color: var(--danger); background: #1c1113; }
+.alertcard .aphead { background: rgba(248, 81, 73, 0.14); }
+.alertcard .aphead .apq { color: var(--danger); }
+.apstate.rejected { color: var(--muted); }
+.apstate.fail { color: var(--warn); }
+.apstate.edit, .apreceipt.edit { color: var(--violet); }
+.apreceipt {
+  font-size: 12px; font-weight: 650;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  max-width: 100%;
+}
+.apreceipt.ok { color: var(--ok); }
+.apreceipt.edit { color: var(--warn); }
+.apreceipt.fail { color: var(--danger); }
+
 /* --- 开启新会话（唯一入口，状态栏；此前内嵌每张审批卡已删） --- */
 .statusbar .status-newtask {
   padding: 2px 9px; font-size: 12px; font-family: var(--sans);
@@ -512,15 +587,16 @@ body.sidebar-collapsed #sidebar { display: none; }
 .seg button.on kbd { color: var(--accent); border-color: rgba(255, 106, 0, 0.35); }
 
 /* --- 模态框 --- */
-#modal-root { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); z-index: 50; }
+#modal-root { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); z-index: 1100; }
 #modal-root:empty { display: none; }
-.modal { width: min(440px, 92vw); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+.modal { width: min(440px, 92vw); max-height: 85vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
 .modal h3 { margin: 0 0 8px; font-size: 14px; }
+.modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .modal-body p { margin: 0 0 8px; color: var(--text); white-space: pre-wrap; }
 .modal-body input { width: 100%; padding: 6px 10px; }
 .modal-check { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
 .modal-check input { width: auto; padding: 0; }
-.modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; flex-shrink: 0; }
 .modal-btns button { padding: 4px 14px; border: 1px solid var(--border); border-radius: 4px; }
 .modal-btns button:hover { background: var(--panel2); }
 .modal-btns button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
@@ -583,12 +659,12 @@ body.sidebar-collapsed #sidebar { display: none; }
   box-shadow: -6px 0 18px rgba(0, 0, 0, 0.35);
 }
 .files-panel[hidden] { display: none; }
-/* 面板打开时终端让出面板宽度自适应收缩（不再被面板盖住）；面板仍是
-   absolute 覆盖层不改 DOM 结构，只靠 .term 的 margin 让位。min() 与面板
+/* 面板打开时整个块流区让位（历史卡片与活动终端一起收缩）；面板仍是
+   absolute 覆盖层不改 DOM 结构，只靠 .ot-stage 的 margin 让位。min() 与面板
    width/max-width 对齐——窄窗口面板压到 90% 时终端同样只留 10%。
    列宽同步走 fit()（fitAddon → onResize → 后端 resize），与窗口 resize
    同一条链路，卡片重贴不旁路。 */
-.pane.fp-open > .term { margin-right: min(340px, 90%); }
+.pane.fp-open > .ot-stage { margin-right: min(340px, 90%); }
 /* 头部两行：标题+来源徽标一行，操作按钮一行并允许换行——按钮一多塞单行
    会把标题挤成三行、右侧按钮溢出面板（真机截图） */
 .fp-head {
@@ -694,3 +770,146 @@ body.sidebar-collapsed #sidebar { display: none; }
 }
 .fp-edit:focus { outline: none; border-color: var(--accent); }
 .fp-edit-hint { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
+
+/* --- 响应式：不同显示器宽度 / 系统缩放下布局收敛 ---
+   此前本文件没有任何 @media：264px 侧栏在小屏常驻会把终端挤成一条缝，
+   状态栏的次要元数据（token/尺寸/耗时）在窄窗口里把操作按钮挤出可视区。
+   原则是「终端优先」：先收侧栏宽度，再收浮层化，最后裁状态栏次要项；
+   任何档位都不改变卡片几何（卡宽恒 calc(100% - 12px)，量高由 JS 按实测）。 */
+@media (max-width: 1280px) {
+  #sidebar { width: 218px; }
+  .tab { max-width: 168px; }
+}
+@media (max-width: 1024px) {
+  #sidebar { width: 188px; }
+  .tab { max-width: 148px; }
+  .statusbar { gap: 8px; }
+  .statusbar .status-meta { gap: 8px; }
+}
+@media (max-width: 860px) {
+  /* 侧栏转浮层：终端拿满宽度，仍可从顶栏按钮唤出（配套 JS 在窄屏启动时
+     自动收起、跨过阈值变窄时也收起，只收不弹——不与用户手动展开抢状态） */
+  #sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 600;
+    width: min(78vw, 264px);
+    box-shadow: 0 0 28px rgba(0, 0, 0, 0.5);
+  }
+  /* 次要元数据让位给状态文案与操作钮 */
+  .statusbar .status-meta .status-tokens,
+  .statusbar .status-meta .status-size,
+  .statusbar .status-meta .status-time { display: none; }
+}
+@media (max-width: 640px) {
+  .statusbar { gap: 6px; padding: 3px 6px; }
+  .statusbar .status-text { display: none; }
+  .pane-head { gap: 6px; padding: 5px 8px; }
+  .seg button { padding: 3px 8px; }
+  #tabs { padding: 4px 6px 0; }
+  .tab { max-width: 118px; padding: 5px 6px 5px 8px; }
+}
+
+/* --- 块流布局（Phase 1）：卡片块与文本块是平级兄弟节点，不再贴在 xterm 网格行上 ---
+   这样三条硬约束同时消失：不遮挡（兄弟节点不重叠）、不裁切（没有 clamp）、
+   无大空白（没有 pad，也就没有「不可回吐的垫行」）。 */
+/* 单一滚动面：块区与活动终端是同一个流，不能各滚各的——两套滚动条会让
+   卡片滚出可视区却被当「在屏内」量几何（真机 C2 按钮 hit=null/DIV 的根因） */
+.ot-stage {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  position: relative; background: var(--term-bg);
+  overflow-y: auto; overflow-x: hidden;
+}
+/* 冻结块区：历史文本块 + 卡片块。空时不占位 */
+.ot-blocks {
+  flex: 0 0 auto; overflow: visible;
+  background: var(--term-bg);
+}
+.ot-blocks:empty { display: none; }
+.ot-stage .term { flex: 0 0 auto; position: relative; }
+
+/* 文本块 / 过渡段 / 横幅 */
+.ot-blk { position: relative; }
+.ot-blk-body {
+  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  color: var(--text); white-space: pre-wrap; word-break: break-word;
+  padding: 2px 12px;
+}
+.ot-blk-banner .ot-blk-body { color: var(--muted); }
+/* 过渡段（sudo su - / ssh 跳板）：紫色左边线标注，内容照常显示 */
+.ot-blk-transition { border-left: 2px solid rgba(188, 140, 255, 0.55); margin: 4px 0; }
+.ot-blk-transition .ot-blk-body { color: var(--muted); }
+
+/* 卡片块：高度由内容自撑——这是「不裁切」的结构来源 */
+.ot-blk-card { padding: 0 0 2px; }
+.ot-flow-host {
+  overflow: visible !important;   /* 覆盖 island.css 的 overflow:hidden */
+  height: auto !important;
+  max-height: none !important;
+  margin: 6px 12px 4px;
+}
+.ot-flow-host > * { margin-top: 0; }
+
+/* 块流里卡片高度自撑，不再需要「裁进网格行」。island.css 给 .acard/.ablock
+   的 overflow:hidden 原本是防卡片越过预留行盖住下方文本——块布局下兄弟节点
+   本就不重叠，留着它只会把高危两步确认的弹层、编辑浮层裁到看不见（真机
+   「点执行按钮没反应」的直接成因：弹层在按钮下方，被卡体裁掉）。 */
+.ot-flow-host .acard,
+.ot-flow-host .ablock,
+.ot-flow-host .scard,
+.ot-flow-host .aprobe,
+.ot-flow-host .dline {
+  overflow: visible;
+}
+/* 确认弹层压在卡体之上。**层级必须显式钉死**：.apcode/.cmdstat 是不透明底
+   （#0d1117）且 DOM 顺序在 .aphead 之后，一旦叠到弹层上面就把「高危命令，
+   确认执行？」整块盖住——真机 elementFromPoint 打到 PRE.apcode，用户看到的
+   就是「点执行按钮没反应」。卡头 z 3 > 正文 z 1，弹层再 z 10。 */
+.ot-flow-host .aphead { position: relative; z-index: 3; }
+.ot-flow-host .apcode,
+.ot-flow-host .cmdstat,
+.ot-flow-host .apreasons,
+.ot-flow-host .atext,
+.ot-flow-host .areason { position: relative; z-index: 1; }
+.ot-flow-host .apconfirm { position: absolute; z-index: 10; }
+/* 整条卡头链不许裁切：确认弹层挂在 .apexec 下方，一半落在 .aphead 盒外，
+   被裁掉后命中测试打到 .aphead 自己（Playwright：「.aphead intercepts
+   pointer events」）——真机「点执行按钮没反应」的最终成因。块布局下卡片
+   高度自撑，本来就没有任何裁切的必要。 */
+.ot-flow-host .aphead,
+.ot-flow-host .cmdhead,
+.ot-flow-host .cmdacts,
+.ot-flow-host .apbtns,
+.ot-flow-host .apexec,
+.ot-flow-host .adot,
+.ot-flow-host .alabel,
+.ot-flow-host .apstate {
+  overflow: visible;
+}
+
+/* 块流不受网格预留行限制：完整展示命令，操作区自然换行并撑高卡头。
+   仅覆盖 flow host，保留 decoration 回退路径原有的量高/裁切约定。 */
+.ot-flow-host .cmdcode { height: auto; overflow: visible; }
+.ot-flow-host .cmdhead { flex-wrap: wrap; }
+.ot-flow-host .cmdhead .alabel {
+  max-width: 100%; white-space: normal; overflow-wrap: anywhere;
+}
+.ot-flow-host .cmdhead .apstate { flex: none; white-space: nowrap; }
+.ot-flow-host .cmdacts { height: auto; min-width: 0; max-width: 100%; }
+.ot-flow-host .cmdacts .apbtns { flex-wrap: wrap; min-width: 0; }
+.ot-flow-host .cmdacts button { flex: none; white-space: nowrap; }
+/* 保留原来的小确认框：以执行按钮为锚点，边缘避让由组件实测平移。 */
+.ot-flow-host .cmdhead .apexec { position: relative; flex: none; }
+.ot-flow-host .cmdhead .apconfirm {
+  left: auto; right: 0; top: calc(100% + 5px);
+  width: max-content; flex-wrap: wrap; white-space: normal;
+}
+
+/* 工具卡状态配色：完成绿 / 失败橙——与命令卡口径统一（真机反馈：
+   read_file 这类非 execute 工具卡一直是橙色，和「已完成」的语义对不上） */
+.tcard.done {
+  border-color: var(--ok);
+  border-left-color: var(--p-warn);
+  background: #101a13;
+}
+.tcard.done .aphead { background: rgba(63, 185, 80, 0.13); }
+.tcard.failed { border-color: var(--warn); background: #1c1608; }
+.tcard.failed .aphead { background: rgba(210, 153, 34, 0.14); }

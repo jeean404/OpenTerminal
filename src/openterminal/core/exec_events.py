@@ -24,6 +24,29 @@ from ..shell.integration import is_internal_line
 from ..session.base import CommandResult
 
 
+def _strip_pad_echo(seg: str) -> str:
+    """滤掉 ``__ot_pad`` 注入自身的回显行（含裸壳的 command not found）。
+
+    hook 在位时它清掉自己的回显，用户看不到；hook 刚掉线（``su -`` 换壳）时
+    ``_hook_ok`` 仍是陈旧真值，注入落进裸壳，回显 / ``^Y`` / ``bash: __ot_pad:
+    command not found`` 全部外显 = 真机图一的「无效命令输出」。
+
+    只滤这三样，**hook 打出的 N 个空行必须原样放行**——那是垫行本体，吞了
+    blankSpan 就永远数不满、卡被夹紧截断。整行丢弃（不是就地删词）：
+    ``-bash: __ot_pad: command not found`` 只删 token 会留下残句。
+    """
+    if not seg:
+        return seg
+    out = []
+    for ln in seg.splitlines(keepends=True):
+        if "__ot_pad" in ln:
+            continue                      # 注入行回显 / 其 command not found
+        ln = ln.replace("\x19", "").replace("^Y", "")
+        if ln.strip() or ln:
+            out.append(ln)                # 空白行（垫行）与正文都放行
+    return "".join(out)
+
+
 class ExecEvents:
     def __init__(self, core) -> None:
         self.core = core
@@ -55,6 +78,7 @@ class ExecEvents:
             ("_reinject_pending", False),  # 任务起跑重注入在途（pad 路径免重试）
             ("_pad_task", None),        # 在途 pad 打字任务（门闩排序用）
             ("_pad_inflight", False),   # pad 行已敲进 PTY、回显未消化（指纹扫描窗）
+            ("_pad_echo_carry", ""),   # pad 回显净化的半行暂存（分片切开时防漏滤）
             ("_pad_prompt_timeout", 2.0),  # pad 每块等提示符重画的上限
         ):
             if not hasattr(core, name):
@@ -144,12 +168,21 @@ class ExecEvents:
                 # 就是真机残迹「__ot_pad: command not found + 提示符粘连」。
                 # deferred 告诉前端这次「空白没长」是窗口内暂时现象，不计
                 # 熔断连败（慢链路重注入 1-4s，连续 ack 不增长会误熔断）；
-                # 痊愈后下一轮 pad 自会补齐。①不带 deferred：永久死通道，
-                # 前端照常计数熔断，停掉空转的重试循环
-                _dbg("shell_pad ack-only pending=", self.core._reinject_pending)
+                # 痊愈后下一轮 pad 自会补齐。
+                # **只有永久死通道才不带 deferred**：`_hook_gone`（探测判死 /
+                # 回显指纹判死）＝这条 pad 通道确实没了，前端照常计数熔断、
+                # 停掉空转重试。其余都是暂时垫不进——最典型的是**连接期
+                # hook 尚未注入**（`_last_mark_at` 还是 0、`_hook_ok` 假），
+                # 旧实现按 `_reinject_pending` 单独判 deferred，把这一类报成
+                # 非 deferred，前端连吃两次空应答就 `_fusePads()` 把 pad 通道
+                # 永久焊死：此后每张卡都垫不满、全被夹紧成只剩卡头的细条
+                # （真机图一「⚠ 系统警告只剩标题」的上游根因）。
+                _dbg("shell_pad ack-only pending=", self.core._reinject_pending,
+                     "gone=", self.core._hook_gone)
                 await self.core.emit_msg(ServerMsg(
                     type="event", event={"kind": "padded", "rows": rows,
-                                         "deferred": self.core._reinject_pending}))
+                                         "deferred": self.core._reinject_pending
+                                         or not self.core._hook_gone}))
                 return
             remaining = max(1, rows)
             first = True
@@ -186,6 +219,8 @@ class ExecEvents:
                     await self.core.session.send_raw(mirror.encode())
             finally:
                 self.core._pad_inflight = False
+                # 残留半行是回显尾巴，随窗口收束丢弃（不留到下一轮 pad）
+                self.core._pad_echo_carry = ""
         await self.core.emit_msg(ServerMsg(
             type="event", event={"kind": "padded", "rows": rows}))
 
@@ -272,6 +307,23 @@ class ExecEvents:
                 # 路径转降级；重注入成功/嵌套壳退出照既有语义复位
                 self.core._hook_gone = True
                 _dbg("pad fingerprint: hook 函数不在位，判死转 ack-only")
+            if self.core._pad_inflight:
+                # 注入自身回显净化（见 _strip_pad_echo）：hook 掉线后注入落进
+                # 裸壳时 `__ot_pad N` / `^Y` / `command not found` 不许外显。
+                # 半行 carry：回显常被分片切开（`__ot_pad ` 与 `7\r\n` 两块），
+                # 按块独立过滤会漏掉尾巴上的孤立 `7`。
+                carry = getattr(self.core, "_pad_echo_carry", "")
+                seg = _strip_pad_echo(carry + ev[1])
+                keep = ""
+                nl = max(seg.rfind("\n"), seg.rfind("\r"))
+                if nl >= 0:
+                    keep, seg = seg[nl + 1:], seg[: nl + 1]
+                else:
+                    keep, seg = seg, ""
+                self.core._pad_echo_carry = keep
+                ev = (ev[0], seg)
+                if not seg:
+                    return
             if self.core._probe_buf is not None:
                 # live 的 ev[1] 是 str（本分支末尾 emit 前也要 .encode），
                 # bytearray.extend(str) 抛 TypeError 当场打死泵任务；而任务
@@ -391,10 +443,41 @@ class ExecEvents:
         if ctx == "agent":
             # AI 工具命令真正开始执行：此刻登记命令与首个收束事件——保证
             # ai_collapse 与输出按真实执行顺序交错（多命令并发发起时同理）
-            cmd = (self.core._pending_agent_cmds.popleft()
-                   if self.core._pending_agent_cmds else line)
+            #
+            # 命令身份以 **C 标记上报的 line 为准**，登记队列只兜底：并行
+            # tool_call 时 on_start 全部先到（登记序 = 宣告序），真实执行序却是
+            # InteractiveRunner._runner_lock 的抢锁序，两者会错位——盲目 popleft
+            # 会把 ai_collapse / 输出归属记到别的命令头上（真机「四张卡一条
+            # 输出」同族）。命中队列里的同名登记就地销账，否则退化取队首。
+            # 命令身份取**登记串**（= 卡片上那条 $ 命令），上报串只用来认领
+            # 「这是哪一条」：并行 tool_call 时 on_start 全部先到（登记序 =
+            # 宣告序），真实执行序却是抢锁序，盲目取队首会把归属记到别的命令
+            # 头上（真机「四张卡只看得见一条输出」同族）。上报串是包装行而
+            # 对不上登记时退回队首——认不出就不改判，只保证不空转。
+            if line in self.core._pending_agent_cmds:
+                self.core._pending_agent_cmds.remove(line)
+                cmd = line
+            elif self.core._pending_agent_cmds:
+                cmd = self.core._pending_agent_cmds.popleft()
+            else:
+                cmd = line
             self.core._agent_open_cmd = cmd
             self.core._record_history("agent", cmd)
+            self.core._exec_stack[-1]["cmd"] = cmd
+            # 输出归属括号（开）：前端据此把这条命令的输出切块挂到它的卡下。
+            # execute 工具本就依赖 hook 通道（_hook_channel_ready 挂了直接
+            # CHANNEL_DEAD_MSG），所以 C/D 标记在 execute 期间必然在位——
+            # 不违反 P1「布局不得依赖 shell 集成」。
+            # 回显行一并带过去：它由 hook 画成 `提示符 + 空格 + 命令`，随后
+            # Readline 一句「上移一格+擦行」会随机啃掉它。让前端去读 xterm 缓冲
+            # 是竞态（write 异步解析），这里按 `_cur_prompt`（B 标记捕获）拼出来
+            # 是确定的，前端丢没丢都能补上。
+            echo = ""
+            if self.core._cur_prompt and cmd:
+                echo = self.core._cur_prompt.rstrip() + " " + cmd
+            await self.core.emit_msg(ServerMsg(
+                type="event",
+                event={"kind": "term_open", "command": cmd, "echo": echo}))
             if not self.core._task_cmd_started:
                 self.core._task_cmd_started = True
                 await self.core.emit_msg(ServerMsg(
@@ -542,8 +625,14 @@ class ExecEvents:
             self.core._suppress_live = False
             self.core._suppressed_echo = False
             self.core._suppressed_tail = ""
-            if frame["ctx"] == "agent" and self.core._agent_open_cmd is not None:
-                self.core._agent_open_cmd = None   # 输出块已自然收束于主 xterm
+            if frame["ctx"] == "agent":
+                # 输出归属括号（闭）：这条命令的输出到此为止，前端据此切块归位
+                await self.core.emit_msg(ServerMsg(
+                    type="event",
+                    event={"kind": "term_close",
+                           "command": frame.get("cmd") or frame.get("line") or ""}))
+                if self.core._agent_open_cmd is not None:
+                    self.core._agent_open_cmd = None   # 输出块已自然收束于主 xterm
 
     # --- 失败救援（reactive）---
 

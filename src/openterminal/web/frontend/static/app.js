@@ -120,6 +120,8 @@ class Session {
     this.statusText = "";       // 连接中文案由 status-connect 徽标（旋转+循环点）承担
     this.ws = null;
     this._clip = "";            // 页内最近复制的文本（http 局域网无剪贴板读权限时的粘贴兜底）
+    this._toolMountQ = [];      // 待挂工具卡（串行弹出，见 _pumpToolMounts）
+    this._toolMounting = false;
     this._feed = null;          // React island 句柄 {handle, mount, unmount, destroy}
     this._feedPromise = null;   // island 懒加载 Promise（失败置空可重试）
     this._lastSummaryMd = null;   // final/ai_card 双发同文的前端去重
@@ -128,8 +130,7 @@ class Session {
     this._padSlot = null;       // 在途 pad 请求归属的卡
     this._slots = new Map();    // cardId -> Slot
     this._cardSeq = 0;          // 卡号计数（island 单卡 root 的 key）
-    this._taskCardId = null;    // 流式分析卡 id（task_start → final）
-    this._cardReady = Promise.resolve();  // 在途开卡链：store 的 task_start 必先于该卡 token
+    this._cardReady = Promise.resolve();  // 挂载串行链：卡 handle 先于 mount，出生即完整
     this._cardsText = new Map();// cardId -> 纯文本（_fallbackPlain 兜底用）
     this._padFailStreak = 0;    // 连续超时计数（≥2 熔断）
     this._padFused = false;     // 熔断：本轮禁用补差，只夹紧
@@ -144,11 +145,12 @@ class Session {
     this._welcomeHold = null;   // 连接横幅扣留态（先横幅后提示符，见 _holdWelcome）
     this._welcomeTimer = null;  // 扣留到点自放行的定时器（见 _armWelcomeDeadline）
     this._taskActive = false;   // 任务进行中（task_start → final/denied/limit/error）
-    this._phaseLive = false;    // 有活分析卡在流底（task_start/新段 token → ai_collapse/ai_card）
-    this._summaryShown = false; // 本轮总结卡已挂（挂出即不再显示思考徽标）
-    this._approvalOpen = false; // 有未决策审批卡（球在用户侧，不显思考徽标）
-    this._approvalCmd = null;   // 未决审批的命令（补发去重：同命令不叠第二张卡）
-    this._approvalGraceMs = 3000; // 审批卡可点性看门狗：fund 未到限内转模态兜底
+    this._approvalOpen = false; // 有未决策审批（球在用户侧，不显思考徽标）
+    this._approvalCmd = null;   // 未决审批的命令（回执/回退显示用）
+    this._approvalKey = null;   // 去重键 (卡 id, 命令串)：同串并行命令不互挡
+    this._toolCards = new Map(); // ai_tool id(数字 tool_card_seq) → 卡 id（类型统一）
+    this._approvalGraceMs = 6000; // 审批卡可点性看门狗：fund 未到限内转模态兜底
+    // （挂载链含 pad 串行，慢机 3s 不够——审批先到卡还在挂载＝误转模态）
     this._approvalResolved = false; // 本令决策已发：看门狗/模态不得再发第二发
     this._runningTool = "";      // 在跑的工具（徽标说人话：执行中: docker ps）
     this._timer = null;         // 任务计时 setInterval id
@@ -164,6 +166,17 @@ class Session {
     this._dead = false;         // 会话已关闭：停止一切写终端
     this._buildDom();
     this._buildTerm();
+    // 监听可视区而非终端内容：卡片增多只增加滚动长度，不递归撑高终端。
+    const stage = this.paneEl.querySelector(".ot-stage");
+    if (stage && typeof ResizeObserver !== "undefined") {
+      this._layoutObserver = new ResizeObserver(() => {
+        cancelAnimationFrame(this._layoutFrame);
+        this._layoutFrame = requestAnimationFrame(() => {
+          if (!this._dead) this.fit();
+        });
+      });
+      this._layoutObserver.observe(stage);
+    }
   }
 
   _buildDom() {
@@ -188,7 +201,10 @@ class Session {
         <div class="pane-host" id="host-${this.tabId}"></div>
         <button class="files-toggle" id="filesbtn-${this.tabId}" tabindex="-1" title="远程文件：登录该主机的家目录（上传/下载）">📁 文件</button>
       </div>
-      <div class="term" id="term-${this.tabId}"></div>
+      <div class="ot-stage" id="stage-${this.tabId}">
+        <div class="ot-blocks" id="blocks-${this.tabId}"></div>
+        <div class="term" id="term-${this.tabId}"></div>
+      </div>
       <div class="statusbar">
         <span class="status-connect" id="conn-${this.tabId}" title="正在建立连接"><i class="cspin"></i><span>连接中</span><span class="cdots"></span></span>
         <span class="status-think" id="think-${this.tabId}" hidden title="任务未结束：AI 正在分析或执行"><i class="tspin"></i><span class="ttext">AI 正在思考</span><span class="tdots"></span></span>
@@ -664,13 +680,19 @@ class Session {
     const h = this._welcomeHold;
     this._welcomeHold = null;
     if (this._dead || !h) return;
+    // 必须走 _ingestBytes 而不是 _writeTerm：卡片挂载/pad 的扣流闸（_holdBytes）
+    // 要罩住横幅与重放字节。旧实现直接 _writeTerm 绕过闸门，字节落进正在预留
+    // 的卡片区、把连续空白打断 → blankRun=0 → 卡永久夹紧（真机图一根因）。
+    // _ingestBytes 会先过 _holdWelcome（此刻已置空，直接放行），再按扣流计数
+    // 入 _holdBuf，顺序天然保持：横幅仍在前、提示符仍在后。
+    const enc = new TextEncoder();
     if (this._welcomeText) {
-      this._writeTerm("\x1b[2m" + this._welcomeText + "\x1b[0m\r\n");
+      this._ingestBytes(enc.encode("\x1b[2m" + this._welcomeText + "\x1b[0m\r\n"));
     }
     // 静默期定时器放行时 h.raw 可能还是 null（一块字节都没到）——
     // 这里不判就会在 setTimeout 回调里抛 uncaught
     const tail = !h.raw ? null : (h.cleared ? h.raw.subarray(h.cleared) : h.raw);
-    if (tail && tail.length) this._writeTerm(tail);
+    if (tail && tail.length) this._ingestBytes(tail);
   }
 
   // 键盘字节注入（等价于用户在终端里敲入）：审批卡「开启新会话」等场景用
@@ -854,6 +876,16 @@ class Session {
     }
   }
 
+  // 等 PTY **入流**沉降（到达静默 >= ms，最多等 maxMs）：用于「先扣流、后锚定」。
+  // 扣流只挡字节进 xterm，不挡到达——_lastByteAt 照常更新，故这个静默判据可靠。
+  async _waitInputQuiet(ms = 350, maxMs = 2500) {
+    const t0 = Date.now();
+    while (!this._dead && Date.now() - t0 < maxMs) {
+      if (Date.now() - (this._lastByteAt || 0) >= ms) return;
+      await this._sleep(30);
+    }
+  }
+
   _ensureFeed() {
     if (!this._feedPromise) {
       this._feedPromise = import("/static/ui/ui.js").then(mod => {
@@ -871,6 +903,7 @@ class Session {
             this.setStatus(this.status, stateText + " " + (command || ""));
             this._approvalOpen = false;   // 决策完成：思考徽标接管执行空隙期
             this._approvalCmd = null;
+            this._approvalKey = null;
             this._approvalResolved = true;   // 卡内快捷键路径也算已决策
             this._refreshThink();
             this._releaseDecision(decision, cardId);
@@ -897,6 +930,21 @@ class Session {
             }
           },
         });
+        // 块流布局（Phase 1）：卡片块是流式 DOM 节点，不是 xterm decoration。
+        // feed.mount(id, hostEl) 只要一个 DOM 元素，本来就与 xterm 解耦——
+        // cards.jsx / island.css 一行不改，观感原样。
+        try {
+          this._blocks = new BlockStream();
+          const host = this.paneEl && this.paneEl.querySelector(
+            `#blocks-${this.tabId}`);
+          if (host && typeof BlockView === "function") {
+            this._blockView = new BlockView(host, { feed: this._feed, follow: false });
+          }
+        } catch (e) {
+          console.error("[ot] 块流初始化失败，回退 decoration 路径:", e);
+          this._blocks = null;
+          this._blockView = null;
+        }
         return this._feed;
       }).catch(e => {
         console.error("[ot] 卡片层加载失败:", e);
@@ -924,7 +972,231 @@ class Session {
 
   // 挂载一张卡：marker 钉流底，decoration 贴纸盖在 pad 预留行上。
   // 整段在扣流临界区内完成，输出不可能插进占位区。失败返回 null。
+  // 待审批的卡必须始终在视野里：窗口变窄/变矮会把它顶出可视区，而按钮仍然
+  // 「在盒内」——用户看不到就等于点不到（真机 800x600 按钮落在折叠线之下）。
+  _keepApprovalInView() {
+    try {
+      for (const slot of (this._slots ? this._slots.values() : [])) {
+        if (!slot || !slot.host) continue;
+        const el = slot.host.closest ? slot.host.closest(".ot-blk") : null;
+        if (!el || typeof el.scrollIntoView !== "function") continue;
+        const interactive = slot.host.querySelector(
+          ".cmdacts button, .apbtns button");
+        if (interactive) { el.scrollIntoView({ block: "nearest" }); return; }
+      }
+    } catch (e) {}
+  }
+
+  // ── 文本分块：冻结当前输出 ─────────────────────────────────────────
+  // 卡片要和输出交错，就必须把「已经跑完的输出」从活动终端里搬成一个文本块，
+  // 卡片才能落在它下面、新输出再落在卡片下面。搬完 xterm 清屏继续收新输出。
+  //
+  // 这样得到的顺序正是图二那张效果图：文本 / 卡片 / 文本 / 卡片 / 活动输出。
+  // 代价：块与块之间不能跨选（用户已定「不允许跨卡选」）；块内选中复制正常。
+  _snapshotTermText(styled = false) {
+    try {
+      const b = this.term.buffer.active;
+      if (styled) return bufferToAnsi(b);
+      const out = [];
+      for (let i = 0; i < b.length; i++) {
+        const ln = b.getLine(i);
+        out.push(ln ? ln.translateToString(true) : "");
+      }
+      return out.join("\n").replace(/\s+$/, "");
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // 冻结：当前活动终端的内容 → 文本块，然后清屏继续。内容为空就不切
+  // （切出空块只会留下大白空）。
+  // afterId：这段输出该挂在谁后面（输出归属）。给了就插到它后面——四张卡并行
+  // 时输出按**抢锁序**回来，不贴回自己那张卡就会整坨落到所有卡之后（真机
+  // 「四张卡只看得见一条输出」）；不给则流末尾追加（横幅/用户输入这类「卡片
+  // 之前」的内容）。afterId 认不出时 BlockStream 自己落到末尾，宁粗不乱插。
+  _cutBlock(kind, afterId, echo) {
+    if (!this._blocks || !this._blockView) return null;
+    const text = this._snapshotTermText(true);
+    if (!text || !text.trim()) return null;
+    // 搬走即清屏：先 reset 再落位。反过来（落位失败就 return）会把同一段
+    // 留在活动终端里，下一次切块再冻一遍 = 同一段输出重复两遍。
+    try { this.term.reset(); } catch (e) {}
+    return this._placeText(ensureCmdEcho(text, echo), kind, afterId);
+  }
+
+
+  // 落位一段已冻结的输出。afterId = 它归属的那张卡。
+  _placeText(text, kind, afterId) {
+    // 卡还没落进块流（挂载是异步链，term_close 常抢在它前面）：先存着，
+    // 卡一落位就补插到它后面。直接 insertAfter 会因认不出 afterId 退回末尾
+    // 追加——那正是「四条输出整坨落在所有卡之后」的症状本身。
+    if (afterId != null && !this._blocks.has(afterId)) {
+      if (!this._pendingTextByCard) this._pendingTextByCard = new Map();
+      const q = this._pendingTextByCard.get(afterId) || [];
+      q.push({ kind, text });
+      this._pendingTextByCard.set(afterId, q);
+      return null;
+    }
+    const blk = this._blocks.insertAfter(afterId, {
+      id: this._blocks.nextId(kind === "transition" ? "trans" : "txt"),
+      kind: kind === "transition" ? "transition" : "term",
+      state: "frozen",
+      payload: { text },
+    });
+    if (!blk) return null;
+    this._blockView.sync(this._blocks.list());
+    return blk;
+  }
+
+  // ── 输出归属：执行边界括号（term_open / term_close）──────────────────
+  //
+  // 并行 tool_call 一次宣告 N 张卡，而挂载是异步链（_ensureFeed 加载 React
+  // island + scrollIntoView）：N 张卡在第一字节输出到达前就全挂完了，于是
+  // 「挂卡时切块」次次切空、一个文本块都生不出来，N 条输出全堆在活动终端，
+  // 直到下一张卡（往往是总结卡）才被整段冻成一坨、落在所有工具卡之后。
+  //
+  // 所以归属不能绑挂载时刻，要绑**执行边界**：后端在 C/D 标记处发
+  // term_open/term_close（谁在跑就是谁的），收束时 insertAfter 它自己的卡。
+  // 顺序与宣告序无关——抢锁序乱了也贴得对。
+  // 归属/切块全部走这条链，且每次快照前等 xterm 把在途 write 解析完：
+  // xterm.write 是异步解析的，而 D 标记与最后一段输出常在同一块字节里到达
+  // ——不同步等就快照，尾巴会漏给下一次切块（真机 nproc 的「6」被后续挂载
+  // 切走、落到流末尾）。链本身保证 open/close/挂载 三者互斥，不互相偷字节。
+  _outOp(fn) {
+    this._outOpQ = (this._outOpQ || Promise.resolve()).then(fn, fn);
+    return this._outOpQ;
+  }
+
+  _claimCmdCard(command) {
+    const key = String(command || "");
+    const q = this._cmdCardQ && this._cmdCardQ.get(key);
+    if (!q || !q.length) return null;
+    return q.shift();
+  }
+
+  // 归位排队的输出：term_close 抢在挂载前到时先存着，卡落位后补插到它后面
+  _flushPendingFor(cardId) {
+    const pend = this._pendingTextByCard && this._pendingTextByCard.get(cardId);
+    if (!pend || !pend.length) return;
+    this._pendingTextByCard.delete(cardId);
+    for (const t of pend) {
+      this._blocks.insertAfter(cardId, {
+        id: this._blocks.nextId(t.kind === "transition" ? "trans" : "txt"),
+        kind: t.kind === "transition" ? "transition" : "term",
+        state: "frozen",
+        payload: { text: t.text },
+      });
+    }
+    this._blockView.sync(this._blocks.list());
+  }
+
+  _onTermOpen(ev) {
+    this._outOp(async () => {
+      if (!this._blocks || !this._blockView) return;
+      await this._flushWrites();
+      // 上一个括号没关（D 标记丢了）：先把它的输出归位，别混进这条
+      if (this._outOpen) this._closeOutAnchor();
+      this._outOpen = true;
+      // 记下回显行：Readline 的「上移一格+擦行」会随机啃掉它，收束时丢了
+      // 就用这行补回去。优先用后端拼好的（确定），读缓冲只作兜底
+      this._outEcho = styleCmdEcho((ev && ev.echo) ||
+        pickCmdEcho(this._snapshotTermText(), ev && ev.command), ev && ev.command);
+      this._outAnchor = this._claimCmdCard(ev && ev.command);
+    });
+  }
+
+  // 收束一段在途输出：冻成文本块贴到它自己的卡后面（认不出卡就落末尾）
+  _closeOutAnchor() {
+    this._cutBlock(null, this._outAnchor == null ? undefined : this._outAnchor,
+                   this._outEcho);
+    this._outOpen = false;
+    this._outAnchor = null;
+    this._outEcho = null;
+  }
+
+  _onTermClose(ev) {
+    this._outOp(async () => {
+      if (!this._blocks || !this._blockView) return;
+      await this._flushWrites();
+      // 没开过括号（hook 降级 / 事件丢失）：退回原行为（流末尾追加），不乱贴
+      if (!this._outOpen) { this._cutBlock(); return; }
+      this._closeOutAnchor();
+    });
+  }
+
+  // ── 块流挂载（Phase 1）──────────────────────────────────────────────
+  // 卡片是流式 DOM 块：高度由内容自撑，后面的块自然下推。于是「不遮挡 /
+  // 不裁切 / 无大空白」是结构属性，不需要 pad、不需要夹紧、不需要扣流记账。
+  // 多卡并发也撞不到一起——insertAfter 按 id 插入，不是抢坐标。
+  async _runMountCardBlocks(cardId, kind = "phase") {
+    if (!this._blocks || !this._blockView) return null;
+    const feed = this._feed;
+    if (!feed) return null;
+    // 落块走归属链：与 term_open/term_close 互斥，不互相偷走缓冲里的字节
+    await this._outOp(async () => {
+      if (!this._blocks.get(cardId)) {
+        // 把「卡片之前」的内容冻成文本块，卡片才落在它下面（输出/卡片交错）。
+        // **归属括号开着时不要切**：那是别的命令正在收输出，切走就把它从
+        // 自己的卡下偷走；它的归位由 term_close 落到它自己那张卡后面。
+        if (!this._outOpen) this._cutBlock();
+        this._blocks.append({
+          id: cardId, kind: "card", state: "frozen",
+          payload: { cardType: kind },
+          keepAlive: kind === "approval",   // 待审批的卡永不被收束/虚拟化删掉
+        });
+      }
+      this._flushPendingFor(cardId);
+      this._blockView.sync(this._blocks.list());
+    });
+    // 幂等：同 id 已在块流里就直接取宿主（重连补挂不许重复落块）
+    const blk = this._blocks.get(cardId);
+    const slot = {
+      id: cardId, marker: null, decoration: null, host: null,
+      reserved: 0, need: 0, rows: 0, clamped: false, ro: null,
+      reanchorT: null, mounted: false, pendingMount: false,
+      pinnedRows: null, forceReapply: false,
+      kind, gen: this._taskGen || 0,
+      revealed: true, frozen: true, frozenAt: Date.now(),
+      padOut: 0, padP: null, blockMode: true,
+    };
+    const el = this._blockView.nodes.get(cardId);
+    const host = el && el._host;
+    if (!host) return null;
+    slot.host = host;
+    slot.mounted = true;
+    // 揭示类必须打上：island.css 把 .ablk 的 opacity 钉在 0、动画 paused，
+    // 只有 .ot-reveal/.ot-revealed 才放行。漏了就是「正文有内容但看不见」——
+    // 分析卡/总结卡整段空白（工具卡不走 .ablk 所以看不出问题）。
+    // 只加 ot-reveal，**不要**换成 ot-revealed：ot-revealed 会把动画关掉
+    // （animation:none），流式后到的块就再也不逐块揭示＝打字机效果消失。
+    // 块布局下宿主不会被重建，不存在「滚动重播」的问题，无需终态锁存。
+    try { host.classList.add("ot-reveal"); } catch (e) {}
+    if (this._slots) this._slots.set(cardId, slot);
+    // 卡必须真在视野里：单一滚动面下块多了会把新卡顶出可视区，而
+    // getBoundingClientRect 仍给正常坐标 → 真鼠标点不到（真机 C2 hit=null）
+    try {
+      if (el && typeof el.scrollIntoView === "function") {
+        el.scrollIntoView({ block: "nearest" });
+      }
+    } catch (e) {}
+    return slot;
+  }
+
   async _runMountCard(cardId, kind = "phase") {
+    // 块流路径：卡片不占网格行，直接挂流式块（不走 marker/decoration/pad）
+    if (this._blocks && this._blockView) {
+      const s = await this._runMountCardBlocks(cardId, kind);
+      if (s) return s;
+    }
+    // 欢迎横幅扣留期不挂卡：横幅与其后的重放字节随后才落屏，会写进 marker
+    // 行、把预留区的连续空白打断（blankRun 遇非空即停）→ bspan 恒 0，卡被
+    // 永久夹紧成只有一条头的细条、并盖住横幅折行（真机图一：横幅右端被截断
+    // + ⚠ 系统警告只剩标题）。等横幅落屏重放完再锚定，marker 才钉在真流底。
+    // 有界等待：横幅超时自放行（_armWelcomeDeadline），不许把挂载卡死。
+    const w0 = Date.now();
+    while (this._welcomeHold && !this._dead && Date.now() - w0 < 2500) {
+      await this._sleep(20);
+    }
     await this._settle();
     // 提交在途门闩：task_start 可能先于 \r 的回显/重绘字节到达，此刻 settle 误判
     // 静默、marker 钉在回显行上——卡盖住输入行（真机「中文提交行消失」根因）。
@@ -941,6 +1213,12 @@ class Session {
     if (!feed) return null;
     this._holdBytes("card-mount");
     try {
+      // 先扣流、再等**入流**沉降，然后才灌缓冲钉 marker——marker 必须钉在真流底。
+      // 旧序是「settle 后才扣流」：连接期的登录横幅/命令输出随后才到、落进 marker
+      // 之下，把预留区的连续空白挤断（真机图一：卡钉在 ssh 回显行上，_echoSkip
+      // 跳到第 9 行而第 10 行就是登录横幅文本 → 区里只剩 1 行空白，need=7 却
+      // 只能垫 1 行，卡被夹紧成只剩卡头的细条）。
+      await this._waitInputQuiet(350, 2500);
       // 扣流只挡「新到」的字节，队列里已扣的仍在缓冲之外：先灌干净再判盖帽、
       // 再钉 marker。否则 marker 钉在未落地的字节之上，那些字节随后写进新卡的
       // 预留区，新卡一出生就被盖帽（blank=0 → 夹紧到 1 行，永不再长）。
@@ -989,14 +1267,15 @@ class Session {
         // rows）整卡 visibility:hidden，思考徽标接班——出生 pad 往返窗口里
         // 不再露出「只有一条头」的细条（真机实测每张新卡 0.3~0.8s）
         kind,                  // 'phase' | 'summary' | 'approval'，隐藏只认 phase
+        gen: this._taskGen || 0,   // 任务代数：收束扫尾只清旧代槽
         revealed: false,       // fund/盖帽/冻结阀放行后锁存为 true，不复隐
         frozen: false,         // 卡已定格（collapse/final/fail/审批）：不再参与隐藏
         frozenAt: 0,
         padOut: 0,             // 已发未落账的 pad 空行（防并发双垫，见 _ensurePad）
         padP: null,            // 本格 pad 发送链尾 promise（gap=0 waiter 等落地）
       };
-      // 换钉（_stealBlankBelow 把下层卡锚点下移）会 dispose 旧 marker：旧钉的
-      // 迟到 dispose 不得删槽——只认「仍是本槽当前钉」的那次 dispose
+      // 旧钉的迟到 dispose 不得删槽（同 id 顶替/重贴换钉场景）——只认
+      // 「仍是本槽当前钉」的那次 dispose
       marker.onDispose(() => {
         if (slot.marker === marker) this._discardSlot(slot);
       });
@@ -1005,7 +1284,9 @@ class Session {
       // 宿主——React root 每帧在两个 el 间迁移拆建 = 卡片闪烁
       // （真机工具卡跨任务同 id 实锤：TaskRunner 的 index 每任务归 1）
       const stale = this._slots.get(cardId);
-      if (stale) this._discardSlot(stale);
+      if (stale) {
+        this._discardSlot(stale);
+      }
       this._slots.set(cardId, slot);
       this._applyDecoration(slot, 2);
       // xterm 按需渲染：task_start 落在「提交→首字节」的空闲间隙时没有缓冲
@@ -1017,13 +1298,23 @@ class Session {
       if (slot.host) {
         feed.mount(cardId, slot.host);
         slot.mounted = true;
-        this._cardOnScreen(cardId);
         this._watchCardResize(slot);
         await new Promise(r => requestAnimationFrame(() => r()));
         this._watchCardResize(slot);   // React 子节点此时已挂，补观察
         this._fitNeed(slot);
         await this._ensurePad(slot);
+        // 预留被随后落下的输出挤断（连接期典型）：一发搬到流底再垫一次
+        if ((slot.reserved || 0) < Math.max(1, Math.ceil((slot.rows || 1) / 2))) {
+          if (await this._relocateToBottom(slot)) {
+            this._fitNeed(slot);
+            await this._ensurePad(slot);
+          }
+        }
         this._reanchor(slot);
+        // 出生即冻结（Phase 1）：内容完整挂载，此后高度永不再涨——空白尾
+        // 复用/零空白藏/冻结阀全按此态判
+        slot.frozen = true;
+        slot.frozenAt = Date.now();
       } else {
         // 终端此刻空闲（提交→首字节间隙）：xterm 按需渲染，无缓冲变化就不跑
         // 渲染循环，onRender 不触发、host 拿不到。旧实现在这里 discard+return
@@ -1043,7 +1334,6 @@ class Session {
     if (slot.mounted || !slot.host || this._dead) return;
     slot.pendingMount = false;
     slot.mounted = true;
-    this._cardOnScreen(slot.id);
     if (this._feed) this._feed.mount(slot.id, slot.host);
     this._watchCardResize(slot);
     requestAnimationFrame(() => {
@@ -1052,7 +1342,12 @@ class Session {
     this._fitNeed(slot);
     this._ensurePad(slot)
       .then(() => this._drainHeld())
-      .then(() => this._reanchor(slot))
+      .then(() => {
+        this._reanchor(slot);
+        // 出生即冻结（Phase 1）：内容完整挂载，此后高度永不再涨
+        slot.frozen = true;
+        slot.frozenAt = Date.now();
+      })
       .catch(() => {});
   }
 
@@ -1060,12 +1355,13 @@ class Session {
   // 登记行数、外盒不涨；子节点外盒随内容涨——折叠/展开等 UI 驱动的高度变化
   // 靠它抓住（流式长高另有事件通路钩子，双保险）。
   _watchCardResize(slot) {
+    if (slot.blockMode) return;
     if (!slot.host) return;
     const child = slot.host.firstElementChild;
     // 记忆守卫：host/子节点没换就不重建 RO（onRender 每帧渲染都会路过）
     if (slot.ro && slot._roHost === slot.host && slot._roChild === child) return;
     if (slot.ro) { try { slot.ro.disconnect(); } catch (e) {} }
-    slot.ro = new ResizeObserver(() => this._scheduleReanchor(slot));
+    slot.ro = new ResizeObserver(() => this._scheduleDrift(slot));
     slot.ro.observe(slot.host);
     if (child) slot.ro.observe(child);
     slot._roHost = slot.host;
@@ -1116,6 +1412,11 @@ class Session {
         // position:absolute+z-index（叠在 marker 行上）；覆盖成 ot-card-host
         // 会抹掉该类 → 元素变 static 掉到屏幕块末尾、屏上不可见（真机根因#2）
         el.classList.add("ot-card-host");
+        // 打字机揭示类随重贴迁移：已 reveal 的卡新 host 补加（不补＝动画停在
+        // paused 初始态 opacity:0，卡隐形）。揭示完走终态类（动画不重播）
+        if (slot.revealed) {
+          el.classList.add(slot.revealDone ? "ot-revealed" : "ot-reveal");
+        }
         // 高度（钉死 px / 内容自撑 auto）、宽度、显隐与 top 统一在这里落：
         // xterm 只在创建时写一次盒高，且按 marker 行离屏把整元素 display:none
         // ——高卡顶行先出视口时整卡被误藏（正文还在屏上），故自管。
@@ -1161,19 +1462,26 @@ class Session {
            slot.reserved < slot.rows;
   }
 
-  _taskSlotHidden() {
-    return this._taskCardId != null &&
-           this._slotHidden(this._slots.get(this._taskCardId));
-  }
-
-  // 隐藏释放沿：fund（reserved 追上 rows）/盖帽/冻结阀。_cardOnScreen 自带
-  // taskCardId 门卫（collapse 后自动 no-op，徽标按老语义接管命令空隙期）；
-  // _styleHost 立即解除 visibility，不等下一帧 onRender。
+  // 隐藏释放沿：fund（reserved 追上 rows）/盖帽/冻结阀。打字机揭示类
+  // （ot-reveal）此刻落上，块动画从 paused 起跑；_styleHost 立即解除
+  // visibility，不等下一帧 onRender。
   _revealSlot(slot) {
     if (!slot || slot.revealed) return;
     slot.revealed = true;
-    this._cardOnScreen(slot.id);
+    if (slot.host && slot.host.classList) slot.host.classList.add("ot-reveal");
     this._styleHost(slot);
+    // 徽标同步（任务全程常显不变量）：揭示不退徽标，只同步三态文案
+    this._refreshThink();
+    // 揭示完成后锁存终态（ot-revealed）：动画只跑一次，滚动/重贴不得重播
+    // ——真机「滑动时总结卡刷新加载一次」＝打字机动画随 host 迁移重跑
+    setTimeout(() => {
+      slot.revealDone = true;
+      const h = slot.host;
+      if (h && h.classList && typeof h.classList.remove === "function") {
+        h.classList.remove("ot-reveal");
+        h.classList.add("ot-revealed");
+      }
+    }, 1200);   // 250ms 动画 + 逐块延迟（块多时约 1s）留足余量
   }
 
   // 高卡可见性：卡占 [marker+回显偏移, +max(rows,pinnedRows)) 行，与视口
@@ -1227,7 +1535,9 @@ class Session {
       // 不把 zsh 原位重画的提示符/回显行盖掉（锚点对齐空白 run，见 _echoSkip）
       const top = (slot.marker ? slot.marker.line : 0) + this._echoSkip(slot);
       const bot = top + Math.max(1, slot.rows || 1, slot.pinnedRows || 1) - 1;
-      if (bot >= ydisp && top < ydisp + this.term.rows) {
+      const inView = bot >= ydisp && top < ydisp + this.term.rows;
+      const wantDisp = inView ? "block" : "none";
+if (inView) {
         el.style.display = "block";
         el.style.top = (top - ydisp) * this._lineHeight() + "px";
       } else {
@@ -1241,8 +1551,23 @@ class Session {
   _styleHost(slot, heightRows) {
     const el = slot.host;
     if (!this._hostAlive(el)) { slot.forceReapply = true; return; }
+    // 块流槽：位置与高度由流式布局决定（CSS 高度自撑），不许用 marker/top/
+    // clamp 那套去钉——那正是「卡片占网格行」的几何，会把块拽回浮层。
+    if (slot.blockMode) return;
+    try {
+      el.dataset.mline = slot.marker ? slot.marker.line : -1;
+      el.dataset.bspan = this._blankSpan(slot);
+      el.dataset.rows = slot.rows;
+      el.dataset.pinned = slot.pinnedRows == null ? -1 : slot.pinnedRows;
+      el.dataset.need = slot.need;
+    } catch (e) {}
     const lh = this._lineHeight();
-    const rows = Math.max(1, (heightRows != null ? heightRows
+    // 钉死高每帧兜底到交互底线：pinnedRows 是 clamp 那一刻记的，按钮在窗口
+    // 变窄/系统缩放后会换行长高、或 clamp 时按钮还没布局完量矮了一行——
+    // 按旧值钉死就把按钮行裁出盒 = 真鼠标点不到 = 决策死锁（红线⑨）。只在
+    // 武装时抬一次底线不够，必须每次 _styleHost 都取当前 _floorRows。
+    const floor = this._floorRows(slot);
+    const rows = Math.max(1, floor, (heightRows != null ? heightRows
       : (slot.pinnedRows != null ? slot.pinnedRows : slot.rows)) | 0);
     // 硬线上盖：盒矩形任何一帧都不许越过当前空白 run（auto 自撑冲high、
     // 钉死高滞后于擦行上移、账目 rows 滞后渲染高——三个 cover 来源全靠这
@@ -1277,18 +1602,36 @@ class Session {
     try { return !!el && el.isConnected; } catch (e) { return false; }
   }
 
-  // 审批卡交互底线（行数）：问句+按钮行（.aphead）的实测高度。夹紧/钉死/
-  // 盖帽高度都不许低过它——审批卡被压成细条时按钮不可点，agent 等审批、
-  // 审批等 pad 互为因果=死锁（真机审批卡钉死 2 行 18s）。空白 run 不够时
-  // 宁可短暂压住下方提示符行（pad 落地解钉即让开），功能优先于观感硬线；
-  // 非审批卡恒 0（硬线 coveredTextRows 不变）。
+  // 审批交互底线（行数）：夹紧/钉死/盖帽高度都不许低过它——按钮不可点＝
+  // 决策死锁（红线⑨）。底线量到「按钮簇底」为准（夹紧只裁底，裁掉的不得
+  // 是按钮簇）：
+  //   命令卡（Phase 2 二合一，kind='phase'）：按钮簇 .cmdacts 在**卡头右侧**
+  //    （还原原版布局），底线=卡头高——夹紧裁底只丢状态行，按钮恒可点。
+  //   救援卡（kind='approval'）：按钮在 .aphead（首行），底线是首行高。
+  // 空白 run 不够时宁可短暂压住下方提示符行（pad 落地解钉即让开），功能
+  // 优先于观感硬线；无交互行的卡恒 0（硬线 coveredTextRows 不变）。
+  // 只认**真有按钮**的卡：旧实现把任何 .aphead 都当交互行，AlertCard/
+  // ToolCard 的卡头恰是它们唯一的定高行，于是夹紧恒钉在卡头高、正文永远
+  // 被裁出盒（真机图一「⚠ 系统警告」只剩标题、错误正文整段不可见）。
   _floorRows(slot) {
-    if (slot.kind !== "approval" || !this._hostAlive(slot.host)) return 0;
+    if (slot.blockMode) return 0;
+    if (!this._hostAlive(slot.host)) return 0;
     try {
+      const lh = this._lineHeight();
+      const acts = slot.host.querySelector(".cmdacts");
+      if (acts && typeof acts.getBoundingClientRect === "function" &&
+          typeof slot.host.getBoundingClientRect === "function") {
+        const hostTop = slot.host.getBoundingClientRect().top;
+        const bottom = acts.getBoundingClientRect().bottom;
+        const rows = Math.ceil((bottom - hostTop) / lh);
+        return rows > 0 ? rows : 0;
+      }
       const head = slot.host.querySelector(".aphead");
       if (!head || typeof head.getBoundingClientRect !== "function") return 0;
+      // 卡头里没有按钮 = 不是交互行（警告/工具卡头只有标签与徽标）
+      if (!head.querySelector("button")) return 0;
       const h = head.getBoundingClientRect().height;
-      return h > 0 ? Math.ceil(h / this._lineHeight()) : 0;
+      return h > 0 ? Math.ceil(h / lh) : 0;
     } catch (e) { return 0; }
   }
 
@@ -1305,6 +1648,7 @@ class Session {
 
   // 量高 → need = rows+1（+1 保险，卡与输出间 ≤1 空行）
   _fitNeed(slot) {
+    if (slot.blockMode) return;
     if (!this._hostAlive(slot.host)) return;   // 元素未诞生/已移除：不量，账目不动
     // 编辑框开启期不计账：编辑框浮在卡下方行上、纯属临时 UI——否则 pad 会为
     // 编辑框高度预留空行，取消/拒绝后卡缩回而预留空行无法回收＝卡下大白空
@@ -1316,41 +1660,81 @@ class Session {
     // 的空白判成「预留过量」，夹紧/截断误触发
     if (h <= 0) return;
     const n = rowsForPx(h, this._lineHeight());
-    if (n > (slot.rows || 0)) {
-      slot._growAt = Date.now();
-      slot._grows = (slot._grows || 0) + 1;
-    }
     slot.rows = n;
-    // 流式增长裕量（真机反馈 2026-09-27：SSH 往返追不上 100ms 思考流批量，
-    // 卡被钳到空白 run 高度、底部裁切直到换装才恢复）：近 1s 内有过**连续**
-    // 长高才按 need+5 请求 pad。空白行不可回吐，落地的裕量尾留由下一张卡
-    // 挂载时的空白尾复用收掉（见 _mountCard）。裕量止于增长停（含换装/冻结）。
-    // 只认「流式连续长高」：挂载首测的单次跳变与定格后结账各带一次 +5，
-    // 落地即不可回收＝每张卡下定格 6 行空白——卡间大缝隙根因（真机
-    // 2026-09-30）；这两种场景已有 settle/夹紧解除兜底，不需要裕量。
-    slot.need = n + 1 +
-      (!slot.frozen && (slot._grows || 0) > 1 &&
-       Date.now() - (slot._growAt || 0) < 1000 ? 5 : 0);
+    // 出生即定型（Phase 4）：内容完整才挂载、挂后高度钉死，不存在「流式长高」
+    // ——need 就是量高 + 1 保险行。旧 +5 长高裕量只服务流式时代（空白行不可
+    // 回吐，落地即卡间大缝隙根因，真机 2026-09-30），已随长高机械一并拆除。
+    slot.need = n + 1;
     // 编辑框浮层开启期宿主须 overflow visible（浮层伸出盒外），量高/夹紧不得
     // 把它钉回 hidden——否则下拉编辑框被裁（真机「修改后无法编辑」成因之一）
     if (!slot.host.querySelector(".edopen")) slot.host.style.overflow = "hidden";
+  }
+
+  // 一发搬移：预留区被随后落下的输出挤断时，把**本卡自己**的锚搬到流底。
+  //
+  // 连接期的典型时序：卡在横幅后、命令集执行前挂载，marker 钉在提示符行；
+  // pad 要过 _runner_lock（命令集的注入正持着），往返期间命令回显 + 登录输出
+  // 已经落进 marker 行之下，把预留区的连续空白挤断——_echoSkip 跳到第一处
+  // 空白，区里只剩 1 行，need=7 却只能垫 1 行，卡被夹紧成只剩卡头的细条
+  // （真机图一「⚠ 系统警告只剩标题」）。pad 只能追加流底，垫不进被挤断的区。
+  //
+  // 搬移只动自己的锚：换 marker 后再 dispose 旧钉（onDispose 的
+  // `slot.marker === marker` 守卫认的是当前钉，故不会误触发 _discardSlot），
+  // 不碰别的卡、不偷别人的预留——与已拆除的 _stealBlankBelow 不同。
+  // 只在「预留不足一半」时一发：搬移换贴纸、React root 迁移，不宜反复。
+  async _relocateToBottom(slot) {
+    if (this._dead || !slot.marker || !slot.host) return false;
+    try {
+      const buf = this.term.buffer.active;
+      const cursorAbs = buf.baseY + buf.cursorY;
+      if (cursorAbs <= slot.marker.line) return false;   // 没有下方空间
+      // 流底往下要真有成片空白才值得搬（越界行视为空白，故上限放开）
+      const free = blankRun(buf, cursorAbs + 1, cursorAbs + 1 + (slot.rows || 1) + 2);
+      if (free < (slot.rows || 1)) return false;
+      const old = slot.marker;
+      const m = this.term.registerMarker(0);
+      if (!m) return false;
+      slot.marker = m;
+      m.onDispose(() => { if (slot.marker === m) this._discardSlot(slot); });
+      try { old.dispose(); } catch (e) {}
+      if (slot.decoration) { try { slot.decoration.dispose(); } catch (e) {} }
+      slot.decoration = null;
+      slot.host = null;
+      slot.clamped = false;
+      slot.pinnedRows = null;
+      slot.reserved = 0;
+      slot.padOut = 0;
+      this._applyDecoration(slot, 2);
+      const t0 = Date.now();
+      while (!slot.host && Date.now() - t0 < 500) await this._sleep(10);
+      if (slot.host && this._feed && slot.mounted) this._feed.mount(slot.id, slot.host);
+      // 新 host：RO 观察目标要跟着迁，否则后续长高不再感知
+      if (slot.host) this._watchCardResize(slot);
+      return !!slot.host;
+    } catch (e) {
+      return false;
+    }
   }
 
   // 重贴/decoration 高度策略：流底卡高度由内容自撑（host inline height=auto），
   // 长高只补 pad 不重贴（重贴换新元素=React 重挂载，流式期间会闪）；仅三种情况
   // 重贴：解除夹紧、上游夹紧钉高、resize 刷宽度（forceReapply）。
   _reanchor(slot) {
+    if (slot.blockMode) return;
     if (this._dead || !slot.marker) return;
     this._fitNeed(slot);
     slot.reserved = this._blankSpan(slot);   // 落账只认缓冲，每步重数
     // 缺行就截断（宁矮不盖）：垫得进去的由 _ensurePad 补上后自动解除，
     // 垫不进去的（盖帽：下方已有输出/别的卡）就此钉死到已垫高度。
-    // 钉死高度 = 预留空白 run 的行数：卡体顶行就是 run 首行（视觉 top 含
+    // 钉死高度 = 预留空白 run 的行数（审批卡例外：不低于按钮行 _floorRows，
+    // 宁短暂压提示符行也不许决策死锁）：卡体顶行就是 run 首行（视觉 top 含
     // 回显偏移，见 _fixHostVisibility），run 有多长盒就多高，盒底恰好压在
     // run 末行上，不会越过它盖住下面的活提示符/输出。
     const short = slot.reserved < slot.rows;
     if (short) {
-      const rows = Math.max(1, slot.reserved);
+      // 钉死高度不低于交互底线（_floorRows）：审批卡被钉到按钮行之下＝
+      // 按钮不可点＝决策死锁（红线⑨）。非审批卡 floorRows 恒 0，行为不变。
+      const rows = Math.max(1, slot.reserved, this._floorRows(slot));
       this._clampCard(slot);
       if (slot.pinnedRows !== rows) {
         slot.pinnedRows = rows;
@@ -1467,9 +1851,7 @@ class Session {
     if (slot.reanchorT) { clearTimeout(slot.reanchorT); slot.reanchorT = null; }
     slot.settling = (async () => {
       this._holdBytes("card-settle");
-      // 定格接管结账＝批量窗被取消，其记账的长高扣流必须就地归还。
-      // 放在新扣流之后归还：中间无 await，不会有字节漏进占位区的空窗。
-      this._releaseGrow(slot);
+      // 定格接管结账＝漂移批量窗被取消（只清定时器，无长高扣流记账）
       try {
         // 空闲期补 host：PTY 静默窗里槽可能还 pendingMount（无 host、React 内容
         // 没落地、高度停在出生值）——按出生高结账等于没结：等真高度量出来时
@@ -1521,71 +1903,48 @@ class Session {
       .then(() => { clearTimeout(timer); once(); });
   }
 
-  // 归还 _scheduleReanchor 记账的「长高」扣流。取消 reanchorT 的每条路径
-  // （定格结账 _settleCard、丢槽 _discardSlot）都必须走它：漏还一笔就让
-  // _holdActive() 永久为真，此后 PTY 字节只进 _holdBuf 不落 xterm，且字节
-  // 不进 _writeTerm 就不会唤醒 _scheduleHeal——自愈也救不回来，终端停在
-  // 「打字没回显、命令没输出」（真机 2026-10-11 总结卡后卡顿的根因之一）。
-  _releaseGrow(slot) {
-    const grown = (slot && slot.growHolds) || 0;
-    if (slot) slot.growHolds = 0;
-    for (let i = 0; i < grown; i++) this._releaseBytes();
-  }
-
-  // 流式长高：攒 150ms 统一重贴（禁止逐 token 撕贴纸）。
-  // 扣流窗口必须从「感知到长高」就开始：150ms 批量延迟 + pad 往返期间，
-  // 命令回显/输出会写进未垫够的卡区，打破卡下空白连续区 → 卡被夹紧截断、
-  // 多行输出更是永久盖帽（分析卡再也长不开，真机「输出遮挡分析卡」根因）。
-  // 纯分析流式期间 PTY 本就静默（ai 走 JSON 事件），提前扣流无代价。
-  _scheduleReanchor(slot) {
+  // 高度漂移处理（Phase 4，长高机械已拆除）：卡出生即定型，RO 只报
+  // 「内容高 ≠ 预留」的漂移（典型来源：resize 折行变化、字体加载）。
+  // 处置只有两条路，永不长高：
+  //   ① 立即夹紧钉死到已垫高度（防 auto 盒越过预留区盖住下方活文本）；
+  //   ② 流底卡给一次性重垫机会（pad 只追加流底；_ensurePad 自带 card-pad
+  //      扣流窗，与旧「长高扣流」记账无关），垫上自动解钉、垫不上维持截断。
+  // 上游卡（非流底）夹紧即终态——scrollback 中间物理插不进新行。
+  // 150ms 节流：夹紧自身也触发 RO，防抖会饿死、连发会撕贴纸。
+  _scheduleDrift(slot) {
     if (this._dead) return;
     this._fitNeed(slot);
-    if (slot.revealed && slot.rows > slot.reserved && !this._capped(slot)) {
-      // 感知即钉盒到已垫高度：150ms 批量窗里 auto 盒会越过空白 run 盖住下方
-      // 活提示符行（硬线 coveredTextRows）。垫够解钉后卡自己长回（_reanchor
-      // 非 short 分支清 pinnedRows）；垫不够就维持钉死=截断，宁矮不盖。
-      if (slot.pinnedRows == null) {
-        this._clampCard(slot);
-        // 审批卡钉死高度不低过按钮行（_floorRows）：细条态按钮不可点=死锁
-        slot.pinnedRows = Math.max(1, slot.reserved, this._floorRows(slot));
-        this._styleHost(slot);
-      }
-      this._holdBytes("card-grow");
-      slot.growHolds = (slot.growHolds || 0) + 1;
+    // 感知即钉盒（只改样式不动贴纸）：漂移窗里 auto 盒会越过空白 run 盖住
+    // 下方活提示符行（硬线 coveredTextRows）
+    if (slot.revealed && slot.rows > slot.reserved && slot.pinnedRows == null) {
+      this._clampCard(slot);
+      // 审批卡钉死高度不低过按钮行（_floorRows）：细条态按钮不可点=死锁
+      slot.pinnedRows = Math.max(1, slot.reserved, this._floorRows(slot));
+      this._styleHost(slot);
     }
-    // 节流而非防抖：只在「没有在途批量窗」时排一次，150ms 后统一重贴。
-    // 旧实现每次都 clearTimeout 重排 = 防抖，连续流式长高期间永远不触发——
-    // 真机实测 3.5s 内叠到 43 层 card-grow 未归还，整段 PTY 回显被扣住，
-    // 用户体感就是「总结卡出来后几秒打不进字」。节流后扣流窗被钉死在
-    // 「150ms 批量 + pad 往返」这一个量级，正是下面注释要保的范围。
     if (slot.reanchorT) return;
     slot.reanchorT = setTimeout(async () => {
       slot.reanchorT = null;
-      if (this._dead || !slot.marker) {
-        this._releaseGrow(slot);
-        return;
-      }
-      this._holdBytes("card-reanchor");
+      if (this._dead || !slot.marker) return;
+      if (this._capped(slot) || this._padFused) { this._reanchor(slot); return; }
+      // 一次性重垫只给流底卡：pad 只追加在流底，上游垫不进（盖帽即终态）
+      const bottom = [...this._slots.values()].filter(o => o.marker)
+        .sort((a, b) => a.marker.line - b.marker.line).pop();
+      if (bottom !== slot) { this._reanchor(slot); return; }
+      this._holdBytes("card-drift");
       try {
         await this._ensurePad(slot);
         await this._drainHeld();
         this._reanchor(slot);
       } finally {
         this._releaseBytes();
-        // 归还长高窗口的扣流（含卡被丢弃不再批量的情形）
-        this._releaseGrow(slot);
       }
     }, 150);
   }
 
-  // 流式文本缓存（_fallbackPlain 兜底用）
-  _trackText(id, text) {
-    if (!this._cardsText) this._cardsText = new Map();
-    this._cardsText.set(id, (this._cardsText.get(id) || "") + (text || ""));
-  }
-
   // 夹紧：卡 DOM 截断，不给卡内滚动条——宁可矮，不许盖网格
   _clampCard(slot) {
+    if (slot.blockMode) return;
     slot.clamped = true;
     if (slot.host && !slot.host.querySelector(".edopen")) {
       slot.host.style.overflow = "hidden";
@@ -1681,69 +2040,8 @@ class Session {
     }
   }
 
-  // 紧下方还没露面的卡（未 reveal 未冻结）：视觉零存在——锚点下移用户无感。
-  // 盖帽判据不区分「下方被真输出/已露面的卡占住」与「下方只是张没露面卡的
-  // 未 fund 空白尾」，后者其实可以让（见 _stealBlankBelow）
-  _unrevealedBelow(slot) {
-    if (!slot || !slot.marker) return null;
-    let low = null;
-    for (const o of this._slots.values()) {
-      if (o !== slot && o.marker && o.marker.line > slot.marker.line &&
-          (!low || o.marker.line < low.marker.line)) low = o;
-    }
-    if (!low || low.revealed || low.frozen) return null;
-    return low;
-  }
-
-  // 盖帽欠账回收：真高度量出来时区已被下层 marker 闭合（React 慢flush/徽标
-  // 折行/离屏迟到量高），pad 只追加流底、垫不进本区＝永久截断（真机 2026-10-06
-  // 工具卡半截头）。下层卡若还没露面（_unrevealedBelow），把它锚点下移到本卡
-  // 真高之后：让出的空白本是无主 run，下层缺的行它自己在流底补；重贴它的
-  // decoration（host 随 onRender 迁移，React root 同换贴纸路径）。下层已露面
-  // 则不动——宁截不跳。500ms 节流防连发撕贴纸
-  async _stealBlankBelow(slot) {
-    if (this._dead || !slot.marker || this._padFused) return false;
-    if ((slot.reserved || 0) >= (slot.rows || 0)) return false;
-    if (Date.now() - (slot._stoleAt || 0) < 500) return false;
-    slot._stoleAt = Date.now();
-    const buf = this.term.buffer.active;
-    if (buf !== this.term.buffer.normal) return false;
-    const low = this._unrevealedBelow(slot);
-    if (!low || !low.marker) return false;
-    const cursorAbs = buf.baseY + buf.cursorY;
-    const want = this._regionStart(slot) + Math.max(1, slot.rows || 1);
-    if (want <= low.marker.line || want > cursorAbs) return false;
-    // [下层旧锚, want) 必须整段空白才敢移锚：夹了真输出就不是无主 run
-    if (low.marker.line + blankRun(buf, low.marker.line, want) < want) {
-      return false;
-    }
-    const m = this.term.registerMarker(want - cursorAbs);
-    if (!m) return false;
-    const old = low.marker;
-    low.marker = m;
-    try { old.dispose(); } catch (e) {}   // 身份守卫下旧钉 dispose 不删槽
-    if (low.decoration) {
-      try { low.decoration.dispose(); } catch (e) {}
-      low.decoration = null;
-    }
-    low.host = null;
-    low.pinnedRows = null;
-    low.clamped = false;
-    low.reserved = 0;
-    low.forceReapply = false;
-    this._applyDecoration(low, 2);   // 新钉重贴；onRender 交 host 并迁 React root
-    this._holdBytes("card-steal");
-    try {
-      slot.reserved = this._blankSpan(slot);
-      this._reanchor(slot);          // reserved 追上 rows → 解钉/放行/长回
-      await this._ensurePad(low);    // 下层让出的行它自己在流底补回
-      await this._drainHeld();
-      this._reanchor(low);
-    } finally {
-      this._releaseBytes();
-    }
-    return true;
-  }
+  // （_stealBlankBelow/_unrevealedBelow 移锚回收已随 Phase 4 拆除：盖帽欠账
+  // 回收靠出生事务的「锚定前 settle 上游 + 空白尾复用」，中途不再挪别人的锚）
 
   // 补差：先数后打，只补真缺口；落账只认缓冲（应答只是唤醒）。
   // 扣流临界区内完成，输出插不进占位区。
@@ -1752,6 +2050,7 @@ class Session {
   // （真机审批卡下 9 行空白根因：pad 往返 > 150ms 批量窗时两路并发）。在途
   // 计入后第二路看到缺口已填即 gap=0；整链收尾（所有排队发送 ack 完）落账重置。
   async _ensurePad(slot) {
+    if (slot.blockMode) return;
     if (this._dead || !slot.marker || this._padFused) return;
     // 先灌已扣字节再数：外层临界区（挂载/结账/自愈）扣着时，pad 的空行可能
     // 已在队列里没落缓冲，按旧缓冲数会多垫一轮（垫过不能回吐 = 卡间空白）
@@ -1759,9 +2058,6 @@ class Session {
     let blank = this._blankSpan(slot);
     slot.reserved = blank;
     if (this._capped(slot)) {
-      // 盖帽者是「还没露面的下层卡的未 fund 空白尾」时移锚收回本区（宁矮不盖
-      // 只对已被占住的区成立）；收回成功内部已重锚双方，直接返回
-      if (blank < slot.rows && await this._stealBlankBelow(slot)) return;
       // 垫不进本区（下方已有输出/别的卡）：预留够高就原地不补；不够只能
       // 夹紧截断（宁可矮不许盖）。大头在 _mountCard 锚定新卡前的 settle
       // 窗口里提前补掉。
@@ -1790,11 +2086,21 @@ class Session {
     }
     this._holdBytes("card-pad");
     try {
+      // padOut **入队当刻**就记账（不是任务跑起来才记）：并发/连发的
+      // _ensurePad（挂载 vs 漂移 vs 结账 vs 自愈）各自「drain 后算 gap」，
+      // 若都等进队执行才 +padOut，两路都在 padOut=0 时算出同一缺口、各发
+      // 一轮 = 双倍空行落地 = 卡下永久大白空（评审 MEDIUM；真机审批卡下
+      // 9 行空白同族）。入队即记，后到者 gap 归 0 / 只补差额。
+      slot.padOut = (slot.padOut || 0) + gap;
       this._padQ = this._padQ.then(async () => {
-        if (this._dead || !slot.marker) return;
+        if (this._dead || !slot.marker) {
+          // 发送被取消（会话死/卡散场）：在途额就地退回，不然 padOut 永久
+          // 虚高、真缺口再也垫不进
+          slot.padOut = Math.max(0, (slot.padOut || 0) - gap);
+          return;
+        }
         this._padSlot = slot;
         slot.ackDeferred = false;   // _onPadded 按 ack 事件的 deferred 置位
-        slot.padOut = (slot.padOut || 0) + gap;
         this._padSentAt = Date.now();
         const blankBefore = this._blankSpan(slot);
         // mirror：可信的半行镜像交给 worker 收纳/复原——pad 注入不再吞掉
@@ -1920,7 +2226,6 @@ class Session {
 
   _discardSlot(slot) {
     if (slot.reanchorT) { clearTimeout(slot.reanchorT); slot.reanchorT = null; }
-    this._releaseGrow(slot);   // 批量窗被取消，记账的长高扣流一并归还
     if (slot.ro) { try { slot.ro.disconnect(); } catch (e) {} }
     if (slot.decoration) { try { slot.decoration.dispose(); } catch (e) {} }
     if (this._cardsText) this._cardsText.delete(slot.id);
@@ -1937,6 +2242,12 @@ class Session {
   // 触发二次删槽，收尾统一走 _discardSlot
   _dropSlot(slot) {
     if (!slot) return;
+    // 块流槽：整块移除（「完整或消失」的消失侧）。force：中断/收束是显式终态，
+    // 越过 keepAlive 闸门（待审批卡只有在这里才允许被清）
+    if (slot.blockMode && this._blocks && this._blockView) {
+      this._blocks.remove(slot.id, {force: true});
+      this._blockView.sync(this._blocks.list());
+    }
     const m = slot.marker;
     slot.marker = null;
     if (m) { try { m.dispose(); } catch (e) {} }
@@ -1952,11 +2263,20 @@ class Session {
   // 新会话（/clear）：销毁全部装饰钉并清空 island 卡片流
   _clearCards() {
     this._destroySlots();
+    if (this._blocks && this._blockView) {
+      this._blocks.clear();
+      this._blockView.sync(this._blocks.list());
+    }
     if (this._feed) this._feed.handle({kind: "clear"});
-    this._phaseLive = false;
-    this._summaryShown = false;
     this._approvalOpen = false;
+    this._approvalKey = null;
     this._approvalResolved = false;
+    this._toolCards.clear();
+    if (this._cmdCardQ) this._cmdCardQ.clear();
+    // 收束时括号还开着就先归位再清账——顺序反了会把刚存下的归属一并抹掉。
+    // _pendingTextByCard 刻意不清：它的卡可能还挂在队列里没落位。
+    if (this._outOpen) this._closeOutAnchor();
+    this._outEcho = null;
     this._runningTool = "";
     this._refreshThink();
   }
@@ -1979,7 +2299,7 @@ class Session {
     const bottom = slots[slots.length - 1] || null;
     for (const slot of slots) {
       slot.forceReapply = true;   // 列数/行高变了：重贴 decoration 刷宽度
-      this._scheduleReanchor(slot);
+      this._scheduleDrift(slot);
       if (slot !== bottom) this._clampCard(slot);
     }
   }
@@ -2025,9 +2345,9 @@ class Session {
       if (this._lastByteAt && Date.now() - this._lastByteAt < 250) continue;
       this._holdBytes("card-heal");
       Promise.resolve()
-        // 盖帽卡也过一遍回收：盖帽者若只是没露面的下层卡空白尾，移锚收回
-        // 本区（节流 500ms）；真被占住的区 steal 自会空手返回
-        .then(() => (capped ? this._stealBlankBelow(slot) : this._ensurePad(slot)))
+        // 盖帽卡不再移锚回收（Phase 4）：夹紧是终态（宁矮不盖），仍走
+        // _reanchor 只为「预留区事后变宽」的解钉（reserved ≥ rows 即长回）
+        .then(() => (capped ? Promise.resolve() : this._ensurePad(slot)))
         .then(() => this._drainHeld())
         .then(() => this._reanchor(slot))
         .finally(() => this._releaseBytes());
@@ -2041,10 +2361,8 @@ class Session {
       if (!s.marker) continue;
       const owed = s.pinnedRows != null || s.clamped || s.reserved < s.rows;
       // 盖帽且仍欠账：垫不进本区，夹紧是终态（宁矮不盖），不空转；
-      // 盖帽但已 fund：_reanchor 非 short 分支解钉即可，不需要 pad，也要唤醒；
-      // 盖帽者还没露面：steal 可能收回本区，欠账也要唤醒重试（节流在 steal 内）
-      if (owed && (!this._capped(s) || s.reserved >= s.rows ||
-                   this._unrevealedBelow(s))) {
+      // 盖帽但已 fund：_reanchor 非 short 分支解钉即可，不需要 pad，也要唤醒
+      if (owed && (!this._capped(s) || s.reserved >= s.rows)) {
         this._scheduleHeal();
         break;
       }
@@ -2077,83 +2395,168 @@ class Session {
   async _onTaskStart() {
     this._taskActive = true;
     this._taskClosed = false;   // 新任务起跑：收束门卫复位（迟到宣告照常挂）
+    this._taskGen = (this._taskGen || 0) + 1;   // 任务代数：收束扫尾按代过滤
+    // 同步给 store：store._gen 递增 + 清跨任务残留（_pendingArms/_lastSummaryMd）。
+    // 漏发＝store._gen 恒 0 → sweep 代数过滤失效（真机 2026-10-17：新任务
+    // 审批卡被上代收束当未完毕摘掉 → 按钮永不出生转模态）
+    this._ensureFeed().then(f => f && f.handle({kind: "task_start"}))
+      // Enter 后立即弹「AI 思考中」占位卡（id 与后续 ai_result 同一张）
+      .then(f => {
+        if (!f) return null;
+        const cid = ++this._cardSeq;
+        f.handle({kind: "analysis_boot", id: cid});
+        return this._mountCard(cid, "phase");
+      });
     this._lastSummaryMd = null;
-    this._summaryShown = false;   // 新一轮：总结卡未挂，思考徽标可接班空隙期
+    // Phase 3 徽标进度：progress 心跳（1s）累计，任务起跑清零
+    this._progress = {chars: 0, tokensIn: 0, tokensOut: 0};
+    this._taskStartedAt = Date.now();
     this._setStopVisible(true);
     this._startTimer();
-    this._openPhaseCard();
-  }
-
-  // 开一张新分析卡分区（任务启动 / 定格后的新阶段）。store 的 task_start 必须
-  // 先于该卡后续 token 落地——_cardReady 链串行化（spec §3.1 多阶段叙事）
-  _openPhaseCard() {
-    const cardId = ++this._cardSeq;
-    this._taskCardId = cardId;
-    // 卡此刻未必上屏：终端空闲（无 PTY 字节）时 xterm 不跑渲染循环，host 拿不到、
-    // 卡 pendingMount 不可见（模型纯推理空隙期）。上屏前思考徽标先接班，
-    // 挂载完成由 _cardOnScreen 接班回卡本体——否则空隙期卡与徽标都不显＝假死
-    this._phaseLive = false;
+    // 思考徽标即刻接班（_refreshThink 按 _taskActive 解隐）：纯推理空隙期
+    // 卡未挂前不得假死（旧 _openPhaseCard 的解隐职责移到这里）
     this._refreshThink();
-    // 链在在途开卡之后（工具卡/上一阶段卡可能还在挂载临界区内）：挂载全程
+    // Phase 1「定格一发入魂」：不预开流式分析卡——分析段由 ai_result 成卡
+  }
+
+  // 任务收束公共账（final/task_end/task_fail 幂等共用）：状态栏/计时器/审批态
+  _taskTeardown() {
+    this._taskActive = false;
+    this._taskClosed = true;   // 收束：迟到的工具宣告不再挂卡
+    this._approvalOpen = false;   // 任务收束：未决审批窗（若有）一并释放
+    this._approvalCmd = null;
+    this._approvalKey = null;
+    this._approvalResolved = false;
+    this._toolCards.clear();
+    this._runningTool = "";
+    this._endTimer();
+    this._setStopVisible(false);
+    this._refreshThink();
+  }
+
+  // 一次性分析段（Phase 1）：内容完整才成卡——handle 先入 store（量高时内容
+  // 已完整），再挂出生即完整的卡，挂载后高度永不再涨。空段不发不成卡。
+  _onAiResult(ev) {
+    const text = (ev && ev.text) || "";
+    const reason = (ev && ev.think) || "";
+    if (!text && !reason) return;
+    const cardId = ++this._cardSeq;
+    this._cardsText.set(cardId, reason ? reason + "\n" + text : text);
+    // 链在在途开卡之后（工具卡/上一段卡可能还在挂载临界区内）：挂载全程
     // 扣流，两段并发会把 marker 钉错
-    this._cardReady = this._cardReady.then(() => this._mountCard(cardId)).then(slot => {
-      if (!slot) return null;
-      return this._ensureFeed().then(f => f && f.handle({kind: "task_start", id: cardId}));
-    });
-    return cardId;
+    this._cardReady = this._cardReady
+      .then(() => this._ensureFeed())
+      .then(f => f && f.handle({
+        kind: "ai_result", id: cardId, text, reason,
+        failed: !!(ev && ev.failed),
+      }))
+      .then(() => this._mountCard(cardId, "phase"))
+      .then(slot => { if (slot) this._followBottom(); });
   }
 
-  _onAiToken(text) {
-    // 定格后到达的 token 在新流点开新卡（spec §3.1「卡—命令—卡」节奏）
-    if (!this._taskCardId && this._taskActive) this._openPhaseCard();
-    const id = this._taskCardId;
-    if (!id) return;
-    this._trackText(id, text);
-    this._cardReady.then(() => this._ensureFeed())
-      .then(f => f && f.handle({kind: "ai_token", text: text || ""}))
-      // 流式长高不能只靠 RO：xterm 每帧把装饰元素 inline 高度写回登记行
-      // 数，外盒不涨 RO 永久静默——事件通路自己挂补差钩子；视口原贴底时
-      // 跟随滚到底（流式内容超出屏幕自动滚动显示最新，用户上翻则不打扰）
-      .then(() => { const s = this._slots.get(id); if (s) this._scheduleReanchor(s); })
-      .then(() => this._followBottom());
+  // 红色警告卡：配置错误（协议二选一冲突/都缺）与系统异常（模型/工具超时等）。
+  // kind='phase' 复用宁藏不盖/夹紧兜底；出生即完整（done 恒真）不进收束扫尾。
+  _onAlert(ev) {
+    const text = (ev && ev.text) || "";
+    if (!text) return;
+    // 状态栏兜底：卡被夹紧（预留不足，宁可矮不许盖）时正文可能整段裁出盒，
+    // 但系统警告必须始终读得到——状态栏常驻一行，且不占网格、不与卡争预留。
+    this.setStatus(this.status, text);
+    const cardId = ++this._cardSeq;
+    this._cardsText.set(cardId, text);
+    this._cardReady = this._cardReady
+      .then(() => this._ensureFeed())
+      .then(f => f && f.handle({kind: "alert", id: cardId, text}))
+      .then(() => this._mountCard(cardId, "phase"))
+      .then(slot => { if (slot) this._followBottom(); });
   }
-
-  _onAiThink(text) {
-    if (!this._taskCardId && this._taskActive) this._openPhaseCard();
-    const id = this._taskCardId;
-    if (!id) return;
-    this._cardReady.then(() => this._ensureFeed())
-      .then(f => f && f.handle({kind: "ai_think", text: text || ""}))
-      .then(() => { const s = this._slots.get(id); if (s) this._scheduleReanchor(s); })
-      .then(() => this._followBottom());
-  }
-
-  // 工具调用小卡（ai_tool start/end，worker 在 ai_collapse 定格分析卡后发）：
   // start 在流底挂 tool 卡（kind 同 phase——宁藏不盖/夹紧兜底全复用），end 经
-  // store 同 id 置状态徽标（卡高不变，零 pad 往返）。不占 _taskCardId：工具卡
-  // 不是流式分析卡，之后的模型输出由 _onAiToken/_onAiThink 开新分析卡。
+  // store 同 id 置状态徽标（卡高不变，零 pad 往返）。工具卡不是流式分析卡，
+  // 之后的模型输出由 _onAiResult 另开新卡。
+  // 工具卡串行挂载队列：并行 tool_call 一次宣告 N 张，逐张落地。
+  // pri=true（要审批）插队——审批卡必须立刻可点，等前一张收束就是决策死锁。
+  _pumpToolMounts(pri) {
+    // 惰性建：测试用 Object.create(原型) 不跑构造器，字段不一定在
+    if (!this._toolMountQ) this._toolMountQ = [];
+    if (this._toolMounting) return;
+    let item = null;
+    if (pri) {
+      const i = this._toolMountQ.findIndex(x => x.pri);
+      if (i >= 0) item = this._toolMountQ.splice(i, 1)[0];
+    }
+    if (!item) item = this._toolMountQ.shift();
+    if (!item) return;
+    this._toolMounting = true;
+    const { cardId, ev } = item;
+    this._cardReady = this._cardReady
+      .then(() => this._ensureFeed())
+      .then(f => f && f.handle({
+        kind: "tool_start", id: cardId, name: ev.name || "", args: ev.args || "",
+        command: ev.command || "", needs_approval: !!ev.needs_approval,
+        reasons: ev.reasons || "", risk: ev.risk || "",
+      }))
+      .then(() => this._mountCard(cardId, "phase"))
+      .then(slot => { if (slot) this._followBottom(); })
+      .catch(() => {})
+      .then(() => {
+        this._toolMounting = false;
+        if (this._toolMountQ.length) this._pumpToolMounts();
+      });
+  }
+
+  // 审批帧到时该卡还在队列里 → 插队立即挂（按钮出不来就是决策死锁）
+  _flushToolMountFor(cardId) {
+    try {
+      if (!this._toolMountQ) return;
+      const i = this._toolMountQ.findIndex(x => x.cardId === cardId);
+      if (i >= 0) {
+        this._toolMountQ[i].pri = true;
+        this._toolMountQ[i].ev.needs_approval = true;
+        this._pumpToolMounts(true);
+      }
+    } catch (e) {}
+  }
+
   _onAiTool(ev) {
-    const id = "tool" + ev.id;
-    // 徽标同步说人话：模型在跑哪条命令。旧实现全程「AI 正在思考」，
-    // 长命令/多轮排查时用户看到的就是假死（真机 bug2 的观感根因之一）。
+    // id 统一：ev.id 是后端数字 tool_card_seq，与前端 _cardSeq 是两个序列，
+    // 映射表解耦（审批消息的 card_id 也从这里反查命令卡）。
     if (ev.phase === "start") {
       // 收束后迟到的工具宣告不再挂卡（事件队列尾残迹）——半截卡只减不增
       if (this._taskClosed) return;
+      const cardId = ++this._cardSeq;
+      this._toolCards.set(ev.id, cardId);
+      // 输出归属索引：execute 的 term_open 只带命令串，据此反查它该贴哪张卡。
+      // 同名命令同轮出现多次时按宣告序排队取（抢锁序会变，队列不会乱）。
+      if (ev.name === "execute" && (ev.command || ev.args)) {
+        if (!this._cmdCardQ) this._cmdCardQ = new Map();
+        const k = String(ev.command || ev.args);
+        const q = this._cmdCardQ.get(k) || [];
+        q.push(cardId);
+        this._cmdCardQ.set(k, q);
+      }
+      // 徽标同步说人话：模型在跑哪条命令。旧实现全程「AI 正在思考」，
+      // 长命令/多轮排查时用户看到的就是假死（真机 bug2 的观感根因之一）。
       this._runningTool = (ev.name === "execute"
-        ? String(ev.args || "") : String(ev.name || "")).trim();
+        ? String(ev.command || ev.args || "") : String(ev.name || "")).trim();
       this._refreshThink();
-      this._cardReady = this._cardReady.then(() => this._mountCard(id, "phase")
-        .then(slot => {
-          if (!slot) return null;
-          return this._ensureFeed().then(f => f && f.handle({
-            kind: "tool_start", id, name: ev.name || "", args: ev.args || "",
-          }));
-        }));
+      // handle 先于 mount（对齐 _onAiResult 的出生事务）：量高时内容已完整，
+      // 命令卡出生即定型。旧序 mount→handle 有两个真机后果：①量到空卡再靠
+      // 漂移补垫（夹紧竞态窗）；②审批帧可以抢在 tool_start 入店前到 →
+      // command_card_waiting 找不到卡 → 按钮永不出生转模态（冒烟 2026-10-16）
+      // 串行弹出（真机反馈）：并行 tool_call 会一次发齐全部 tool_start，旧序
+      // 一次挂满一屏卡。改成入队逐张挂——上一张 tool_end 才弹下一张，观感是
+      // 「一张卡 + 它的输出」依次出现。要审批的卡插队立即挂，否则按钮出不来。
+      if (!this._toolMountQ) this._toolMountQ = [];
+      this._toolMountQ.push({ cardId, ev });
+      this._pumpToolMounts();
     } else {
       this._runningTool = "";
       this._refreshThink();
+      const cardId = this._toolCards.get(ev.id);
+      // 上一张收束了：弹队列里的下一张（串行观感）
+      this._pumpToolMounts();
       this._cardReady = this._cardReady.then(() => this._ensureFeed())
-        .then(f => f && f.handle({kind: "tool_end", id, failed: !!ev.failed}));
+        .then(f => f && f.handle({kind: "tool_end", id: cardId, failed: !!ev.failed}));
     }
   }
 
@@ -2166,128 +2569,88 @@ class Session {
   // （真机 r5/n9 审批卡）。此刻流底卡内容已终（模型消息以 tool_call 收尾，
   // token 批 flush 完即最终高），结账垫满后回显自然落在卡区下方。
   // 只结账不定格——定格仍沿 ai_collapse。
+  // 出生垫行排水（Phase 4）：先等在途挂载链/挂载串行队列落定——命令回显
+  // 必须落在出生 pad 空行之后，否则插进预留区＝永久盖帽。结账范围排水后
+  // 重扫（含刚出生的卡）。
   _onBoundary() {
     const ack = () => {
       try { this.sendJson({type: "boundary_settled"}); } catch (e) {}
     };
-    const slots = [];
-    for (const s of this._slots.values()) if (s.marker) slots.push(s);
-    if (!slots.length || this._padFused) { ack(); return; }
+    if (this._padFused) { ack(); return; }
     this._ensureFeed()
-      .then(f => { f && f.flush && f.flush(); })
-      .then(() => Promise.all(slots.map(s => this._settleCard(s))))
+      .then(() => this._cardReady || Promise.resolve())
+      .then(() => this._mountQ || Promise.resolve())
+      .then(() => {
+        const slots = [];
+        for (const s of this._slots.values()) if (s.marker) slots.push(s);
+        if (!slots.length) return null;
+        return Promise.all(slots.map(s => this._settleCard(s)));
+      })
       .catch(() => {})
       .then(ack);
   }
 
-  _onAiCollapse() {
-    // v5 语义「阶段边界」：定格当前卡，此后 token 开新卡由 store 负责
-    // 先冲刷 100ms token 批再定格：尾批进卡后 settle 量到的才是最终高度，
-    // 否则定格后尾批冲刷长高 → 预留区已闭合 → 卡底被下方输出切半行（真机）
-    this._ensureFeed().then(f => {
-      if (!f) return;
-      f.flush && f.flush();
-      f.handle({kind: "ai_collapse"});
-    });
-    const slot = this._taskCardId ? this._slots.get(this._taskCardId) : null;
-    if (slot) { slot.frozen = true; slot.frozenAt = Date.now(); }
-    this._taskCardId = null;
-    // 阶段定格→流底无活卡：命令执行/等下一段模型输出期间由思考徽标接班
-    this._phaseLive = false;
-    this._refreshThink();
-    // 定格即结账：此刻卡还在流底，把最终高度垫满；等下一条命令的输出流到
-    // 卡下方就晚了（盖帽后只能截断）
-    if (slot) this._settleCard(slot);
-  }
+  // ai_collapse 已随流式契约退役（Phase 1）：事件仍留在线上（CLI 依赖），
+  // Web 侧 dispatch 两处 case 直接 no-op，无折叠/裁尾/定格语义。
 
   _onAiCard(markdown) {
-    // ai_card 与 final 同文连发时本调用会去重早退；final 空文本时总结挂载
-    // 在这条路上——扫尾同样等挂载完再查完整性
-    this._endSweepSoon(this._mountSummary(markdown, null, false));
+    // ai_card 与 final 同文连发时本调用会去重早退（_mountSummary/_lastSummaryMd）
+    // ——扫尾同样等挂载完再查完整性
+    this._endSweepSoon(this._mountSummary(markdown || ""));
   }
 
   _onFinal(text) {
-    this._taskActive = false;
-    this._taskClosed = true;   // 收束：迟到的工具宣告不再挂卡
-    this._approvalOpen = false;   // 任务收束：未决审批窗（若有）一并释放
-    this._approvalCmd = null;
-    this._approvalResolved = false;
-    this._runningTool = "";
-    this._endTimer();
-    this._setStopVisible(false);
-    this._refreshThink();
-    const reuse = this._taskCardId;
-    const slot = reuse != null ? this._slots.get(reuse) : null;
-    if (slot) { slot.frozen = true; slot.frozenAt = Date.now(); }
-    this._taskCardId = null;
-    // 门闩（spec §3.3）：卡仍在流底（区内空白一直延伸到光标）→ 总结原地换装；
-    // 下方已有命令输出/别的卡 → store 定格 + 裁掉流进本卡的总结正文尾
-    // （trimMd），总结卡在流底新开分区。旧判据「快照后无新字节」太脆：
-    // 用户敲键回显/read_file 等不走 ai_collapse 的 PTY 字节都会误判成
-    // 跑过命令，换装退化成新开卡 = 分析卡与总结卡内容重复（真机）。
-    const transform = !!slot && !this._capped(slot);
-    this._ensureFeed().then(f => f && f.handle(
-      transform ? {kind: "final", md: text || ""}
-                : {kind: "ai_collapse", trimMd: text || ""}));
-    const mp = this._mountSummary(text, transform ? reuse : null, transform);
-    // 换装路径由 _mountSummary 自己结账；新开总结卡时把定格的分析卡垫满
-    if (slot && !transform) this._settleCard(slot);
+    this._taskTeardown();
+    // 总结卡一次性挂载（出生即完整，无换装/裁尾）
+    const mp = this._mountSummary(text || "");
     this._scheduleHeal();
-    // 收束扫尾等总结卡挂完：总结/残留卡要么垫满完整显示、要么整卡消失
+    // 收束扫尾等总结卡挂完：完整卡显示、垫不满的保留夹紧（不丢弃不留洞）
     this._endSweepSoon(mp);
   }
 
-  // 总结挂载：transform = 原地换装（store 的 final 已把同 id 卡改型，这里只按
-  // 新内容重贴定高）；否则流底新开一张总结卡。
-  async _mountSummary(md, reuseId, transform) {
+  // task_end（worker 任务流末端必发）：final 已收束时本调用幂等复用 teardown，
+  // 否则（异常路径漏 final）兜底收束 + 扫尾
+  _onTaskEnd() {
+    this._taskTeardown();
+    this._scheduleHeal();
+    this._endSweepSoon();
+  }
+
+  // progress 心跳（后端 1s 节流）：徽标进度计数刷新——顺带推动「思考 Ns」
+  // 秒数走字（_refreshThink 自身无定时器，靠心跳/事件唤醒）
+  _onProgress(ev) {
+    if (!ev) return;
+    this._progress = {
+      chars: ev.chars || 0,
+      tokensIn: ev.tokens_in || 0,
+      tokensOut: ev.tokens_out || 0,
+    };
+    this._refreshThink();
+  }
+
+  // 总结挂载：一次性挂出生即完整的总结卡（Phase 1 无换装/裁尾）。同文去重
+  // （ai_card 与 final 双发同一份 markdown）；handle 先于 mount——量高时内容
+  // 已完整。
+  async _mountSummary(md) {
     if (!md || md === this._lastSummaryMd) return;
     this._lastSummaryMd = md;
-    this._summaryShown = true;   // 总结卡已挂：思考徽标退场（本轮叙事收束）
-    this._phaseLive = false;
-    this._refreshThink();
-    if (transform && reuseId != null && this._slots.has(reuseId)) {
-      const slot = this._slots.get(reuseId);
-      await new Promise(r => requestAnimationFrame(() => r()));
-      this._holdBytes("card-transform");
-      try {
-        await this._ensurePad(slot);
-        this._reanchor(slot);
-      } finally {
-        this._releaseBytes();
-      }
-      return;
-    }
     const cardId = ++this._cardSeq;
-    this._cardsText && this._cardsText.set(cardId, md);
-    const slot = await this._mountCard(cardId, "summary");
-    if (!slot) return;
-    this._ensureFeed().then(f => f && f.handle({kind: "ai_card", md, id: cardId}));
+    this._cardsText.set(cardId, md);
+    await this._ensureFeed()
+      .then(f => f && f.handle({kind: "ai_card", md, id: cardId}));
+    await this._mountCard(cardId, "summary");
   }
 
   // 任务中止（denied/limit/error/interrupt）：island 定格失败态，文案只进
   // 状态栏（终端网格只留原生字节，不写系统提示——单管线约束）。
-  // interrupt（Ctrl+C/⏹）例外：流式**未渲染完毕**的卡整卡移除——store
-  // task_fail 撤内容、onDrop 丢槽（用户诉求：不显示半截/中断态尸块，
-  // 要么不显示要么显示完整），活流卡不做失败定格。任何收束都过
-  // _endSweepSoon：仍不完整的卡垫不满就整卡消失。
+  // interrupt（Ctrl+C/⏹）例外：未完毕的内容卡整卡移除——store
+  // task_fail 撤内容、onDrop 丢槽（中断零残留语义），活流卡不做失败定格。
+  // 任何收束都过 _endSweepSoon：垫不满的卡保留夹紧（见 _endSweep 注释）。
   _onTaskFail(kind, text) {
-    this._taskActive = false;
-    this._taskClosed = true;   // 收束：迟到的工具宣告不再挂卡
-    this._approvalOpen = false;   // 中止即收束：审批窗释放，徽标归位
-    this._approvalCmd = null;
-    this._approvalResolved = false;
-    this._runningTool = "";
-    this._endTimer();
-    this._setStopVisible(false);
-    this._refreshThink();
-    const interrupted = kind === "interrupt";
-    const slot = this._taskCardId ? this._slots.get(this._taskCardId) : null;
-    if (slot && !interrupted) { slot.frozen = true; slot.frozenAt = Date.now(); }
-    this._taskCardId = null;
+    this._taskTeardown();
     this._ensureFeed().then(f => f && f.handle({kind: "task_fail", reason: kind}));
     this.setStatus(kind === "denied" ? "error" : this.status,
                    text || (kind === "denied" ? "✗ 已拒绝" : "任务已中止"));
-    if (slot && !interrupted) this._scheduleReanchor(slot);
     this._scheduleHeal();
     this._endSweepSoon();
   }
@@ -2295,6 +2658,7 @@ class Session {
   // 收束扫尾编排：串行防重入（fail 紧跟 final 两连发不交错），等在途挂载链、
   // 挂载串行队列与 extra（总结挂载）全部落定再查完整性
   _endSweepSoon(extra) {
+    const gen = this._taskGen || 0;   // 收束当刻代数：只清本代及以前的卡/槽
     const run = async () => {
       try {
         await Promise.all([
@@ -2302,21 +2666,27 @@ class Session {
           this._mountQ || Promise.resolve(),
           extra || Promise.resolve(),
         ]);
-        await this._endSweep();
+        await this._endSweep(gen);
       } catch (e) {}
     };
     this._sweepQ = (this._sweepQ || Promise.resolve()).then(run, run);
     return this._sweepQ;
   }
 
-  // 收束不变量：中断/任务结束后卡片要么完整显示、要么整卡消失——不留半截。
-  // ① store 扫迟到补挂的未完毕内容卡（sweep）；② 逐槽结账一次给「垫得进去」
-  // 的卡补齐机会；仍不完整的（盖帽垫不进/夹紧/pendingMount）整卡丢弃。
-  // 审批/救援卡豁免：按钮行底线夹紧是功能（可点性优先），不算半截尸块。
-  async _endSweep() {
+  // 收束不变量（Phase 4，改「整卡丢弃」为「保留夹紧」）：
+  // ① store 扫迟到补挂的未完毕内容卡（sweep——中断/异常残留，内容级）；
+  // ② 逐槽结账一次给「垫得进去」的卡补齐机会；
+  // ③ 仍不完整的卡**保留夹紧**（钉死到已垫高度 + 揭示放出）——出生即完整的
+  //    卡天然过检；整卡丢弃拆了贴纸但 pad 空行回收不了＝原位留洞（真机图二）。
+  //    宁矮不盖：夹紧态盒底不越过预留区。
+  // 仅「从未挂载成功」的槽（pendingMount：没有 host，也没写过 pad 行）走
+  // _fallbackPlain 纯文本降级后拆除——它没占预留行，拆了也不留洞，内容不丢。
+  // 审批/救援卡豁免：按钮行底线夹紧是功能（可点性优先）。
+  async _endSweep(gen) {
     if (this._dead) return;
+    const sweepGen = gen != null ? gen : (this._taskGen || 0);
     const feed = await this._ensureFeed();
-    if (feed) feed.handle({kind: "sweep"});
+    if (feed) feed.handle({kind: "sweep", gen: sweepGen});
     // React 把定格内容渲一帧再量高（_settleCard 自带 host 补挂），否则量到半截
     await new Promise(r => requestAnimationFrame(() => r()));
     const settle = [...this._slots.values()]
@@ -2326,15 +2696,26 @@ class Session {
     const drop = [];
     for (const slot of [...this._slots.values()]) {
       if (!slot.marker || slot.kind === "approval") continue;
-      const full = slot.mounted && !slot.pendingMount &&
-                   slot.pinnedRows == null && !slot.clamped &&
-                   (slot.reserved || 0) >= (slot.rows || 1);
-      if (full) {
-        if (!slot.revealed) this._revealSlot(slot);
-      } else {
+      if ((slot.gen || 0) > sweepGen) continue;   // 新任务在挂槽：不归本次收束管
+      if (!slot.mounted || slot.pendingMount) {
+        // 挂载失败降级：内容以纯文本写进网格，不留隐形卡、不丢内容
+        this._fallbackPlain(slot);
         drop.push(slot.id);
         this._dropSlot(slot);
+        continue;
       }
+      const full = slot.pinnedRows == null && !slot.clamped &&
+                   (slot.reserved || 0) >= (slot.rows || 1);
+      if (!full) {
+        // 保留夹紧：钉死到已垫高度（审批卡不低于按钮行），不丢弃
+        this._clampCard(slot);
+        const rows = Math.max(1, slot.reserved || 1, this._floorRows(slot));
+        if (slot.pinnedRows !== rows) {
+          slot.pinnedRows = rows;
+          this._applyDecoration(slot, rows);
+        }
+      }
+      if (!slot.revealed) this._revealSlot(slot);
     }
     if (drop.length && feed) feed.handle({kind: "drop", ids: drop});
     this._scheduleHeal();
@@ -2354,127 +2735,160 @@ class Session {
     });
   }
 
-  // 审批卡走 island；island 加载失败兜底 modal 弹窗收决策，不让审批死锁。
-  // 落点：任务分区仍在流底就复用同区（卡片下紧跟提示符，阿里 图二），
-  // 否则（用户已跑过命令）开新分区。
-  showApproval(command, reasons, host, risk) {
-    // 补发去重（WS 重连/刷新重挂时 attach 会再投一次未决审批）：同命令
-    // 的未决卡/模态已在，不叠第二张（core 的 _pending_approval 只记一条）
-    if (this._approvalOpen && this._approvalCmd === command) return;
+  // 审批走 store 更新：命令卡（tool_start 已挂载）就地武装按钮，不再单独
+  // 挂审批卡/垫行（二合一：一卡全程）。island 加载失败兜底 modal 弹窗收
+  // 决策，不让审批死锁。
+  showApproval(command, reasons, host, risk, id) {
+    // 补发去重（WS 重连/刷新重挂时 attach 会再投一次未决审批）：去重键
+    // (卡 id, 命令串)——同串并行命令是两张卡两条审批，旧全局串去重会把
+    // 第二条当重发挡掉（第二张卡永远等不到按钮＝死锁）。
+    const key = (id == null ? "" : id) + "\u0000" + (command || "");
+    if (this._approvalOpen && this._approvalKey === key) return;
     // 未决态必须同步记账，不能等卡片层落定：_ensureFeed() 一卡（脚本加载
     // 慢、promise 不落），徽标就停在「AI 正在思考」、审批 UI 一张不出，而
     // core 侧在干等决策——真机看就是任务卡死（bug2 截图）。球此刻已在用户侧。
     this._approvalOpen = true;
     this._approvalCmd = command;
+    this._approvalKey = key;
     this._approvalResolved = false;   // 新一令：上一令的已决策态不带到本令
     this._refreshThink();
     this._ensureFeed().then(async feed => {
-      // 慢到的卡片层：决策已下 / 命令已换就别再挂旧卡
-      if (this._dead || this._approvalCmd !== command) return;
-      if (!feed) return this._approvalModal(command, reasons);
-      // 审批到达＝本模型段已结束：先冲刷 token 缓冲、把活分析卡定格并结账垫满
-      // 最终高度，再锚审批卡。否则分析卡在审批锚定后继续长高，而 pad 只能追加
-      // 在流底、插不进流中——卡底被审批卡/随后输出切掉（真机「审批头压分析卡
-      // 末行 / exec 行切分析卡半行」根因）。定格后尾段 token 由下一段新卡承接。
-      if (this._taskCardId != null) {
-        const up0 = this._slots.get(this._taskCardId);
-        // 延迟挂载卡（空闲期无渲染循环拿不到 host）必须先上屏：否则 settle 按
-        // 初始 2 行账目垫高，审批锚在其下，卡上屏即盖帽→夹紧成单行高「分析」
-        // （真机「拒绝后分析卡显示不完全」根因）
-        if (up0 && !up0.host) {
-          try { this.term.refresh(0, this.term.rows - 1); } catch (e) {}
-          const t0 = Date.now();
-          while (!up0.host && Date.now() - t0 < 600) await this._sleep(10);
-        }
-        feed.flush && feed.flush();
-        feed.handle({kind: "ai_collapse"});
-        const up = this._slots.get(this._taskCardId);
-        if (up) { up.frozen = true; up.frozenAt = Date.now(); }
-        this._taskCardId = null;
-        this._phaseLive = false;
-        this._refreshThink();
-        if (up) await this._settleCard(up);
+      // 慢到的卡片层：决策已下 / 命令已换就别再武装旧卡
+      if (this._dead || this._approvalKey !== key) return;
+      // 命令卡 id 映射缺失（claim_seq 未认领 / 卡已被中断丢）→ 模态兜底
+      const cardId = (id != null) ? this._toolCards.get(id) : null;
+      if (!feed || cardId == null) {
+        return this._approvalModal(command, reasons, key);
       }
-      const cardId = ++this._cardSeq;
-      // 先入 store 再挂卡：host 一诞生就渲染出完整审批卡，_fitNeed 首测即真高，
-      // 一轮 pad 垫够。旧序（先挂空卡再 handle）首测量到 0 → 只垫 2 行，内容
-      // 随后长到 7 行再补一轮；那 150ms 窗口里卡是钉死截断的，若用户此刻已按
-      // Ctrl+Enter 放行、输出随即从卡底流走，预留区断开就永久盖帽补不回来。
-      feed.handle({kind: "approval", id: cardId, command, reasons, risk});
-      // 挂载不加塞：并行 tool_calls 会让 core 在消息到达时一次发齐全部
-      // tool_start（工具卡＝调用宣告，不是已执行），approval 消息随后才到。
-      // showApproval 不走 _cardReady 就会抢在「已宣告未挂载」的工具卡前面
-      // 锚定＝审批卡居中、下面挂一排未决策的宣告卡（真机 2026-10-08「还没
-      // 审批工具卡已经在审批卡下面」）。排进链尾：审批卡落在这批工具卡之
-      // 下，决策前屏底不再长新卡。
-      const slotP = this._cardReady.then(() => this._mountCard(cardId, "approval"));
-      this._cardReady = slotP.then(() => {}, () => {});   // 链不断：挂载失败也放行后续
-      const slot = await slotP;
-      // 排队等链扩出了窗口：挂载返回时命令可能已决策/被下一令顶掉（WS 重连
-      // 补发、卡内快捷键在 handle 后即生效）——迟到的审批卡上屏＝给已决的
-      // 命令再摆一扇按钮。void 进 store + 出清槽，与看门狗同口径。
-      if (this._dead || this._approvalResolved ||
-          this._approvalCmd !== command) {
-        if (slot) {
-          feed.handle({kind: "approval_void", id: cardId});
-          this._discardSlot(slot);
-        }
-        return;
+      // 该卡可能还在串行队列里没落地：插队立即挂，否则按钮出不来＝决策死锁
+      this._flushToolMountFor(cardId);
+      // 就地武装命令卡按钮（不 mount 不垫行：命令卡出生即完整已结账）。
+      // store 返回 false＝卡已不在/非命令卡/无操作行（needs_approval 假的
+      // 卡永不长操作行，谓词不可能中途反转）→ 模态兜底不长高。
+      const armed = feed.handle({kind: "command_card_waiting", id: cardId,
+                                command, reasons, risk});
+      if (!armed) {
+        return this._approvalModal(command, reasons, key);
       }
-      if (!slot) return this._approvalModal(command, reasons);
-      // 可点性看门狗：mounted 且未夹紧（pinnedRows == null）才等于用户真点
-      // 得到。pad 未落账/盖帽 → pinnedRows 钉死；审批期终端静默 → xterm 不跑
-      // 渲染循环、pendingMount 永无 host——两者都等于「用户点不到」（真机
-      // 2026-10-06：审批卡不可见、core 干等决策假死 25min）。grace 内不达标
-      // 即 void 终端卡转模态，审批永远有可点的入口。
-      const t0 = Date.now();
-      while ((!slot.mounted || slot.pinnedRows != null) &&
-             Date.now() - t0 < this._approvalGraceMs) await this._sleep(100);
-      if (!slot.mounted || slot.pinnedRows != null) {
-        // grace 期内用户可能已按 Ctrl+Enter 放行：再转模态就是给已决策的
-        // 命令再开一扇「批准」，点下去第二发决策会落到 core 下一次
-        // ask_decision 头上＝幽灵批准（真机 B1：卡被夹紧→Ctrl+Enter 放行
-        // →3s 后模态又冒出来，再点一次就双决策）。
+      // 武装后重钉：按钮行刚出生（React 渲染后 floorRows 才有值），卡可能
+      // 已按底线=0 钉死 1 行 → 按钮被裁出盒＝真机「执行按钮点不动」根因。
+      // 重算底线把钉死抬到按钮行底（宁短暂压提示符，不许按钮不可点=死锁）
+      await this._sleep(30);
+      const armedSlot = this._slots.get(cardId);
+      if (armedSlot && armedSlot.marker && this._hostAlive(armedSlot.host)) {
+        const floor = this._floorRows(armedSlot);
+        if (floor > 0 && (armedSlot.pinnedRows == null || armedSlot.pinnedRows < floor)) {
+          if (armedSlot.pinnedRows == null) this._clampCard(armedSlot);
+          armedSlot.pinnedRows = Math.max(1, floor);
+        }
+        this._styleHost(armedSlot);
+      }
+      // 可点性看门狗（持续型）：直接查 DOM——「执行」按钮真实存在且落在
+      // 卡盒可视区内才算用户点得到。旧版只采样一次（mounted 且未钉死）就
+      // 返回：resize 折行/晚到 pad 事后把按钮行夹出屏时无人兜底（评审 HIGH）。
+      // 现在审批存续期间持续巡检：先给 grace 等出生落定，此后任一时刻失
+      // 可点性就 disarm 转模态——审批永远有可点的入口（红线⑨）。
+      // 判定不看 pinnedRows：钉死但按钮仍在盒内（_floorRows 保底）是可点的。
+      let t0 = Date.now();   // let：挂载未落定期重置（不烧宽限）
+      const tStart = Date.now();   // 绝对兜底：挂载永不到也得转模态
+      let slot = null;
+      let everClickable = false;
+      let misses = 0;
+      const buttonClickable = () => {
+        if (!slot || !slot.mounted || !this._hostAlive(slot.host)) return false;
+        try {
+          const b = slot.host.querySelector(".cmdacts button.primary");
+          if (!b || typeof b.getBoundingClientRect !== "function") return false;
+          const box = slot.host.getBoundingClientRect();
+          const r = b.getBoundingClientRect();
+          return r.height > 0 && r.top >= box.top - 1 && r.bottom <= box.bottom + 1;
+        } catch (e) { return false; }
+      };
+      // 失可点性 → disarm 转模态。grace 期内用户可能已按 Ctrl+Enter 放行：
+      // 再转模态就是给已决策的命令再开一扇「批准」，点下去第二发决策会落到
+      // core 下一次 ask_approval 头上＝幽灵批准（真机 B1）。守卫三件套：
+      // _approvalResolved / key 校验 / 已有模态不叠。
+      const toModal = () => {
         if (this._dead || this._approvalResolved ||
-            this._approvalCmd !== command) return;
+            this._approvalKey !== key) return;
+        try {
+          if (document.querySelector &&
+              document.querySelector("#modal-root .modal")) return;
+        } catch (e) {}
+        // disarm 不删卡：工具记录留屏，快捷键路径从此无 armed 卡可双决策
         feed.handle({kind: "approval_void", id: cardId});
-        this._discardSlot(slot);
-        this._approvalModal(command, reasons);
+        this._approvalModal(command, reasons, key);
+      };
+      while (!this._dead && !this._approvalResolved &&
+             this._approvalKey === key) {
+        slot = this._slots.get(cardId) || slot;
+        if (buttonClickable()) {
+          everClickable = true;
+          misses = 0;
+        } else if (everClickable) {
+          // 连续失点才算真失点（React 重渲染/编辑框开合的单帧空隙不得误报）
+          misses++;
+          if (misses < 5) { await this._sleep(200); continue; }
+          toModal();
+          return;
+        } else if (!slot || slot.pendingMount) {
+          // 挂载未落定（槽未注册/xterm 空闲不出 host）：宽限等挂载，不烧钟；
+          // 15s 绝对兜底——挂载永不到也得给用户可点入口
+          t0 = Date.now();
+          if (Date.now() - tStart > 15000) { toModal(); return; }
+        } else if (Date.now() - t0 >= this._approvalGraceMs) {
+          toModal();
+          return;
+        }
+        await this._sleep(200);
       }
     }).catch(e => {
       // 卡片层中途抛错也不能让审批静默死掉——core 在等决策，任务会假死。
       // 转模态兜底，决策永远有可点入口；已有模态就不叠第二张。
-      console.error("[ot] 审批卡渲染失败，转模态兜底:", e);
+      console.error("[ot] 审批武装失败，转模态兜底:", e);
       if (this._dead || this._approvalResolved ||
-          this._approvalCmd !== command) return;
-      if (!document.querySelector("#modal-root .modal")) {
-        this._approvalModal(command, reasons);
-      }
+          this._approvalKey !== key) return;
+      try {
+        if (document.querySelector &&
+            document.querySelector("#modal-root .modal")) return;
+      } catch (e) {}
+      this._approvalModal(command, reasons, key);
     });
   }
 
-  // 审批模态兜底（feed 缺失 / 挂载失败 / 看门狗超时共用）：决策直发 WS、不经
-  // store——此刻终端卡已 void 或根本不存在，键盘快捷键路径无未决卡可双决策。
-  _approvalModal(command, reasons) {
+  // 审批模态兜底（feed 缺失 / 武装失败 / 看门狗超时共用）：决策直发 WS、不经
+  // store——命令卡已 disarm 或根本没有 armed 卡，快捷键路径无从双决策。
+  // 按钮带 key：模态是异步落体，点击时卡号/命令可能早已换代（同串并行命令
+  // 的第二条），不带 key 校验就会把新令的决策发给旧令（幽灵决策）。
+  _approvalModal(command, reasons, key) {
+    // modal.js 缺席（加载失败/测试环境）时不得抛穿——看门狗循环的 toModal
+    // 会把异常吃成 unhandledRejection，测试互相污染
+    if (typeof modalShell !== "function") {
+      console.warn("[ot] 模态组件缺失（modal.js 未载），审批模态兜底不可用");
+      return;
+    }
     modalShell("审批：" + (command || ""),
       `<p>${esc(reasons || "")}</p>`,
       [{label: "批准", primary: true,
-        onClick: () => this._sendDecision({type: "approve"}, command)},
+        onClick: () => this._sendDecision({type: "approve"}, command, key)},
        {label: "拒绝",
         onClick: () => this._sendDecision(
-          {type: "reject", message: "用户拒绝了该命令"}, command)}]);
+          {type: "reject", message: "用户拒绝了该命令"}, command, key)}]);
   }
 
   // 决策单发出口：卡内 Ctrl+Enter（feed onDecision）与模态按钮都会到，
   // 只放一发。第二发决策会落到 core 下一次 ask_decision 头上，等于替用户
   // 批准一条根本没看过的命令（真机 B1 的幽灵模态双决策）。
-  _sendDecision(decision, command) {
+  _sendDecision(decision, command, key) {
     if (this._dead || this._approvalResolved) return false;
-    // 命令串对不上＝本令已决策或已被下一令顶掉
-    if (command != null && this._approvalCmd !== command) return false;
+    // 键对不上＝本令已决策或已被下一令顶掉（命令串可能与并行同串命令相同，
+    // 只有 (卡 id,命令串) 整键才认得准）
+    if (key != null && this._approvalKey !== key) return false;
+    if (key == null && command != null && this._approvalCmd !== command) return false;
     this._approvalResolved = true;
     this._approvalOpen = false;
     this._approvalCmd = null;
+    this._approvalKey = null;
     this._refreshThink();
     this.sendJson({type: "decision", decision});
     return true;
@@ -2505,7 +2919,20 @@ class Session {
 
   fit() {
     if (!this.paneEl.classList.contains("active")) return;
-    try { this.fitAddon.fit(); } catch (e) { /* 隐藏/零尺寸时忽略 */ }
+    try {
+      const stage = this.paneEl.querySelector(".ot-stage");
+      const termEl = this.paneEl.querySelector(".term");
+      // 明确给活动终端一屏高度，不能由 xterm 当前 24 行内容反推容器高度。
+      // 向下取整避免小数像素造成额外滚动条；历史卡片不参与高度计算。
+      const height = stage && Math.floor(stage.getBoundingClientRect().height);
+      if (termEl && height > 0 && termEl.style.height !== height + "px") {
+        termEl.style.height = height + "px";
+      }
+      if (this.filesPanel && this.filesPanel._built && !this.filesPanel.el.hidden) {
+        this.filesPanel._place();
+      }
+      this.fitAddon.fit();
+    } catch (e) { /* 隐藏/零尺寸时忽略 */ }
   }
 
   activate() {
@@ -2649,7 +3076,9 @@ class Session {
       const tt = el.querySelector ? el.querySelector(".ttext") : null;
       // 徽标三态说实话：等审批 > 在跑命令 > 在思考。长命令/多轮排查时
       // 不能一路「AI 正在思考」——用户看到的就是假死（bug2 观感根因）。
-      let text = "AI 正在思考";
+      const elapsed = this._taskStartedAt
+        ? Math.max(0, Math.round((Date.now() - this._taskStartedAt) / 1000)) : 0;
+      let text = elapsed ? `AI 正在思考 ${elapsed}s` : "AI 正在思考";
       let title = "任务未结束：AI 正在分析或执行";
       if (this._runningTool) {
         const t = this._runningTool.length > 36
@@ -2661,6 +3090,13 @@ class Session {
         text = "等待审批";
         title = "命令等待你的决定（Ctrl+Enter 执行 / Ctrl+Backspace 拒绝）";
       }
+      // Phase 3 徽标增强：三态文案拼进度计数（progress 心跳 1s 刷）——
+      // 「思考中 12s · 已生成 N 字 · in X / out Y」。tokens 为 runner 估算口径，
+      // usage 事件到后由 _renderTokens 修正在状态栏右侧（此处保持心跳值）
+      const p = this._progress;
+      if (p && (p.chars || p.tokensIn || p.tokensOut)) {
+        text += ` · 已生成 ${p.chars || 0} 字 · in ${p.tokensIn || 0} / out ${p.tokensOut || 0}`;
+      }
       if (tt) tt.textContent = text;
       el.title = title;
     }
@@ -2668,21 +3104,10 @@ class Session {
     if (bar) bar.classList.toggle("task-on", this._taskActive);
   }
 
-  // 阶段卡真正挂载上屏：思考徽标接班结束、让位给卡本体。与 _openPhaseCard 的
-  // 「开卡先显徽标」配对——空闲期 pendingMount 的卡不算上屏（真机假死窗口）。
-  // 宁藏不盖：fund 之前卡是 visibility:hidden，不能算上屏（徽标继续接班），
-  // fund 释放沿（_revealSlot→这里）再交班
-  _cardOnScreen(cardId) {
-    if (cardId !== this._taskCardId) return;
-    if (this._slotHidden(this._slots.get(cardId))) return;
-    this._phaseLive = true;
-    this._refreshThink();
-  }
-
   // --- WS JSON 事件 ---
   // 契约：ready/status/closed/usage/approval/ask_password/ask_password_dismiss/ask_host_key/
   // interrupt/mode/auth/change_model/task_start/final/denied/limit/error/
-  // stage + 新增 ai_token/ai_think/ai_collapse/ai_card/ping。
+  // stage + Phase 1：ai_result/task_end/ai_card/ai_collapse（no-op）/ping。
   handleMsg(msg) {
     switch (msg.type) {
       case "ping":
@@ -2746,7 +3171,7 @@ class Session {
         this._renderTokens(msg.tokens_in, msg.tokens_out, msg.estimated);
         break;
       case "approval":
-        this.showApproval(msg.command, msg.reasons, msg.host, msg.risk);
+        this.showApproval(msg.command, msg.reasons, msg.host, msg.risk, msg.id);
         break;
       case "ask_password":
         if (!msg.auth_kind || msg.auth_kind === "password") {
@@ -2825,15 +3250,17 @@ class Session {
       case "task_start":
         this._onTaskStart();
         break;
-      case "ai_token":
-        this._onAiToken(msg.text);
+      case "ai_result":
+        this._onAiResult(msg);
         break;
-      case "ai_think":
-        this._onAiThink(msg.text);
+      case "task_end":
+        this._onTaskEnd();
+        break;
+      case "progress":
+        this._onProgress(msg);
         break;
       case "ai_collapse":
-        this._onAiCollapse();
-        break;
+        break;   // 流式契约退役：事件留线（CLI 依赖），Web 侧 no-op
       case "ai_card":
         this._onAiCard(msg.markdown);
         break;
@@ -2853,11 +3280,14 @@ class Session {
     if (!ev) return;
     switch (ev.kind) {
       case "task_start": this._onTaskStart(); break;
-      case "ai_token": this._onAiToken(ev.text); break;
-      case "ai_think": this._onAiThink(ev.text); break;
+      case "ai_result": this._onAiResult(ev); break;
+      case "task_end": this._onTaskEnd(); break;
+      case "progress": this._onProgress(ev); break;
       case "ai_boundary": this._onBoundary(); break;
-      case "ai_collapse": this._onAiCollapse(); break;
+      case "ai_collapse": break;   // 流式契约退役：事件留线（CLI 依赖），Web 侧 no-op
       case "ai_tool": this._onAiTool(ev); break;
+      case "term_open": this._onTermOpen(ev); break;
+      case "term_close": this._onTermClose(ev); break;
       case "ai_card": this._onAiCard(ev.markdown); break;
       case "final": this._onFinal(ev.text); break;
       case "interrupt": this._onTaskFail("interrupt", ev.text || "已中断"); break;
@@ -2865,6 +3295,10 @@ class Session {
       case "denied":
       case "limit":
       case "error":
+        // 系统异常（模型/工具超时、崩溃等）入红色警告卡展示（真机约定：
+        // 报错信息都进红卡）。denied 是策略拒绝、limit 是预算停——业务
+        // 语义，不入红卡
+        if (ev.kind === "error") this._onAlert({text: ev.text || "系统异常"});
         this._onTaskFail(ev.kind, ev.text);
         break;
       case "session_cleared":
@@ -2873,6 +3307,9 @@ class Session {
       case "padded":
         this._onPadded(ev);
         break;
+      case "alert":
+        this._onAlert(ev);
+        break;
       default:
         break;   // 未知事件静默忽略（此前 JSON.stringify 进终端是调试残留）
     }
@@ -2880,6 +3317,8 @@ class Session {
 
   close() {
     this._dead = true;
+    if (this._layoutObserver) this._layoutObserver.disconnect();
+    if (this._layoutFrame != null) cancelAnimationFrame(this._layoutFrame);
     if (this._healT) { clearTimeout(this._healT); this._healT = null; }
     if (this._wsRetryT) { clearTimeout(this._wsRetryT); this._wsRetryT = null; }
     if (this._ghostTimer) { clearInterval(this._ghostTimer); this._ghostTimer = null; }
@@ -3114,12 +3553,30 @@ document.getElementById("btn-toggle-sidebar").onclick = () => {
   if (s) setTimeout(() => s.fit(), 60);
 };
 
+const showSidebar = document.getElementById("btn-show-sidebar");
+if (showSidebar) showSidebar.onclick = () => {
+  document.body.classList.remove("sidebar-collapsed");
+  document.getElementById("sidebar-search").focus();
+  const s = sessions[activeTabId];
+  if (s) setTimeout(() => s.fit(), 60);
+};
+
+// 响应式侧栏：窄窗口收起侧栏让终端拿满宽度（CSS 在 ≤860px 把侧栏转浮层，
+// 收起后即可用顶栏按钮唤出）。只在「跨过阈值变窄」时收起，宽回去了也不
+// 自动展开——展开是用户的手势，不与之抢状态。
+const SIDEBAR_NARROW = 860;
+let wasNarrow = window.innerWidth <= SIDEBAR_NARROW;
+if (wasNarrow) document.body.classList.add("sidebar-collapsed");
+
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
+    const narrow = window.innerWidth <= SIDEBAR_NARROW;
+    if (narrow && !wasNarrow) document.body.classList.add("sidebar-collapsed");
+    wasNarrow = narrow;
     const s = sessions[activeTabId];
-    if (s) s.fit();
+    if (s) { s.fit(); s._keepApprovalInView(); }
   }, 120);
 });
 

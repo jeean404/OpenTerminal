@@ -338,3 +338,25 @@ class Policy:
             if order[d.level] > order[worst.level]:
                 worst = d
         return worst
+
+    # 审批理由中属「无害」的白名单：仅命中这些 → normal（蓝框），其余高危（红框）
+    BENIGN_APPROVE_REASONS = frozenset({"重定向覆盖文件", "用户 approve_extra 规则"})
+
+    def needs_approval(self, command: str, allowed: set[str] | None = None) -> bool:
+        """命令是否需进人审——HITL ``_when`` 与命令卡出生预判的唯一来源。
+
+        allowed：会话内「始终允许」累积的命令集（只增）；命中即免审。
+        """
+        if allowed and command in allowed:
+            return False
+        return self.classify(command).level == "approve"
+
+    def risk(self, command: str) -> str:
+        """审批风险级：删除/提权/写改/无法判定等 → high；仅无害理由 → normal。
+
+        免审命令（auto，reasons 为空）无风险可言：一律 normal——否则 `echo`
+        这类只读命令在命令卡上顶着「⚠ 高危」红框（真机 2026-10-16）。
+        """
+        reasons = set(self.classify(command).reasons)
+        return ("normal" if not reasons or reasons <= self.BENIGN_APPROVE_REASONS
+                else "high")

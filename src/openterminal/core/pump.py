@@ -46,6 +46,8 @@ class OutputPump:
             c._hb = asyncio.create_task(self._heartbeat())
         if c._pump is None or c._pump.done():
             c._pump = asyncio.create_task(self._pump_guard())
+        if getattr(c, "_loop_beat", None) is None:
+            c._loop_beat = asyncio.create_task(self._loop_watchdog())
 
     @property
     def phase(self) -> str:
@@ -64,6 +66,16 @@ class OutputPump:
             import traceback
             _dbg("pump died:", traceback.format_exc())
             raise
+    async def _loop_watchdog(self) -> None:
+        """事件循环活性探针：2s 一跳，停跳即证明循环阻塞（阻塞点=最后日志后）。
+        真机「连接无响应」根因排查用——普通日志看不出循环死活。"""
+        import time as _t
+        n = 0
+        while not self.core._closed:
+            await asyncio.sleep(2)
+            n += 1
+            _dbg("loop beat", n)
+
     async def _pump_loop(self) -> None:
         """PTY 泵：回退/Shell 模式纯透传；集成模式下按 OSC 标记切分——
         标记字节与需吞除的注入回显不外发，其余原样转发（唯一显示管线）。"""
@@ -127,14 +139,28 @@ class OutputPump:
             except Exception:  # noqa: BLE001 - 会话关闭竞态（fd 失效等）
                 pass
     async def _heartbeat(self) -> None:
-        """应用层心跳：10s 一个 ping，给前端看门狗当「服务端还活着」基线。
-        sender 卡死/sink 僵尸时 ping 与回显会同时断——前端据此判定连接无响应
-        并重连，把「假活连接永久卡死」降级成一次秒级抖动（真机 2026-10-07）。"""
+        """应用层心跳：5s 一个 ping，给前端看门狗当「服务端还活着」基线。
+        **直发 sink 绕过 outbox**：outbox/sender 卡死时 ping 若也排队，前端就
+        误判「连接无响应」重连（真机 R8 稳定挂根因）。ping 直达 sink 保证
+        只要 WS 没死前端就看得到心跳；sender 卡死时其余帧照常排队。
+        5s（原 10s）：输出密集期 outbox 排队会让排队的 ping 迟到。"""
         while not self.core._closed:
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
             if self.core._closed:
                 break
-            self.core._emit_nowait(ServerMsg(type="ping"))
+            # 直发 sink：不经 outbox，不与业务帧抢 sender
+            sink = self.core._sink
+            if sink is not None:
+                try:
+                    from ..web.protocol import encode_server
+                    from ..core.messages import ServerMsg
+                    await asyncio.wait_for(
+                        sink.send_text(encode_server(ServerMsg(type="ping"))),
+                        timeout=3)
+                except Exception:  # noqa: BLE001 - sink 死/慢：走 outbox 兜底
+                    self.core._emit_nowait(ServerMsg(type="ping"))
+            else:
+                self.core._emit_nowait(ServerMsg(type="ping"))
             await self.core._reap_zombie_ai()
     async def _sender_loop(self) -> None:
         while True:
