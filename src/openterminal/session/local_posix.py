@@ -42,6 +42,9 @@ class LocalPtySession(BasePtySession):
             except Exception:
                 os._exit(127)
         self._pid, self._fd = pid, fd
+        # 壳继承进程 CWD（pty.fork 不 chdir）：文件根 _local_root 在构造时读
+        # session.cwd，这里不填就会空着回退主目录——用户/测试的相对文件全踩空
+        self.cwd = os.getcwd()
         flags = fcntl.fcntl(fd, fcntl.F_GETFL)
         fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         await self.resize(40, 120)

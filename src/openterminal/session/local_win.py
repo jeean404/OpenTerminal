@@ -55,6 +55,8 @@ class WinPtySession(BasePtySession):
 
         self._proc = PtyProcess.spawn(
             self._shell.split(), dimensions=(40, 120))
+        # 同 local_posix：壳继承进程 CWD，文件根构造时读 session.cwd
+        self.cwd = os.getcwd()
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
         self._reader = threading.Thread(
