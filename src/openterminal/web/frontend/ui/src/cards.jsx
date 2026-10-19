@@ -1,6 +1,6 @@
 // 卡片组件：观感复用主样式表的 .ablock/.scard/.aprobe 类名（同一文档，
 // CSS 变量与卡片样式直接继承），仅折叠态/实体底色由 island.css 补充。
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 // md_lite.js 是 CJS（module.exports 守卫），取默认导出再解构
 import mdliteMod from "../../static/md_lite.js";
@@ -203,12 +203,7 @@ function CommandCard({ card, dispatch }) {
                       <button className="primary" onClick={onExecute}>
                         执行 <kbd>Ctrl ↵</kbd></button>
                       {confirming && (
-                        <span className="apconfirm">
-                          <span className="apconfirm-q">高危命令，确认执行？</span>
-                          <button className="primary" onClick={() => decide("approve")}>
-                            确认执行</button>
-                          <button onClick={dismiss}>取消</button>
-                        </span>
+                        <HighRiskConfirm onConfirm={() => decide("approve")} onCancel={dismiss} />
                       )}
                     </span>
                     <button onClick={() => { dismiss(); dispatch({ kind: "approval_key", id: card.id, key: "e" }); }}>
@@ -239,6 +234,38 @@ function CommandCard({ card, dispatch }) {
         <EditorCard card={card} dispatch={dispatch} />
       )}
     </div>
+  );
+}
+
+// 保留按钮下方、按内容宽度的小确认框；只在靠近终端边缘时平移避让。
+function HighRiskConfirm({ onConfirm, onCancel }) {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const popup = ref.current;
+    const boundary = popup && (popup.closest(".ot-stage") || popup.closest(".pane"));
+    if (!popup || !boundary) return undefined;
+    const place = () => {
+      const bounds = boundary.getBoundingClientRect();
+      const left = bounds.left + 8;
+      const right = bounds.left + boundary.clientWidth - 8;
+      popup.style.maxWidth = Math.max(0, right - left) + "px";
+      popup.style.transform = "none";
+      const rect = popup.getBoundingClientRect();
+      const x = Math.max(left, Math.min(rect.left, right - rect.width));
+      popup.style.transform = `translateX(${x - rect.left}px)`;
+    };
+    place();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
+    if (ro) { ro.observe(boundary); ro.observe(popup); }
+    window.addEventListener("resize", place);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener("resize", place); };
+  }, []);
+  return (
+    <span className="apconfirm" ref={ref}>
+      <span className="apconfirm-q">高危命令，确认执行？</span>
+      <button className="primary" onClick={onConfirm}>确认执行</button>
+      <button onClick={onCancel}>取消</button>
+    </span>
   );
 }
 

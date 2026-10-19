@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  BlockStream, canCut, isShellSwitch, isCmdEcho, pickCmdEcho, ensureCmdEcho,
+  BlockStream, canCut, isShellSwitch, isCmdEcho, pickCmdEcho, ensureCmdEcho, styleCmdEcho,
 } = require("../../src/openterminal/web/frontend/static/block_stream.js");
 
 function mk(prefix) { return new BlockStream(); }
@@ -195,3 +195,21 @@ test("ensureCmdEcho：没有回显可补就原样返回", () => {
   assert.equal(ensureCmdEcho(t, ""), t);
   assert.equal(ensureCmdEcho(t, null), t);
 });
+
+test("colored command echoes are deduplicated without losing their styles", () => {
+  const styled = styleCmdEcho(ECHO, "ps aux --sort=-%mem");
+  assert.equal(styled, "[root@x /tmp]# \x1b[38;5;51mps aux --sort=-%mem\x1b[0m");
+  assert.equal(isCmdEcho(styled, "ps aux --sort=-%mem"), true);
+  assert.equal(pickCmdEcho(styled + "\n\x1b[0m", "ps aux --sort=-%mem"), styled);
+  assert.equal(ensureCmdEcho(styled + "\nUSER PID", ECHO), styled + "\nUSER PID");
+  assert.equal(ensureCmdEcho(ECHO + "\nUSER PID", styled), styled + "\nUSER PID");
+  assert.equal(ensureCmdEcho("USER PID", styled), styled + "\nUSER PID");
+});
+
+test("command styling does not guess ordinary output or override existing colors", () => {
+  assert.equal(styleCmdEcho("output ending in ls", "ls"), "output ending in ls");
+  assert.equal(styleCmdEcho(ECHO, "other command"), ECHO);
+  const custom = "[root@x /tmp]# \x1b[32mls\x1b[0m";
+  assert.equal(styleCmdEcho(custom, "ls"), custom);
+});
+

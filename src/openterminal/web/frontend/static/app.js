@@ -166,6 +166,17 @@ class Session {
     this._dead = false;         // 会话已关闭：停止一切写终端
     this._buildDom();
     this._buildTerm();
+    // 监听可视区而非终端内容：卡片增多只增加滚动长度，不递归撑高终端。
+    const stage = this.paneEl.querySelector(".ot-stage");
+    if (stage && typeof ResizeObserver !== "undefined") {
+      this._layoutObserver = new ResizeObserver(() => {
+        cancelAnimationFrame(this._layoutFrame);
+        this._layoutFrame = requestAnimationFrame(() => {
+          if (!this._dead) this.fit();
+        });
+      });
+      this._layoutObserver.observe(stage);
+    }
   }
 
   _buildDom() {
@@ -982,9 +993,10 @@ class Session {
   //
   // 这样得到的顺序正是图二那张效果图：文本 / 卡片 / 文本 / 卡片 / 活动输出。
   // 代价：块与块之间不能跨选（用户已定「不允许跨卡选」）；块内选中复制正常。
-  _snapshotTermText() {
+  _snapshotTermText(styled = false) {
     try {
       const b = this.term.buffer.active;
+      if (styled) return bufferToAnsi(b);
       const out = [];
       for (let i = 0; i < b.length; i++) {
         const ln = b.getLine(i);
@@ -1004,7 +1016,7 @@ class Session {
   // 之前」的内容）。afterId 认不出时 BlockStream 自己落到末尾，宁粗不乱插。
   _cutBlock(kind, afterId, echo) {
     if (!this._blocks || !this._blockView) return null;
-    const text = this._snapshotTermText();
+    const text = this._snapshotTermText(true);
     if (!text || !text.trim()) return null;
     // 搬走即清屏：先 reset 再落位。反过来（落位失败就 return）会把同一段
     // 留在活动终端里，下一次切块再冻一遍 = 同一段输出重复两遍。
@@ -1087,8 +1099,8 @@ class Session {
       this._outOpen = true;
       // 记下回显行：Readline 的「上移一格+擦行」会随机啃掉它，收束时丢了
       // 就用这行补回去。优先用后端拼好的（确定），读缓冲只作兜底
-      this._outEcho = (ev && ev.echo) ||
-        pickCmdEcho(this._snapshotTermText(), ev && ev.command);
+      this._outEcho = styleCmdEcho((ev && ev.echo) ||
+        pickCmdEcho(this._snapshotTermText(), ev && ev.command), ev && ev.command);
       this._outAnchor = this._claimCmdCard(ev && ev.command);
     });
   }
@@ -2907,7 +2919,20 @@ if (inView) {
 
   fit() {
     if (!this.paneEl.classList.contains("active")) return;
-    try { this.fitAddon.fit(); } catch (e) { /* 隐藏/零尺寸时忽略 */ }
+    try {
+      const stage = this.paneEl.querySelector(".ot-stage");
+      const termEl = this.paneEl.querySelector(".term");
+      // 明确给活动终端一屏高度，不能由 xterm 当前 24 行内容反推容器高度。
+      // 向下取整避免小数像素造成额外滚动条；历史卡片不参与高度计算。
+      const height = stage && Math.floor(stage.getBoundingClientRect().height);
+      if (termEl && height > 0 && termEl.style.height !== height + "px") {
+        termEl.style.height = height + "px";
+      }
+      if (this.filesPanel && this.filesPanel._built && !this.filesPanel.el.hidden) {
+        this.filesPanel._place();
+      }
+      this.fitAddon.fit();
+    } catch (e) { /* 隐藏/零尺寸时忽略 */ }
   }
 
   activate() {
@@ -3292,6 +3317,8 @@ if (inView) {
 
   close() {
     this._dead = true;
+    if (this._layoutObserver) this._layoutObserver.disconnect();
+    if (this._layoutFrame != null) cancelAnimationFrame(this._layoutFrame);
     if (this._healT) { clearTimeout(this._healT); this._healT = null; }
     if (this._wsRetryT) { clearTimeout(this._wsRetryT); this._wsRetryT = null; }
     if (this._ghostTimer) { clearInterval(this._ghostTimer); this._ghostTimer = null; }
@@ -3522,6 +3549,14 @@ document.getElementById("sidebar-search").addEventListener("input", ev => {
 
 document.getElementById("btn-toggle-sidebar").onclick = () => {
   document.body.classList.toggle("sidebar-collapsed");
+  const s = sessions[activeTabId];
+  if (s) setTimeout(() => s.fit(), 60);
+};
+
+const showSidebar = document.getElementById("btn-show-sidebar");
+if (showSidebar) showSidebar.onclick = () => {
+  document.body.classList.remove("sidebar-collapsed");
+  document.getElementById("sidebar-search").focus();
   const s = sessions[activeTabId];
   if (s) setTimeout(() => s.fit(), 60);
 };

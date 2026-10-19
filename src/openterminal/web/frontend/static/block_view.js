@@ -56,9 +56,16 @@ function ansiToHtml(src, opts) {
     if (cur) {
       if (cur.bold) attrs.push("font-weight:600");
       if (cur.italic) attrs.push("font-style:italic");
-      if (cur.underline) attrs.push("text-decoration:underline");
-      if (cur.fg) attrs.push("color:" + cur.fg);
-      if (cur.bg) attrs.push("background:" + cur.bg);
+      const decoration = [cur.underline ? "underline" : "", cur.strike ? "line-through" : ""].filter(Boolean);
+      if (decoration.length) attrs.push("text-decoration:" + decoration.join(" "));
+      if (cur.inverse) {
+        attrs.push("color:" + (cur.bg || "#0d1117"));
+        attrs.push("background:" + (cur.fg || "#e6e8ea"));
+      } else {
+        if (cur.fg) attrs.push("color:" + cur.fg);
+        if (cur.bg) attrs.push("background:" + cur.bg);
+      }
+      if (cur.invisible) attrs.push("visibility:hidden");
       if (cur.dim) attrs.push("opacity:.62");
     }
     out.push(attrs.length
@@ -115,14 +122,21 @@ function applySgr(cur, params, opts) {
   for (let i = 0; i < nums.length; i++) {
     const n = nums[i];
     if (n === 0) { delete st.bold; delete st.dim; delete st.italic;
-      delete st.underline; delete st.fg; delete st.bg; }
+      delete st.underline; delete st.fg; delete st.bg;
+      delete st.inverse; delete st.invisible; delete st.strike; }
     else if (n === 1) st.bold = true;
     else if (n === 2) st.dim = true;
     else if (n === 3) st.italic = true;
     else if (n === 4) st.underline = true;
+    else if (n === 7) st.inverse = true;
+    else if (n === 8) st.invisible = true;
+    else if (n === 9) st.strike = true;
     else if (n === 22) { delete st.bold; delete st.dim; }
     else if (n === 23) delete st.italic;
     else if (n === 24) delete st.underline;
+    else if (n === 27) delete st.inverse;
+    else if (n === 28) delete st.invisible;
+    else if (n === 29) delete st.strike;
     else if (n === 39) delete st.fg;
     else if (n === 49) delete st.bg;
     else if (n === 38 || n === 48) {
@@ -131,7 +145,7 @@ function applySgr(cur, params, opts) {
       const mode = nums[i + 1];
       if (mode === 5) {
         const v = nums[i + 2] | 0;
-        const col = v < 16 ? (ANSI_FG[v + 30] || "#d1d5db")
+        const col = v < 16 ? ANSI_FG[v < 8 ? v + 30 : v + 82]
           : v < 232 ? cube256(v) : gray256(v);
         if (n === 38) st.fg = col; else st.bg = col;
         i += 2;
@@ -157,6 +171,62 @@ function cube256(v) {
 function gray256(v) {
   const g = 8 + (v - 232) * 10;
   return "rgb(" + g + "," + g + "," + g + ")";
+}
+
+// 从已解析的 xterm 单元格取快照，而不是重放原始 PTY 控制序列。
+// translateToString 只留文字，会把命令青色、自然语言蓝色和输出本身的颜色洗掉。
+function bufferToAnsi(buffer) {
+  const lines = [];
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    if (!line) { lines.push(""); continue; }
+    if (typeof line.getCell !== "function") {
+      lines.push(line.translateToString(true));
+      continue;
+    }
+    const next = buffer.getLine(i + 1);
+    let end = line.length;
+    // 双宽字符放不进行末最后一列时，xterm 会留下一个空续位再折行。
+    // 它不是用户输入的空格（显式空格 getChars() === " "），合并时不能补进去。
+    if (next && next.isWrapped && end > 0 && next.getCell(0)?.getWidth() === 2 &&
+        line.getCell(end - 1)?.getChars() === "") end--;
+    // 软折行中间的空格是内容；只修剪逻辑行末尾的空白。
+    if (!next || !next.isWrapped) {
+      while (end > 0) {
+        const cell = line.getCell(end - 1);
+        if (cell && (cell.getChars().trim() || cell.getWidth() === 0)) break;
+        end--;
+      }
+    }
+    let text = "", active = "";
+    for (let x = 0; x < end; x++) {
+      const cell = line.getCell(x);
+      if (!cell || cell.getWidth() === 0) continue; // CJK/emoji 的续格不能再输出一遍
+      const codes = [];
+      for (const [method, code] of [["isBold", 1], ["isDim", 2], ["isItalic", 3],
+        ["isUnderline", 4], ["isInverse", 7], ["isInvisible", 8], ["isStrikethrough", 9]]) {
+        if (typeof cell[method] === "function" && cell[method]()) codes.push(code);
+      }
+      for (const [prefix, code] of [["Fg", 38], ["Bg", 48]]) {
+        const color = cell["get" + prefix + "Color"]();
+        if (cell["is" + prefix + "RGB"]()) {
+          codes.push(code, 2, (color >> 16) & 255, (color >> 8) & 255, color & 255);
+        } else if (cell["is" + prefix + "Palette"]()) {
+          codes.push(code, 5, color);
+        }
+      }
+      const style = codes.join(";");
+      if (style !== active) {
+        text += "\x1b[0m" + (style ? "\x1b[" + style + "m" : "");
+        active = style;
+      }
+      text += cell.getChars() || " ";
+    }
+    if (active) text += "\x1b[0m";
+    if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  return lines.join("\n").replace(/\s+$/, "");
 }
 
 // ── DOM 渲染 ────────────────────────────────────────────
@@ -309,5 +379,5 @@ class BlockView {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { BlockView, ansiToHtml, stripAnsi, escHtml };
+  module.exports = { BlockView, ansiToHtml, stripAnsi, escHtml, bufferToAnsi };
 }

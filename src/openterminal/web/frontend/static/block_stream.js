@@ -219,13 +219,25 @@ function isShellSwitch(line) {
 // 我们瞎编的。
 
 // 回显行 = 提示符尾符 + 这条命令，整行才算
+function plainEcho(text) {
+  return String(text == null ? "" : text).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
 function isCmdEcho(line, cmd) {
   const c = String(cmd == null ? "" : cmd).trim();
-  const h = String(line == null ? "" : line).trimEnd();
+  const h = plainEcho(line).trimEnd();
   if (!c || !h.endsWith(c)) return false;
   const before = h.slice(0, h.length - c.length).trimEnd();
   const last = before.slice(-1);
   return last === "$" || last === "#" || last === "%" || last === ">";
+}
+
+// 只为已由后端明确标识的命令回显补色，不猜测普通输出中的命令/自然语言。
+function styleCmdEcho(echo, command) {
+  const text = String(echo == null ? "" : echo).trimEnd();
+  const cmd = String(command == null ? "" : command).trim();
+  if (!isCmdEcho(text, cmd) || text !== plainEcho(text)) return text;
+  return text.slice(0, -cmd.length) + "\x1b[38;5;51m" + cmd + "\x1b[0m";
 }
 
 // 从「缓冲区文本」里认回显行：只看最后一个非空行（回显刚画在那儿，其后
@@ -234,7 +246,7 @@ function pickCmdEcho(bufferText, cmd) {
   const lines = String(bufferText == null ? "" : bufferText).split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const s = lines[i].trimEnd();
-    if (!s) continue;
+    if (!plainEcho(s).trim()) continue;
     return isCmdEcho(s, cmd) ? s : "";
   }
   return "";
@@ -247,13 +259,16 @@ function ensureCmdEcho(text, echo) {
   const e = String(echo == null ? "" : echo).trimEnd();
   if (!e) return src;
   const lines = src.split("\n");
-  const i = lines.findIndex(l => l.trimEnd() === e);
-  if (i === 0) return src;
-  if (i > 0) return lines.slice(i).join("\n");
+  const i = lines.findIndex(l => plainEcho(l).trimEnd() === plainEcho(e));
+  if (i >= 0) {
+    // hook 没有上色时也可用可信回显补色；已带样式的真实终端行不覆盖。
+    if (plainEcho(lines[i]) === lines[i] && plainEcho(e) !== e) lines[i] = e;
+    return lines.slice(i).join("\n");
+  }
   return e + "\n" + src;
 }
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = { BlockStream, KINDS, canCut, isShellSwitch, SHELL_SWITCH_RE,
-                  isCmdEcho, pickCmdEcho, ensureCmdEcho };
+                  isCmdEcho, pickCmdEcho, ensureCmdEcho, styleCmdEcho };
 }

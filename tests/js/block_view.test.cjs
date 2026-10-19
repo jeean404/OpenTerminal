@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  BlockView, ansiToHtml, stripAnsi,
+  BlockView, ansiToHtml, stripAnsi, bufferToAnsi,
 } = require("../../src/openterminal/web/frontend/static/block_view.js");
 const { BlockStream } =
   require("../../src/openterminal/web/frontend/static/block_stream.js");
@@ -37,6 +37,73 @@ test("stripAnsi：剥掉所有转义，留纯文本", () => {
   assert.equal(stripAnsi("\x1b[32mhello\x1b[0m\r\n"), "hello\r\n");
   assert.equal(stripAnsi("plain"), "plain");
   assert.equal(stripAnsi(""), "");
+});
+
+function cell(chars, fg = null, width = 1, extra = {}) {
+  return {
+    getChars: () => chars, getWidth: () => width,
+    getFgColor: () => fg, isFgRGB: () => false, isFgPalette: () => fg != null,
+    getBgColor: () => 0, isBgRGB: () => false, isBgPalette: () => false,
+    ...extra,
+  };
+}
+
+function buffer(rows) {
+  const lines = rows.map(({ cells, wrapped }) => ({
+    length: cells.length, isWrapped: !!wrapped, getCell: i => cells[i],
+  }));
+  return { length: lines.length, getLine: i => lines[i] };
+}
+
+test("bufferToAnsi retains command and natural-language colors without coloring output", () => {
+  const src = bufferToAnsi(buffer([
+    { cells: [cell("#"), cell(" "), cell("l", 51), cell("s", 51)] },
+    { cells: [cell("查", 33, 2), cell("", 33, 0), cell("看", 33, 2), cell("", 33, 0)] },
+    { cells: [cell("o"), cell("k"), cell(" ")] },
+  ]));
+  assert.equal(stripAnsi(src), "# ls\n查看\nok");
+  const html = ansiToHtml(src);
+  assert.match(html, /# <span style="color:rgb\(0,255,255\)">ls<\/span>/);
+  assert.match(html, /color:rgb\(0,135,255\).*查看/);
+  assert.ok(html.endsWith("\nok"), "output must not inherit the input color");
+});
+
+test("bufferToAnsi joins soft wraps but preserves real newlines and middle spaces", () => {
+  const src = bufferToAnsi(buffer([
+    { cells: [cell("a", 51), cell(" ", 51)] },
+    { cells: [cell("b", 51), cell(" ")], wrapped: true },
+    { cells: [cell("c")] },
+  ]));
+  assert.equal(stripAnsi(src), "a b\nc");
+});
+
+test("bufferToAnsi does not insert a space for wide-character wrap padding", () => {
+  const src = bufferToAnsi(buffer([
+    { cells: [cell("a", 33), cell("", 33)] },
+    { cells: [cell("查", 33, 2), cell("", 33, 0)], wrapped: true },
+  ]));
+  assert.equal(stripAnsi(src), "a查");
+});
+
+test("bufferToAnsi keeps truecolor and text attributes and escapes HTML through the renderer", () => {
+  const src = bufferToAnsi(buffer([{ cells: [cell("<script>&", 0x123456, 1, {
+    isFgRGB: () => true, isFgPalette: () => false, isBold: () => true,
+    isItalic: () => true, isUnderline: () => true,
+  })] }]));
+  const html = ansiToHtml(src);
+  assert.match(html, /color:rgb\(18,52,86\)/);
+  assert.match(html, /font-weight:600/);
+  assert.match(html, /font-style:italic/);
+  assert.match(html, /text-decoration:underline/);
+  assert.match(html, /&lt;script&gt;&amp;/);
+  assert.ok(!html.includes("<script>"));
+});
+
+test("ANSI bright palette, inverse and conceal survive snapshot rendering", () => {
+  assert.match(ansiToHtml("\x1b[38;5;9mred"), /color:#fca5a5/);
+  assert.match(ansiToHtml("\x1b[7mreverse"), /color:#0d1117;background:#e6e8ea/);
+  assert.match(ansiToHtml("\x1b[8mhidden\x1b[28mvisible"), /visibility:hidden.*hidden<\/span>visible/);
+  assert.match(ansiToHtml("\x1b[9mstrike"), /text-decoration:line-through/);
 });
 
 /* ── 最小 fake DOM ────────────────────────────────────── */
