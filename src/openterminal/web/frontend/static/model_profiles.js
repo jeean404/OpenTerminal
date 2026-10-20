@@ -8,48 +8,64 @@ async function modelProfileRequest(url, options = {}) {
 }
 
 async function showModelProfiles() {
-  let data;
+  const list = document.getElementById("model-profile-list");
+  list.innerHTML = '<p class="settings-loading">正在加载模型配置…</p>';
   try {
-    data = await modelProfileRequest("/api/model-profiles");
+    const data = await modelProfileRequest("/api/model-profiles");
+    if (!data.profiles.length) {
+      list.innerHTML = `
+        <div class="settings-empty">
+          <strong>还没有模型配置</strong>
+          <span>添加一个模型服务后，即可在创建新终端时使用。</span>
+        </div>`;
+      return;
+    }
+    list.innerHTML = data.profiles.map(profile => `
+      <article class="settings-model-row">
+        <div class="settings-model-mark">${esc(profile.provider === "openai" ? "O" : "A")}</div>
+        <div class="settings-model-summary">
+          <div class="settings-model-title">
+            <strong>${esc(profile.name)}</strong>
+            ${profile.id === data.active_id ? '<span class="mp-active">已启用</span>' : ""}
+          </div>
+          <span>${esc(profile.provider === "openai" ? "OpenAI 兼容" : "Anthropic")} · ${esc(profile.model)}</span>
+          <small>${esc(profile.base_url || "官方端点")}${profile.has_api_key ? " · API Key 已保存" : ""}</small>
+        </div>
+        <div class="settings-model-actions">
+          ${profile.id === data.active_id ? "" :
+            `<button type="button" data-mp-action="activate" data-id="${esc(profile.id)}">启用</button>`}
+          <button type="button" data-mp-action="edit" data-id="${esc(profile.id)}">编辑</button>
+          <button type="button" data-mp-action="delete" data-id="${esc(profile.id)}">删除</button>
+        </div>
+      </article>`).join("");
+    list.querySelectorAll("[data-mp-action]").forEach(button => {
+      button.onclick = () => handleModelProfileAction(button.dataset.mpAction, button.dataset.id, data);
+    });
   } catch (error) {
-    modalShell("模型配置", `<p class="mp-error">${esc(error.message)}</p>`, [
-      {label: "关闭", primary: true},
-    ]);
-    return;
+    list.innerHTML = `<p class="mp-error">加载模型配置失败：${esc(error.message)}</p>`;
   }
+}
 
-  const rows = data.profiles.map(profile => `
-    <div class="mp-row">
-      <div class="mp-summary">
-        <strong>${esc(profile.name)}</strong>
-        <span>${esc(profile.provider)} · ${esc(profile.model)}</span>
-        <small>${esc(profile.base_url || "官方端点")}${profile.has_api_key ? " · Key 已保存" : ""}</small>
-      </div>
-      ${profile.id === data.active_id ? '<span class="mp-active">已启用</span>' :
-        `<button type="button" data-mp-action="activate" data-id="${esc(profile.id)}">启用</button>`}
-      <button type="button" data-mp-action="edit" data-id="${esc(profile.id)}">编辑</button>
-      <button type="button" data-mp-action="delete" data-id="${esc(profile.id)}">删除</button>
-    </div>`).join("");
+function openModelProfileForm(profile = null) {
+  const editing = Boolean(profile);
   const markup = `
-    <div class="mp-list">${rows || '<p class="mp-empty">还没有模型配置，请在下方添加。</p>'}</div>
     <form id="mp-form" class="mp-form">
-      <h4 id="mp-form-title">添加配置</h4>
       <label>配置名称<input name="name" required maxlength="80" placeholder="例如：公司网关"></label>
       <label>协议<select name="provider">
         <option value="anthropic">Anthropic</option>
         <option value="openai">OpenAI 兼容</option>
       </select></label>
-      <label>URL<input name="base_url" type="url" placeholder="https://api.example.com/v1"></label>
-      <label>模型<input name="model" required placeholder="claude-sonnet-4-6 或 gpt-5"></label>
-      <label>API Key<input name="api_key" type="password" autocomplete="new-password"
-        placeholder="新建时填写；编辑时留空表示不修改"></label>
-      <label class="mp-clear"><input name="clear_api_key" type="checkbox"> 清除已保存的 API Key</label>
-      <p class="mp-error" id="mp-error" hidden></p>
+      <label class="mp-wide">URL<input name="base_url" type="url" placeholder="https://api.example.com/v1"></label>
+      <label class="mp-wide">模型<input name="model" required placeholder="claude-sonnet-4-6 或 gpt-5"></label>
+      <label class="mp-wide">API Key<input name="api_key" type="password" autocomplete="new-password"
+        placeholder="${editing ? "留空表示不修改" : "输入服务商提供的 API Key"}"></label>
+      ${editing ? '<label class="mp-clear mp-wide"><input name="clear_api_key" type="checkbox"> 清除已保存的 API Key</label>' : ""}
+      <p class="mp-error mp-wide" id="mp-error" hidden></p>
     </form>`;
-
-  modalShell("模型配置", markup, [
-    {label: "添加 / 保存", primary: true, onClick: async () => {
+  const close = modalShell(editing ? "编辑模型配置" : "添加模型配置", markup, [
+    {label: "保存配置", primary: true, onClick: async () => {
       const form = document.getElementById("mp-form");
+      if (!form.reportValidity()) return false;
       const values = Object.fromEntries(new FormData(form).entries());
       const payload = {
         name: values.name,
@@ -57,18 +73,18 @@ async function showModelProfiles() {
         base_url: values.base_url,
         model: values.model,
         api_key: values.api_key,
-        clear_api_key: form.elements.clear_api_key.checked,
+        clear_api_key: Boolean(form.elements.clear_api_key?.checked),
       };
       try {
-        const url = form.dataset.id
-          ? `/api/model-profiles/${encodeURIComponent(form.dataset.id)}`
+        const url = editing
+          ? `/api/model-profiles/${encodeURIComponent(profile.id)}`
           : "/api/model-profiles";
         await modelProfileRequest(url, {
-          method: form.dataset.id ? "PUT" : "POST",
+          method: editing ? "PUT" : "POST",
           body: JSON.stringify(payload),
         });
         await showModelProfiles();
-        return false;
+        return true;
       } catch (error) {
         const errorEl = document.getElementById("mp-error");
         errorEl.textContent = error.message;
@@ -76,41 +92,51 @@ async function showModelProfiles() {
         return false;
       }
     }},
-    {label: "关闭"},
+    {label: "取消"},
   ]);
-
   const form = document.getElementById("mp-form");
-  document.querySelectorAll("#modal-root [data-mp-action]").forEach(button => {
-    button.onclick = async () => {
-      const id = button.dataset.id;
-      try {
-        if (button.dataset.mpAction === "edit") {
-          const profile = data.profiles.find(item => item.id === id);
-          form.dataset.id = id;
-          form.elements.name.value = profile.name;
-          form.elements.provider.value = profile.provider;
-          form.elements.base_url.value = profile.base_url;
-          form.elements.model.value = profile.model;
-          form.elements.api_key.value = "";
-          form.elements.clear_api_key.checked = false;
-          document.getElementById("mp-form-title").textContent = "编辑配置";
-          return;
-        }
-        if (button.dataset.mpAction === "activate") {
-          await modelProfileRequest(`/api/model-profiles/${encodeURIComponent(id)}/activate`,
-            {method: "POST"});
-        } else {
-          await modelProfileRequest(`/api/model-profiles/${encodeURIComponent(id)}`,
-            {method: "DELETE"});
-        }
-        await showModelProfiles();
-      } catch (error) {
-        const errorEl = document.getElementById("mp-error");
-        errorEl.textContent = error.message;
-        errorEl.hidden = false;
-      }
-    };
-  });
+  if (editing) {
+    form.elements.name.value = profile.name;
+    form.elements.provider.value = profile.provider;
+    form.elements.base_url.value = profile.base_url;
+    form.elements.model.value = profile.model;
+    form.elements.clear_api_key.checked = false;
+  }
+  form.elements.name.focus();
+  return close;
 }
 
-document.getElementById("btn-model-profiles").onclick = showModelProfiles;
+async function handleModelProfileAction(action, id, data) {
+  try {
+    if (action === "edit") {
+      openModelProfileForm(data.profiles.find(profile => profile.id === id));
+      return;
+    }
+    if (action === "activate") {
+      await modelProfileRequest(`/api/model-profiles/${encodeURIComponent(id)}/activate`,
+        {method: "POST"});
+    } else {
+      const profile = data.profiles.find(item => item.id === id);
+      modalConfirm("删除模型配置", `确定删除“${profile.name}”吗？`, async ok => {
+        if (!ok) return;
+        try {
+          await modelProfileRequest(`/api/model-profiles/${encodeURIComponent(id)}`,
+            {method: "DELETE"});
+          await showModelProfiles();
+        } catch (error) {
+          modalShell("删除失败", `<p class="mp-error">${esc(error.message)}</p>`, [
+            {label: "关闭", primary: true},
+          ]);
+        }
+      }, "删除", "取消");
+      return;
+    }
+    await showModelProfiles();
+  } catch (error) {
+    const list = document.getElementById("model-profile-list");
+    list.insertAdjacentHTML("afterbegin",
+      `<p class="mp-error">操作失败：${esc(error.message)}</p>`);
+  }
+}
+
+document.getElementById("btn-add-model-profile").onclick = () => openModelProfileForm();

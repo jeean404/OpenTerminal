@@ -11,8 +11,8 @@
   <aside id="sidebar">
     <div id="sidebar-head">
       <span class="title">OpenTerminal</span>
-      <button id="btn-model-profiles" title="管理模型配置">模型</button>
       <button id="btn-add-remote" title="添加远程终端">＋远程</button>
+      <button id="btn-settings" title="设置" aria-label="设置">⚙</button>
       <button id="btn-toggle-sidebar" title="折叠侧栏">«</button>
     </div>
     <input id="sidebar-search" type="search" placeholder="搜索主机 / 名称…" autocomplete="off">
@@ -24,6 +24,105 @@
       <div id="tabs"></div>
     </div>
     <div id="panes"></div>
+    <section id="settings-view" hidden aria-label="设置">
+      <header class="settings-header">
+        <div>
+          <p class="settings-eyebrow">OPENTERMINAL / PREFERENCES</p>
+          <h1>设置</h1>
+        </div>
+        <button type="button" id="btn-close-settings" class="settings-close">返回终端</button>
+      </header>
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-label="设置分类">
+          <button type="button" class="settings-nav-item active" data-settings-section="appearance">外观</button>
+          <button type="button" class="settings-nav-item" data-settings-section="models">模型</button>
+        </nav>
+        <div class="settings-content">
+          <section class="settings-section" data-settings-panel="appearance">
+            <div class="settings-section-heading">
+              <div>
+                <h2>外观</h2>
+                <p>选择适合你的终端工作区风格。</p>
+              </div>
+            </div>
+            <div class="theme-options" role="radiogroup" aria-label="界面主题">
+              <button type="button" class="theme-option" data-theme-choice="dark" role="radio">
+                <span class="theme-preview theme-preview-dark"><i></i><i></i><i></i></span>
+                <strong>深色</strong><small>经典深色 · 橙色强调</small>
+              </button>
+              <button type="button" class="theme-option" data-theme-choice="light" role="radio">
+                <span class="theme-preview theme-preview-light"><i></i><i></i><i></i></span>
+                <strong>浅色</strong><small>明亮清晰 · 适合日间</small>
+              </button>
+              <button type="button" class="theme-option" data-theme-choice="midnight" role="radio">
+                <span class="theme-preview theme-preview-midnight"><i></i><i></i><i></i></span>
+                <strong>午夜蓝</strong><small>深蓝背景 · 冷色强调</small>
+              </button>
+            </div>
+            <div class="settings-subsection">
+              <div class="settings-subsection-heading">
+                <h3>桌面背景</h3>
+                <p>为整个界面更换背景；可调透明度与亮度，兼顾氛围和内容清晰度。</p>
+              </div>
+              <div id="wallpaper-options" class="wallpaper-options" role="radiogroup" aria-label="桌面背景"></div>
+              <div class="wallpaper-custom">
+                <div class="wallpaper-custom-heading">
+                  <div>
+                    <strong>自定义图片</strong>
+                    <p id="wallpaper-image-status">支持 PNG、JPEG、WebP，单张不超过 12 MB；图片仅保存在本浏览器。</p>
+                  </div>
+                  <div class="wallpaper-image-actions">
+                    <label class="settings-secondary" for="wallpaper-image-input">上传图片</label>
+                    <button type="button" id="btn-use-wallpaper-image" class="settings-secondary"
+                      aria-pressed="false" hidden>使用图片</button>
+                    <button type="button" id="btn-remove-wallpaper-image" class="settings-secondary" hidden>移除图片</button>
+                  </div>
+                  <input id="wallpaper-image-input" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+                </div>
+                <div class="wallpaper-controls">
+                  <label>显示方式
+                    <select id="wallpaper-fit">
+                      <option value="cover">铺满</option>
+                      <option value="contain">完整显示</option>
+                      <option value="repeat">平铺</option>
+                      <option value="stretch">拉伸</option>
+                    </select>
+                  </label>
+                  <label>图片位置
+                    <select id="wallpaper-position">
+                      <option value="center">居中</option>
+                      <option value="top">顶部</option>
+                      <option value="bottom">底部</option>
+                      <option value="left">左侧</option>
+                      <option value="right">右侧</option>
+                    </select>
+                  </label>
+                  <label class="wallpaper-range">
+                    <span>透明度 <output id="wallpaper-opacity-value" aria-live="polite">35%</output></span>
+                    <input id="wallpaper-opacity" type="range" min="0" max="100" value="35">
+                  </label>
+                  <label class="wallpaper-range">
+                    <span>亮度 <output id="wallpaper-brightness-value" aria-live="polite">100%</output></span>
+                    <input id="wallpaper-brightness" type="range" min="40" max="160" value="100">
+                  </label>
+                </div>
+                <p class="wallpaper-error" id="wallpaper-error" role="status" hidden></p>
+              </div>
+            </div>
+          </section>
+          <section class="settings-section" data-settings-panel="models" hidden>
+            <div class="settings-section-heading">
+              <div>
+                <h2>模型配置</h2>
+                <p>管理模型服务。启用的配置用于新建终端，已打开的终端不会切换。</p>
+              </div>
+              <button type="button" id="btn-add-model-profile" class="settings-primary">＋ 添加配置</button>
+            </div>
+            <div id="model-profile-list" class="settings-model-list" aria-live="polite"></div>
+          </section>
+        </div>
+      </div>
+    </section>
   </main>
   <div id="modal-root"></div>
   <script src="/vendor/xterm.js"></script>
@@ -32,6 +131,7 @@
   <script src="/static/block_stream.js"></script>
   <script src="/static/block_view.js"></script>
   <script src="/static/modal.js"></script>
+  <script src="/static/settings.js"></script>
   <script src="/static/model_profiles.js"></script>
   <script src="/static/files_panel.js"></script>
   <script src="/static/app.js"></script>

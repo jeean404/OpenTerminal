@@ -89,6 +89,14 @@ function wsUrl(tabId) {
   return url;
 }
 
+function terminalTheme() {
+  const styles = getComputedStyle(document.documentElement);
+  return {
+    background: "rgba(0, 0, 0, 0)",
+    foreground: styles.getPropertyValue("--text").trim() || "#e6e8ea",
+  };
+}
+
 // 后端代关陈旧密码模态（密码提示符已被终端手输消费）：只关带 pw 标记的
 // 密码模态，审批/主机密钥等其他模态不受影响
 function modalDismissPassword() {
@@ -196,7 +204,7 @@ class Session {
       <div class="pane-head">
         <div class="seg" role="tablist">
           <button data-mode="ssh">Shell</button>
-          <button data-mode="agent" class="on">Agent <kbd>Ctrl+Shift+I</kbd></button>
+          <button data-mode="agent" class="on">Agent</button>
         </div>
         <div class="pane-host" id="host-${this.tabId}"></div>
         <button class="files-toggle" id="filesbtn-${this.tabId}" tabindex="-1" title="远程文件：登录该主机的家目录（上传/下载）">📁 文件</button>
@@ -261,12 +269,8 @@ class Session {
       // registerMarker（卡片层锚定）在 xterm 5+ 为稳定 API；
       // allowProposedApi 保留以防后续接入装饰类扩展
       allowProposedApi: true,
-      // xterm 不认 "var(--...)" 字面量，须传解析后的真实色值；
-      // 前景对齐 main 分支的正文白 #e6e8ea（提示符/输出不再发灰）
-      theme: {background: getComputedStyle(document.documentElement)
-        .getPropertyValue("--term-bg").trim() || "#0d1117",
-        foreground: getComputedStyle(document.documentElement)
-        .getPropertyValue("--text").trim() || "#e6e8ea"},
+      // 透明默认底色让终端透出工作区背景；前景跟随界面主题。
+      theme: terminalTheme(),
     });
     this.term = term;
     this.fitAddon = new FitAddon.FitAddon();
@@ -3552,6 +3556,14 @@ function connDelete(t) {
 
 // --- 全局事件 ---
 document.getElementById("btn-add-remote").onclick = () => connForm({});
+
+window.addEventListener("ot-theme-change", () => {
+  Object.values(sessions).forEach(session => {
+    if (!session.term) return;
+    session.term.options.theme = terminalTheme();
+    session.term.refresh(0, session.term.rows - 1);
+  });
+});
 
 document.getElementById("sidebar-search").addEventListener("input", ev => {
   searchQuery = ev.target.value.trim();

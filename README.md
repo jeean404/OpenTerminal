@@ -192,8 +192,13 @@ conda activate openterminal
 pip install -e .
 ```
 
-Configure a model gateway in the browser after starting `ot web`. The CLI
-continues to support settings from environment variables or `config.toml`.
+Configure a model gateway under **Settings → Models** after starting `ot web`.
+The **Settings → Appearance** page offers three color themes and ten built-in
+textured wallpapers. You can also upload a local image and adjust its fit,
+tiling, position, opacity, and brightness. Images are stored in the current
+browser, never uploaded to the server. Appearance applies across the Web UI
+and works offline.
+The CLI continues to support settings from environment variables or `config.toml`.
 
 ## Quick start
 
@@ -211,11 +216,13 @@ ot ssh deploy@host:2222  # or user@host:port directly
 
 ## Model gateway configuration
 
-The Web UI's **Model** entry manages multiple profiles, including provider,
-base URL, model, and API key. The selected profile is used by newly opened
-terminal tabs. Profile metadata is stored in `~/.openterminal/connections.db`;
-API keys are stored in the OS credential store. CLI model settings remain
-compatible with environment variables and `[model]` in `config.toml`.
+The Web UI's **Settings → Models** page manages multiple profiles, including
+provider, base URL, model, and API key. Add or edit a profile in the dialog,
+then select it for newly opened terminal tabs. Existing tabs do not switch.
+Theme and wallpaper selections are stored in the current browser. Profile metadata is stored in
+`~/.openterminal/connections.db`; API keys are stored in the OS credential
+store. CLI model settings remain compatible with environment variables and
+`[model]` in `config.toml`.
 
 Optional `~/.openterminal/config.toml` for non-model settings:
 
