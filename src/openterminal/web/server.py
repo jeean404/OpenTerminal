@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import webbrowser
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -21,6 +22,10 @@ from ..connections import (
     rename_saved_target, upsert_saved_target,
 )
 from ..connections.secrets import delete_password, store_password
+from ..model_profiles import (
+    activate_profile, active_model_config, delete_profile, list_profiles,
+    save_profile, update_profile,
+)
 from ..frontend.render import console
 from .files_api import install_files_errors, make_files_router
 from .protocol import parse_client
@@ -132,6 +137,49 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         _check_token(request.headers)
         return _target_payload()
 
+    @app.get("/api/model-profiles")
+    async def model_profiles(request: Request):
+        _check_token(request.headers)
+        profiles, active_id = list_profiles()
+        return {"profiles": profiles, "active_id": active_id}
+
+    @app.post("/api/model-profiles")
+    async def add_model_profile(request: Request, payload: dict):
+        _check_token(request.headers)
+        try:
+            return save_profile(payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+
+    @app.put("/api/model-profiles/{profile_id}")
+    async def edit_model_profile(request: Request, profile_id: str, payload: dict):
+        _check_token(request.headers)
+        try:
+            saved = update_profile(payload, profile_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return saved
+
+    @app.delete("/api/model-profiles/{profile_id}")
+    async def remove_model_profile(request: Request, profile_id: str):
+        _check_token(request.headers)
+        if not delete_profile(profile_id):
+            raise HTTPException(404, "unknown model profile")
+        return {"ok": True}
+
+    @app.post("/api/model-profiles/{profile_id}/activate")
+    async def set_active_model_profile(request: Request, profile_id: str):
+        _check_token(request.headers)
+        if not activate_profile(profile_id):
+            raise HTTPException(404, "unknown model profile")
+        return {"ok": True, "active_id": profile_id}
+
     @app.post("/api/tabs")
     async def create_tab(request: Request, payload: dict):
         _check_token(request.headers)
@@ -139,7 +187,8 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if not target:
             raise HTTPException(400, "target required")
         name = _resolve_target_name(cfg, target)
-        worker = TabWorker(cfg, name)
+        worker_cfg = replace(cfg, model=active_model_config(cfg.model))
+        worker = TabWorker(worker_cfg, name)
         tabs[worker.tab_id] = worker
         return {"tab_id": worker.tab_id}
 

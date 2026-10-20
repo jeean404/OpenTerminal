@@ -52,6 +52,27 @@ body.sidebar-collapsed #sidebar { display: none; }
 #sidebar-head button { color: var(--muted); padding: 2px 6px; border-radius: 4px; }
 #sidebar-head button:hover { background: var(--panel2); color: var(--text); }
 
+.mp-list { max-height: 32vh; overflow-y: auto; }
+.mp-row { display: flex; align-items: center; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.mp-summary { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.mp-summary span, .mp-summary small, .mp-empty { color: var(--muted); overflow-wrap: anywhere; }
+.mp-row button { padding: 4px 7px; border: 1px solid var(--border); border-radius: 4px; white-space: nowrap; }
+.mp-active { color: var(--ok); white-space: nowrap; }
+.mp-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.mp-form h4, .mp-form .mp-error, .mp-form .mp-clear { grid-column: 1 / -1; margin: 0; }
+.mp-form label { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--muted); }
+.mp-form input, .mp-form select { width: 100%; padding: 6px 8px; }
+.mp-form select { color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; }
+.mp-form .mp-clear { flex-direction: row; align-items: center; }
+.mp-form .mp-clear input { width: auto; }
+.mp-error { color: var(--danger); }
+@media (max-width: 600px) {
+  .mp-form { grid-template-columns: 1fr; }
+  .mp-form h4, .mp-form .mp-error, .mp-form .mp-clear { grid-column: 1; }
+  .mp-row { flex-wrap: wrap; }
+  .mp-summary { flex-basis: 100%; }
+}
+
 #sidebar-search { margin: 8px 10px; padding: 5px 8px; width: auto; }
 
 #targets { flex: 1; overflow-y: auto; padding-bottom: 12px; }
@@ -590,6 +611,7 @@ body.sidebar-collapsed #btn-show-sidebar { display: block; }
 #modal-root { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); z-index: 1100; }
 #modal-root:empty { display: none; }
 .modal { width: min(440px, 92vw); max-height: 85vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+.modal:has(.mp-form) { width: min(720px, 94vw); }
 .modal h3 { margin: 0 0 8px; font-size: 14px; }
 .modal-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
 .modal-body p { margin: 0 0 8px; color: var(--text); white-space: pre-wrap; }

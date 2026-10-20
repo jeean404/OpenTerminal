@@ -23,7 +23,9 @@ def build_chat_model(cfg: ModelConfig) -> Any:
     在分支内惰性导入：anthropic 配置既不付导入耗时也不要求安装该包。
     """
     # .env 直配的 key 优先（项目 .env > ~/.openterminal/.env）；否则走环境变量
-    api_key = cfg.api_key or os.environ.get(cfg.api_key_env, "not-set")
+    api_key = cfg.api_key or (
+        os.environ.get(cfg.api_key_env, "not-set") if cfg.api_key_env else "not-set"
+    )
     if cfg.provider == "openai":
         from langchain_openai import ChatOpenAI
 

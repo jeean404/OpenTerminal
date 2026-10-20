@@ -110,9 +110,10 @@ Xshell 可以省了。
 
 **模型网关**
 
-- 任意 Anthropic 兼容或 OpenAI 兼容网关——协议、base URL、模型、
-  key 环境变量均可配置
-- Web 状态栏的模型下拉读 `[model] models` 列表
+- 在 Web 界面的「模型」入口管理多组 Anthropic / OpenAI 兼容配置，设置
+  URL、模型和 API Key 后启用；新建终端会使用当前启用的配置
+- 配置元数据存入 `~/.openterminal/connections.db`，API Key 存入系统凭据库
+- Web 状态栏的模型下拉显示当前启用配置的模型
 
 ## 安装
 
@@ -169,12 +170,8 @@ conda activate openterminal
 pip install -e .
 ```
 
-再配置模型网关(见下)后即可运行:
-
-```sh
-mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
-# 编辑 ~/.openterminal/.env,填上你的模型网关
-```
+模型网关可在 `ot web` 启动后通过浏览器界面的「模型」入口配置，无需编辑
+配置文件；CLI 仍可使用环境变量或 `config.toml` 中的模型设置。
 
 ## 快速开始
 
@@ -192,32 +189,16 @@ ot ssh deploy@host:2222  # 直接指定 user@host:port
 
 ## 模型网关配置
 
-OpenTerminal 对接任意 Anthropic 兼容网关。启动时依次加载当前目录 `.env`、
-`~/.openterminal/.env`,然后读取 `~/.openterminal/config.toml`。**三个都
-不建也能跑**——缺省用内置默认值:
+Web 界面左侧的「模型」入口可管理多组 Anthropic / OpenAI 兼容配置，填写
+配置名称、协议、URL、模型和 API Key 后点击「启用」。之后新建的终端会使用
+已启用配置；已打开的终端不受切换影响。配置元数据保存在
+`~/.openterminal/connections.db`，API Key 保存在操作系统凭据库中，不写入
+项目配置文件或 SQLite。
 
-- 协议:`anthropic`(缺省)或 `openai`(OpenAI 兼容协议)
-- 网关:`http://127.0.0.1:15721`(Anthropic 兼容协议;`openai` 协议缺省走官方端点)
-- 模型:`claude-sonnet-4-6`(`openai` 协议缺省 `gpt-5`)
-- API Key:读环境变量 `ANTHROPIC_API_KEY`(`openai` 协议读 `OPENAI_API_KEY`)
-
-`~/.openterminal/config.toml` 可选示例(所有字段均可省略):
+CLI 仍兼容原有环境变量和 `config.toml` `[model]` 配置。其他 Web 设置
+（shell、策略、目标主机等）仍可在 `config.toml` 中配置：
 
 ```toml
-[model]
-provider = "anthropic"       # anthropic | openai(OpenAI 兼容协议)
-base_url = "http://127.0.0.1:15721"
-model = "claude-sonnet-4-6"
-api_key_env = "ANTHROPIC_API_KEY"
-models = ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]  # Web 模型下拉
-
-# OpenAI 兼容协议示例(任一 OpenAI 兼容网关皆可;上面几项的缺省值
-# 会随 provider 换成 openai 一套,显式写了的字段一律优先):
-# provider = "openai"
-# base_url = "https://api.openai.com/v1"
-# model = "gpt-5"
-# api_key_env = "OPENAI_API_KEY"
-
 [shell]
 timeout_default = 120        # 单条命令最长等待秒数
 max_output_bytes = 102400    # 单条命令输出截断

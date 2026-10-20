@@ -22,6 +22,93 @@ def test_api_targets_payload():
         assert "jumps" not in data
 
 
+def test_model_profile_crud_and_activation(monkeypatch, tmp_path):
+    import openterminal.model_profiles as profiles
+    import openterminal.web.server as web_server
+
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    keys = {}
+    monkeypatch.setattr(
+        profiles, "store_model_api_key",
+        lambda profile_id, key: keys.__setitem__(profile_id, key) or True)
+    monkeypatch.setattr(profiles, "load_model_api_key",
+                        lambda profile_id: keys.get(profile_id))
+    monkeypatch.setattr(profiles, "delete_model_api_key",
+                        lambda profile_id: keys.pop(profile_id, None) is not None)
+    created_tabs = []
+
+    class FakeWorker:
+        tab_id = "fake-tab"
+
+        def __init__(self, cfg, target):
+            created_tabs.append((cfg, target))
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(web_server, "TabWorker", FakeWorker)
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        created = client.post("/api/model-profiles", json={
+            "name": "本地 Anthropic", "provider": "anthropic",
+            "base_url": "http://localhost:15721", "model": "claude-sonnet-4-6",
+            "api_key": "secret-value",
+        })
+        assert created.status_code == 200
+        profile = created.json()
+        assert profile["has_api_key"] is True
+        assert "secret-value" not in created.text
+
+        listed = client.get("/api/model-profiles").json()
+        assert listed == {"profiles": [profile], "active_id": None}
+        assert client.post(
+            f"/api/model-profiles/{profile['id']}/activate"
+        ).status_code == 200
+
+        updated = client.put(f"/api/model-profiles/{profile['id']}", json={
+            "name": "本地 OpenAI", "provider": "openai", "base_url": "",
+            "model": "gpt-4.1", "api_key": "",
+        })
+        assert updated.status_code == 200
+        assert keys[profile["id"]] == "secret-value"
+
+        from openterminal.model_profiles import active_model_config
+
+        active = active_model_config(Config.load().model)
+        assert (active.provider, active.base_url, active.model, active.api_key) == (
+            "openai", "", "gpt-4.1", "secret-value")
+        assert active.api_key_env == ""
+        tab = client.post("/api/tabs", json={"target": "local"})
+        assert tab.status_code == 200 and tab.json()["tab_id"] == "fake-tab"
+        assert created_tabs[0][0].model.model == "gpt-4.1"
+        assert client.put("/api/model-profiles/missing", json={
+            "name": "missing", "provider": "openai", "model": "gpt-4.1",
+        }).status_code == 404
+        cleared = client.put(f"/api/model-profiles/{profile['id']}", json={
+            "name": "本地 OpenAI", "provider": "openai", "base_url": "",
+            "model": "gpt-4.1", "clear_api_key": True,
+        })
+        assert cleared.status_code == 200
+        assert cleared.json()["has_api_key"] is False
+
+        assert client.delete(
+            f"/api/model-profiles/{profile['id']}"
+        ).status_code == 200
+        assert keys == {}
+        assert client.get("/api/model-profiles").json()["active_id"] is None
+
+
+def test_model_profile_validation_and_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    app = create_app(Config.load(), token="secret")
+    with TestClient(app) as client:
+        assert client.get("/api/model-profiles").status_code == 401
+        response = client.post("/api/model-profiles", headers={
+            "x-ot-token": "secret",
+        }, json={"name": "missing", "provider": "invalid", "model": ""})
+        assert response.status_code == 400
+
+
 def test_api_saved_endpoint(tmp_path):
     app = create_app(Config.load())
     with TestClient(app) as client:

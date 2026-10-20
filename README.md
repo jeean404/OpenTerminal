@@ -128,9 +128,9 @@ second in the browser (`ot web`). Here's what happens:
 
 **Model gateways**
 
-- Any Anthropic-compatible or OpenAI-compatible gateway — protocol, base
-  URL, model, and key env var all configurable
-- The web model picker reads its options from `[model] models`
+- Manage multiple Anthropic-compatible or OpenAI-compatible profiles from the
+  Web UI's **Model** entry. Profile metadata is stored in SQLite; API keys are
+  kept in the OS credential store.
 
 ## Installation
 
@@ -192,12 +192,8 @@ conda activate openterminal
 pip install -e .
 ```
 
-Then set up your model gateway (see below) and run it:
-
-```sh
-mkdir -p ~/.openterminal && cp .env.example ~/.openterminal/.env
-# edit ~/.openterminal/.env — point it at a model gateway
-```
+Configure a model gateway in the browser after starting `ot web`. The CLI
+continues to support settings from environment variables or `config.toml`.
 
 ## Quick start
 
@@ -215,35 +211,15 @@ ot ssh deploy@host:2222  # or user@host:port directly
 
 ## Model gateway configuration
 
-OpenTerminal talks to any Anthropic-compatible gateway. On startup it loads
-`.env` from the current directory, then `~/.openterminal/.env`, then
-`~/.openterminal/config.toml`. **None of these are required** — defaults:
+The Web UI's **Model** entry manages multiple profiles, including provider,
+base URL, model, and API key. The selected profile is used by newly opened
+terminal tabs. Profile metadata is stored in `~/.openterminal/connections.db`;
+API keys are stored in the OS credential store. CLI model settings remain
+compatible with environment variables and `[model]` in `config.toml`.
 
-- Protocol: `anthropic` (default) or `openai` (OpenAI-compatible protocol)
-- Gateway: `http://127.0.0.1:15721` (Anthropic-compatible protocol; the `openai`
-  provider defaults to the official endpoint)
-- Model: `claude-sonnet-4-6` (`gpt-5` under the `openai` provider)
-- API key: from the `ANTHROPIC_API_KEY` environment variable
-  (`OPENAI_API_KEY` under the `openai` provider)
-
-Optional `~/.openterminal/config.toml` (every field may be omitted):
+Optional `~/.openterminal/config.toml` for non-model settings:
 
 ```toml
-[model]
-provider = "anthropic"       # anthropic | openai (OpenAI-compatible protocol)
-base_url = "http://127.0.0.1:15721"
-model = "claude-sonnet-4-6"
-api_key_env = "ANTHROPIC_API_KEY"
-models = ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"]  # web model picker
-
-# OpenAI-compatible protocol example (any OpenAI-compatible gateway works;
-# the defaults of the fields above switch to an openai set with the
-# provider — explicit fields always win):
-# provider = "openai"
-# base_url = "https://api.openai.com/v1"
-# model = "gpt-5"
-# api_key_env = "OPENAI_API_KEY"
-
 [shell]
 timeout_default = 120        # per-command wait budget (seconds)
 max_output_bytes = 102400    # per-command output truncation

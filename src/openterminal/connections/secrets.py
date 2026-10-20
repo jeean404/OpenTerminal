@@ -66,3 +66,36 @@ def delete_password(host: str, user: str | None, port: int | None) -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+def _model_profile_key(profile_id: str) -> str:
+    return f"model-profile:{profile_id}"
+
+
+def load_model_api_key(profile_id: str) -> str | None:
+    try:
+        import keyring
+
+        return keyring.get_password(_SERVICE, _model_profile_key(profile_id))
+    except Exception:  # noqa: BLE001 - locked/unavailable keyring is explicit at save time
+        return None
+
+
+def store_model_api_key(profile_id: str, api_key: str) -> bool:
+    try:
+        import keyring
+
+        keyring.set_password(_SERVICE, _model_profile_key(profile_id), api_key)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def delete_model_api_key(profile_id: str) -> bool:
+    try:
+        import keyring
+
+        keyring.delete_password(_SERVICE, _model_profile_key(profile_id))
+        return True
+    except Exception:  # noqa: BLE001 - absent credential is already cleared
+        return False
