@@ -151,15 +151,15 @@ Windows 解压后把 `ot` 目录加进 `PATH`,运行 `ot.exe`。
 
 ### pipx / uv(从 PyPI)
 
-PyPI 包名为 `ot`(安装后提供 `ot` 命令;Python 模块名仍是 `openterminal`):
+PyPI 包名为 `ot-cli`(安装后提供 `ot` 命令;Python 模块名仍是 `openterminal`):
 
 ```sh
-pipx install ot
+pipx install ot-cli
 # 或
-uv tool install ot
+uv tool install ot-cli
 ```
 
-> 旧名 `open-terminal-agent`(仅 0.1.0)已弃用,新版本一律以 `ot` 发布。
+> 旧名 `open-terminal-agent`(仅 0.1.0)已弃用,新版本一律以 `ot-cli` 发布。
 
 需要 Python 3.11+。
 

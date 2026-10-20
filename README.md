@@ -159,7 +159,7 @@ On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 
 > **Intel Macs**: GitHub retired its Intel macOS runners, so the x86_64 binary
 > is built and attached manually per release. If a release is missing it,
-> install from PyPI with `pipx install ot` (see below), which works
+> install from PyPI with `pipx install ot-cli` (see below), which works
 > on both architectures.
 
 > **macOS Gatekeeper** — the binaries are ad-hoc signed (not notarized), so
@@ -174,17 +174,17 @@ On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 
 ### pipx / uv (from PyPI)
 
-The Python package is `ot` (it installs the `ot` command; the importable
+The Python package is `ot-cli` (it installs the `ot` command; the importable
 module remains `openterminal`):
 
 ```sh
-pipx install ot
+pipx install ot-cli
 # or
-uv tool install ot
+uv tool install ot-cli
 ```
 
 > Previously published as `open-terminal-agent` (0.1.0 only) — that name was
-> retired in favor of `ot`. Use `pipx install ot` for current releases.
+> retired in favor of `ot-cli`. Use `pipx install ot-cli` for current releases.
 
 Requires Python 3.11+.
 
