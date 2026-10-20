@@ -29,6 +29,44 @@ class FilePanel {
     this._wantOpen = false;     // 面板应处于展开态（重试链据此续命）
     this._retryWait = 0;        // 未就绪自动重试的退避
     this._connecting = false;   // 自动连接途中，防重入
+    this._followKey = "";       // 面板已对齐的终端身份（host|port|user）
+    this._pendKey = "";         // 候选新身份：连续两次轮询一致才切换
+    this._followT = null;       // 跟随终端身份的轮询定时器
+  }
+
+  static _idKey(d) {
+    return d && d.supported && d.host
+      ? `${d.host}|${d.port == null ? 22 : d.port}|${d.user || ""}` : "";
+  }
+
+  /** 面板展开期间轮询终端身份：跳到 B / 切用户后自动重连到新身份。 */
+  _startFollow() {
+    clearInterval(this._followT);
+    this._followT = setInterval(() => this._followTick(), 2000);
+  }
+
+  _stopFollow() { clearInterval(this._followT); this._followT = null; }
+
+  async _followTick() {
+    if (!this._wantOpen || this.el.hidden || this._connecting) return;
+    let st;
+    try {
+      const r = await authFetch(this._api("state"));
+      if (!r.ok) return;
+      st = await r.json();
+    } catch (e) { return; }
+    const d = st.defaults;
+    this._defaults = d || this._defaults;
+    const key = FilePanel._idKey(d);
+    if (!key || key === this._followKey) { this._pendKey = ""; return; }
+    if (key !== this._pendKey) { this._pendKey = key; return; }   // 去抖
+    this._pendKey = "";
+    this._followKey = key;
+    this._conn = null;
+    this.cwd = null;
+    this._selected = null;
+    if (await this._autoConnect()) return;
+    this._noCred();
   }
 
   toggle() {
@@ -41,8 +79,10 @@ class FilePanel {
     if (this._wantOpen) {
       this._place();
       this.open();
+      this._startFollow();
     } else {
       clearTimeout(this._retryT);
+      this._stopFollow();
     }
     if (this.s.fit) this.s.fit();
   }
@@ -54,6 +94,7 @@ class FilePanel {
     if (!ok && this.el) {
       this.el.hidden = true;
       this._wantOpen = false;
+      this._stopFollow();
       this.pane.classList.remove("fp-open");
     }
   }
@@ -165,6 +206,7 @@ class FilePanel {
     if (!st) return;
     if (!st.supported) { this.setSupported(false); return; }
     this._defaults = st.defaults || null;
+    this._followKey = FilePanel._idKey(this._defaults);
     if (st.connected) {
       this._conn = {host: st.host, port: st.port, user: st.user};
       this._setBadge(this._connLabel());
@@ -172,7 +214,7 @@ class FilePanel {
       return;
     }
     if (await this._autoConnect()) return;
-    this._connectDialog();
+    this._noCred();
   }
 
   refresh() { return this.load(this.cwd == null ? "." : this.cwd); }
@@ -200,6 +242,19 @@ class FilePanel {
     } finally {
       this._connecting = false;
     }
+  }
+
+  /** 没有可用凭据：不弹框，提示在终端登录时记住密码；🔗 仍可手动连接。 */
+  _noCred() {
+    this._setBadge("");
+    const d = this._defaults || {};
+    const who = d.host ? `${d.user ? d.user + "@" : ""}${d.host}` : "当前主机";
+    const msg = `未保存 ${who} 的密码。请在终端登录时选择「记住密码」，` +
+      `文件列表会随终端自动连接；也可点 🔗 手动连接。`;
+    this.el.querySelector(".fp-list").innerHTML =
+      `<div class="fp-empty">${esc(msg)}</div>`;
+    this.el.querySelector(".fp-path").innerHTML =
+      `<span class="fp-muted">未连接</span>`;
   }
 
   /** 通道不可用的统一展示 + 自动退避重试（只用于面板自己的连接在重建）。 */
@@ -262,7 +317,7 @@ class FilePanel {
       if (j.code === "auth_failed" || j.code === "not_connected") {
         // 密码不对/连接没了：不是「重试」能解决的，回登录框换凭据
         this._conn = null;
-        this._connectDialog();
+        this._noCred();
         return;
       }
       if (j.code === "not_ready") { this._pending("not_ready", 1200); return; }
@@ -698,7 +753,7 @@ class FilePanel {
         const j = await r.json().catch(() => ({}));
         if (j.code === "auth_failed" || j.code === "not_connected") {
           this._conn = null;
-          this._connectDialog();
+          this._noCred();
           return false;
         }
         const alt = codes && j.code && codes[j.code];
@@ -720,7 +775,7 @@ class FilePanel {
       const j = await r.json().catch(() => ({}));
       if (j.code === "auth_failed" || j.code === "not_connected") {
         this._conn = null;
-        this._connectDialog();
+        this._noCred();
         return;
       }
       const why = j.code === "too_large"
