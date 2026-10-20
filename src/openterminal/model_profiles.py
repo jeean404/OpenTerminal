@@ -45,7 +45,7 @@ def _connection() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def list_profiles() -> tuple[list[dict], str | None]:
+def list_profiles(*, with_keys: bool = True) -> tuple[list[dict], str | None]:
     with _connection() as conn:
         rows = conn.execute(
             "SELECT id, name, provider, base_url, model "
@@ -57,7 +57,8 @@ def list_profiles() -> tuple[list[dict], str | None]:
     profiles = []
     for row in rows:
         profile = dict(row)
-        profile["has_api_key"] = load_model_api_key(profile["id"]) is not None
+        if with_keys:
+            profile["has_api_key"] = load_model_api_key(profile["id"]) is not None
         profiles.append(profile)
     active_id = active["value"] if active else None
     if active_id and not any(p["id"] == active_id for p in profiles):
@@ -166,7 +167,7 @@ def activate_profile(profile_id: str) -> bool:
 
 
 def active_model_config(fallback: ModelConfig) -> ModelConfig:
-    profiles, active_id = list_profiles()
+    profiles, active_id = list_profiles(with_keys=False)
     if not active_id:
         return fallback
     profile = next(p for p in profiles if p["id"] == active_id)

@@ -48,8 +48,8 @@ body.sidebar-collapsed #sidebar { display: none; }
   display: flex; align-items: center; gap: 6px;
   padding: 8px 10px; border-bottom: 1px solid var(--border);
 }
-#sidebar-head .title { font-weight: 600; flex: 1; }
-#sidebar-head button { color: var(--muted); padding: 2px 6px; border-radius: 4px; }
+#sidebar-head .title { font-weight: 600; flex: 1; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sidebar-head button { color: var(--muted); padding: 2px 6px; border-radius: 4px; white-space: nowrap; flex: none; }
 #sidebar-head button:hover { background: var(--panel2); color: var(--text); }
 
 .mp-list { max-height: 32vh; overflow-y: auto; }

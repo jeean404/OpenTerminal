@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import webbrowser
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -187,7 +188,8 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if not target:
             raise HTTPException(400, "target required")
         name = _resolve_target_name(cfg, target)
-        worker_cfg = replace(cfg, model=active_model_config(cfg.model))
+        worker_cfg = replace(
+            cfg, model=await asyncio.to_thread(active_model_config, cfg.model))
         worker = TabWorker(worker_cfg, name)
         tabs[worker.tab_id] = worker
         return {"tab_id": worker.tab_id}
@@ -306,7 +308,14 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
                     continue
                 try:
                     await worker.handle_client(parse_client(raw))
-                except Exception:  # noqa: BLE001 - 单条消息异常不打死连接
+                except Exception as e:  # noqa: BLE001 - 单条消息异常不打死连接
+                    try:
+                        await sink.send_text(json.dumps({
+                            "type": "status",
+                            "text": f"消息处理失败：{type(e).__name__}"},
+                            ensure_ascii=False))
+                    except Exception:  # noqa: BLE001
+                        pass
                     continue
         except WebSocketDisconnect:
             pass

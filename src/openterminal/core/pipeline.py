@@ -702,6 +702,9 @@ class PipelineCore:
         # 断线自动重连成功后把历史命令重新灌进新 shell（裸 shell 阶段，
         # 回调内不可走 run()——彼时 _runner_lock 被恢复流程持有）
         self.session.on_reconnect = self._on_session_reconnect
+        pending = getattr(self, "_pending_size", None)
+        if pending:
+            await self.session.resize(*pending)
         # 阶段上报：建连（PTY/SSH+shell 启动）已完成，进入 agent 初始化
         # （shell 能力探测 + 集成脚本注入，秒级），前端浮层据此换文案
         await self.emit_msg(ServerMsg(
@@ -981,6 +984,7 @@ class PipelineCore:
         elif msg.type == "mode":
             await self.ai._switch_display(msg.text)
         elif msg.type == "resize":
+            self._pending_size = (msg.rows, msg.cols)
             if self.session is not None:
                 await self.session.resize(msg.rows, msg.cols)
         elif msg.type == "change_model":

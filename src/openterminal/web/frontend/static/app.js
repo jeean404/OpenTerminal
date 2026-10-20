@@ -291,7 +291,12 @@ class Session {
       // 嫌疑之一；回放走 _feedData 同一条 submit 拦截链，语义不旁路）
       if (!this.ws || this.ws.readyState !== 1) {
         this._keyBacklog = this._keyBacklog || [];
-        if (this._keyBacklog.length < 64) this._keyBacklog.push(d);
+        this._keyBacklogBytes = (this._keyBacklogBytes || 0) + d.length;
+        if (this._keyBacklogBytes <= 65536) this._keyBacklog.push(d);
+        else if (!this._keyBacklogWarned) {
+          this._keyBacklogWarned = true;
+          this.setStatus("closed", "连接未就绪，输入缓存已满，后续按键被丢弃");
+        }
         return;
       }
       this._feedData(d);
@@ -508,6 +513,8 @@ class Session {
       this._wsRetries = 0;
       const bl = this._keyBacklog;
       this._keyBacklog = null;
+      this._keyBacklogBytes = 0;
+      this._keyBacklogWarned = false;
       if (bl) for (const d of bl) this._feedData(d);
       // 退避重连成功的回连：worker 宽限期内 PTY 还活着，不会再发 ready，
       // 自行把状态翻回已连接（若 PTY 已死，首个键走 worker 重连链再纠正）
@@ -520,7 +527,11 @@ class Session {
         this._lastByteAt = Date.now();
         const u8 = new Uint8Array(ev.data);
         this._ingestBytes(u8);
-      } else this.handleMsg(JSON.parse(ev.data));
+      } else {
+        let m;
+        try { m = JSON.parse(ev.data); } catch (_) { return; }
+        if (m && typeof m === "object") this.handleMsg(m);
+      }
     };
     ws.onclose = ev => {
       this._pwCapture = null;   // 断线终结登录期密码捕获，重连后不残留
