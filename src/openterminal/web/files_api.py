@@ -651,6 +651,11 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
             with suppress(Exception):
                 await ch.sftp.remove(tmp)
             raise
+        except asyncio.CancelledError:
+            # 客户端取消上传：连接断开时处理器可能被取消，仍要清掉临时文件
+            with suppress(Exception):
+                await ch.sftp.remove(tmp)
+            raise
         except Exception as exc:            # noqa: BLE001
             with suppress(Exception):
                 await ch.sftp.remove(tmp)

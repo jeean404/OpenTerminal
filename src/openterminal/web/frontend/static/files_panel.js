@@ -13,6 +13,8 @@
 //
 // 列表交互：单击＝选中，双击目录＝进入、双击文件＝打开编辑器；下载是
 // 独立的 ⬇ 按钮，不跟单击绑在一起。
+const UP_MAX = 5;   // 同时上传的文件数上限，其余排队
+
 class FilePanel {
   constructor(session) {
     this.s = session;
@@ -129,6 +131,7 @@ class FilePanel {
       <div class="fp-path"></div>
       <div class="fp-list" tabindex="-1"></div>
       <div class="fp-progress" hidden><i></i></div>
+      <div class="fp-uploads" hidden></div>
       <div class="fp-foot">
         <input type="file" class="fp-input" multiple hidden>
         <button class="fp-btn fp-icon fp-up" data-act="pick" title="上传文件">⬆</button>
@@ -644,57 +647,161 @@ class FilePanel {
     }
   }
 
+  // 上传队列：最多 UP_MAX 个并发，其余排队；每项独立进度、可取消。
   upload(fileList) {
     if (!this.cwd) { this._toast("目录未就绪", true); return; }
     const files = Array.from(fileList || []);
-    let chain = Promise.resolve();
-    files.forEach((f) => { chain = chain.then(() => this._uploadOne(f)); });
-    chain.then(() => this.load(this.cwd));
+    if (!files.length) return;
+    if (!this._ups) { this._ups = []; this._upOk = false; }
+    for (const f of files) {
+      const it = {file: f, dir: this.cwd, state: "queued", xhr: null, row: null};
+      this._ups.push(it);
+      this._upRender(it);
+    }
+    this._upPump();
+  }
+
+  _upPump() {
+    let running = this._ups.filter((u) => u.state === "running").length;
+    for (const it of this._ups) {
+      if (running >= UP_MAX) break;
+      if (it.state !== "queued") continue;
+      it.state = "running";
+      running++;
+      this._upRun(it);
+    }
+  }
+
+  _upRender(it) {
+    const box = this.el.querySelector(".fp-uploads");
+    const row = document.createElement("div");
+    row.className = "fp-up";
+    row.innerHTML = `
+      <div class="fp-up-top">
+        <span class="fp-up-name"></span>
+        <span class="fp-up-pct"></span>
+        <button class="fp-act fp-up-x"></button>
+      </div>
+      <div class="fp-up-bar"><i></i></div>`;
+    row.querySelector(".fp-up-name").textContent = it.file.name;
+    row.querySelector(".fp-up-name").title = it.file.name;
+    row.querySelector(".fp-up-x").onclick = () => this._upCancel(it);
+    it.row = row;
+    box.appendChild(row);
+    box.hidden = false;
+    this._upPaint(it, 0);
+  }
+
+  _upPaint(it, frac) {
+    const row = it.row;
+    if (!row) return;
+    const pct = row.querySelector(".fp-up-pct");
+    const bar = row.querySelector(".fp-up-bar i");
+    const x = row.querySelector(".fp-up-x");
+    row.dataset.state = it.state;
+    x.textContent = it.state === "error" ? "✕" : "⏹";
+    x.title = it.state === "error" ? "关闭" : (it.state === "queued" ? "移出队列" : "取消上传");
+    if (it.state === "queued") {
+      pct.textContent = "排队中";
+      bar.style.width = "0";
+    } else if (it.state === "error") {
+      pct.textContent = it.err || "失败";
+      bar.style.width = "100%";
+    } else {
+      const total = it.file.size;
+      const p = Math.max(0, Math.min(1, frac));
+      pct.textContent = `${Math.floor(p * 100)}% · ${this._fmtSize(Math.round(p * total))}/${this._fmtSize(total)}`;
+      bar.style.width = `${Math.round(p * 100)}%`;
+    }
+  }
+
+  _upCancel(it) {
+    if (it.state === "error" || it.state === "queued") {
+      this._upRemove(it);
+      return;
+    }
+    if (it.state === "running") {
+      it.state = "canceled";
+      if (it.xhr) it.xhr.abort();           // onabort 里收尾（腾出并发槽位）
+      else this._upEnd(it);                 // 令牌弹窗等待期间没有 xhr
+      this._toast(`已取消 ${it.file.name}`);
+    }
+  }
+
+  _upRemove(it) {
+    this._ups = this._ups.filter((u) => u !== it);
+    if (it.row) it.row.remove();
+    it.row = null;
+    const box = this.el.querySelector(".fp-uploads");
+    box.hidden = !box.children.length;
+  }
+
+  // 一项结束（成功 / 失败 / 取消）：腾出槽位、补位排队项、全部结束后刷新目录
+  _upEnd(it) {
+    it.xhr = null;
+    if (it.state === "done" || it.state === "canceled") {
+      if (it.state === "done") {
+        this._upOk = true;
+        this._upPaint(it, 1);
+      }
+      setTimeout(() => this._upRemove(it), it.state === "done" ? 1200 : 0);
+    }
+    this._upPump();
+    if (!this._ups.some((u) => u.state === "queued" || u.state === "running")) {
+      if (this._upOk) this.load(this.cwd);
+      this._upOk = false;
+    }
   }
 
   // 裸 body 上传：文件名走 query（服务端剥掉目录成分），body 就是文件字节。
   // 不走 multipart——那要求 python-multipart，缺包时整个 web 服务起不来；
   // 也省掉服务端临时文件，直接流进远端。
-  _uploadOne(f) {
-    return new Promise((resolve) => {
-      const xhr = new XMLHttpRequest();
-      const url = this._url("upload", {path: this.cwd, name: f.name});
-      xhr.open("POST", url);
-      const t = getToken();
-      if (t) xhr.setRequestHeader("x-ot-token", t);
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) this._progress(true, e.loaded / e.total);
-      };
-      xhr.onload = () => {
-        this._progress(false);
-        if (xhr.status === 401) {
-          // 只有真的令牌问题才弹令牌框（业务错误也可能回 401）
-          let tokenish = true;
-          try {
-            const j = JSON.parse(xhr.responseText);
-            if (j && j.code && j.code !== "unauthorized") tokenish = false;
-          } catch (e) { /* 读不出 body 按令牌问题 */ }
-          if (tokenish) {
-            promptForToken().then(() => this._uploadOne(f).then(resolve));
-            return;
-          }
+  _upRun(it) {
+    const f = it.file;
+    const xhr = new XMLHttpRequest();
+    it.xhr = xhr;
+    xhr.open("POST", this._url("upload", {path: it.dir, name: f.name}));
+    const t = getToken();
+    if (t) xhr.setRequestHeader("x-ot-token", t);
+    const fail = (msg) => {
+      it.state = "error";
+      it.err = msg;
+      this._upPaint(it, 0);
+      this._toast(`上传失败 ${f.name}：${msg}`, true);
+      this._upEnd(it);
+    };
+    this._upPaint(it, 0);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && it.state === "running") this._upPaint(it, e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      if (it.state !== "running") return;
+      if (xhr.status === 401) {
+        // 只有真的令牌问题才弹令牌框（业务错误也可能回 401）
+        let tokenish = true;
+        try {
+          const j = JSON.parse(xhr.responseText);
+          if (j && j.code && j.code !== "unauthorized") tokenish = false;
+        } catch (e) { /* 读不出 body 按令牌问题 */ }
+        if (tokenish) {
+          it.xhr = null;
+          promptForToken().then(() => { if (it.state === "running") this._upRun(it); });
+          return;
         }
-        if (xhr.status !== 200) {
-          let detail = xhr.status;
-          try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) { /* 保持状态码 */ }
-          this._toast(`上传失败 ${f.name}：${detail}`, true);
-        } else {
-          this._toast(`已上传 ${f.name}`);
-        }
-        resolve();
-      };
-      xhr.onerror = () => {
-        this._progress(false);
-        this._toast(`上传失败 ${f.name}：网络错误`, true);
-        resolve();
-      };
-      xhr.send(f);
-    });
+      }
+      if (xhr.status !== 200) {
+        let detail = xhr.status;
+        try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) { /* 保持状态码 */ }
+        fail(String(detail));
+        return;
+      }
+      it.state = "done";
+      this._toast(`已上传 ${f.name}`);
+      this._upEnd(it);
+    };
+    xhr.onerror = () => { if (it.state === "running") fail("网络错误"); };
+    xhr.onabort = () => this._upEnd(it);
+    xhr.send(f);
   }
 
   // --- 行内操作 -------------------------------------------------------------

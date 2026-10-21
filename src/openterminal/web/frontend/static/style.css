@@ -1136,6 +1136,21 @@ body.sidebar-collapsed #btn-show-sidebar { display: block; }
   height: 3px; background: var(--bg); flex: none;
 }
 .fp-progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+/* 上传队列：每项一行（文件名 / 进度文字 / 取消）+ 细进度条 */
+.fp-uploads {
+  flex: none; max-height: 150px; overflow-y: auto;
+  border-top: 1px solid var(--border); padding: 4px 10px;
+}
+.fp-up { padding: 3px 0; }
+.fp-up-top { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.fp-up-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-up-pct { flex: none; color: var(--muted); font-size: 10px; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-up-x { flex: none; }
+.fp-up-bar { height: 3px; margin-top: 2px; background: var(--bg); border-radius: 2px; overflow: hidden; }
+.fp-up-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+.fp-up[data-state="queued"] .fp-up-name { color: var(--muted); }
+.fp-up[data-state="error"] .fp-up-pct { color: var(--danger); }
+.fp-up[data-state="error"] .fp-up-bar i { background: var(--danger); }
 .fp-foot {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 10px; border-top: 1px solid var(--border); flex: none;
