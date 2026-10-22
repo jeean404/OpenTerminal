@@ -202,9 +202,16 @@ def test_agent_exec_line_roundtrip():
 
 
 def test_toggle_line_scopes():
-    assert toggle_line("bash", True) == (EXEC_PREFIX + "__ot_off=0\r").encode()
-    assert toggle_line("bash", False) == (EXEC_PREFIX + "__ot_off=1\r").encode()
+    bash_agent = toggle_line("bash", True).decode()
+    assert bash_agent.startswith("__ot_off=0; ")
+    assert 'bind -x \'"\\C-o": __ot_submit\'' in bash_agent
+    assert 'bind \'"\\C-m": "\\C-o\\e[45~"\'' in bash_agent
+    bash_shell = toggle_line("bash", False).decode()
+    assert bash_shell.startswith(EXEC_PREFIX + "__ot_off=1; ")
+    assert 'bind \'"\\C-m": accept-line\'' in bash_shell
+    assert 'bind \'"\\C-j": accept-line\'' in bash_shell
     # PS 赋值必须显式 $global:（handler 作用域）
+    assert toggle_line("zsh", True) == (EXEC_PREFIX + "__ot_off=0\r").encode()
     assert b"$global:__ot_off=1" in toggle_line("powershell", False)
 
 
@@ -275,14 +282,13 @@ def test_bash_ai_and_exec_branches_repaint_cyan():
 
 
 def test_bash_script_restores_termios_for_child_shells():
-    """真机「sudo su - 后按键不可见」：bind -x 回调内 eval 自执行命令，bash 不
-    恢复 termios，su/ssh 子 shell 继承 readline 裸模式（-echo -icanon -isig）。
-    脚本须注入时检出 -echo 先 stty sane 自愈并快照，两处 eval 前按快照恢复。"""
+    """bind -x 回调执行命令时 bash 不恢复 termios，su/ssh 子 shell 会继承
+    readline 裸模式（-echo -icanon -isig）。hook 执行路径须在 eval 前恢复 tty。"""
     s = build_script("bash", 1)
     assert '__ot_tty_save=$(stty -g 2>/dev/null)' in s
     assert '*" -echo "*) stty sane' in s
     restore = '[ -n "$__ot_tty_save" ] && stty "$__ot_tty_save" 2>/dev/null'
-    assert s.count(restore) == 2, "__ot_run 与 off 路径各一处 eval 前恢复"
+    assert s.count(restore) == 1, "只有 hook 执行路径需要恢复 tty"
     # 恢复必须落在 eval 之前（子 shell 起步即正常 tty）
     for frag in ("__ot_run", ):
         body = s[s.index(frag + "() {"):]
@@ -391,9 +397,9 @@ def test_script_tail_absorbs_chunk_splice():
 
 
 def test_bash_pad_branch_erases_echo_line():
-    """bash pad 分支不得上移擦行：bash 5.x 的 readline 进 bind -x 回调前已
+    """bash pad 分支不得上移擦行：readline 进 bind -x 回调前已
     自行发 \\r\\x1b[K 擦掉「提示符+__ot_pad N」回显行、光标停在回显行行首
-    （真机 CentOS bash 5.1.8 字节级实测），分支再 CUU 上移一行必然把上一行
+    （CentOS bash 5.1.8 与 RHEL bash 4.4 均已实测），分支再 CUU 上移一行必然把上一行
     内容吃掉（真机：AI 蓝色提交行/命令输出行被 pad 擦掉 = 「中文提交行消失」
     根因）。分支只补 N 个换行：光标行（readline 已自清）+ N 个换行恰得 N 行
     占位。zsh 的 zle 进 widget 前不换行、无自擦，zsh 分支保持同行 \\r\\033[2K
@@ -405,8 +411,8 @@ def test_bash_pad_branch_erases_echo_line():
     assert "\\n%.0s" in branch, "bash pad 分支缺 N 个换行占位"
     repaint = _BASH_SCRIPT.split("__ot_repaint() {", 1)[1].split("__ot_run() {", 1)[0]
     assert "\\033[1A\\033[2K" in repaint, "bash 重绘缺上移擦回显行（真机白回显行根因）"
-    assert "COLUMNS" in repaint and "for ((i=0; i<k; i++))" in repaint, \
-        "bash 重绘缺折行循环擦除（真机长命令白漏半行根因）"
+    assert "COLUMNS" in repaint and "for ((i=1; i<k; i++))" in repaint, \
+        "bash 重绘折行时只应上移擦除前面的行"
     assert "same" in repaint, "bash 重绘缺同行擦除模式（真机连按 Enter 吃横幅根因）"
     empty = _BASH_SCRIPT.split("if [ -z \"$t\" ]; then", 1)[1].split("return 0", 1)[0]
     assert "same" in empty, "空行分支未按真空行/空白行分流擦除模式"
@@ -424,6 +430,19 @@ def test_bash_run_restores_readline_tty_mode():
     assert run.index('eval "$1"') < run.index('__ot_rl_tty')
     submit = _BASH_SCRIPT.split("__ot_submit() {", 1)[1].split("__ot_run(", 1)[0]
     assert "__ot_rl_tty=$(stty -g" in submit, "__ot_submit 缺裸模式快照"
+
+
+def test_bash_shell_mode_restores_line_for_native_accept():
+    """Shell 模式下若有正在途中的 hook 回调，原始输入仍交回 readline。"""
+    from openterminal.shell.integration import _BASH_SCRIPT
+    submit = _BASH_SCRIPT.split("__ot_submit() {", 1)[1].split(
+        "\n}\n# Enter 双段宏", 1)[0]
+    off = submit.split('if [ "$__ot_off" = 1 ]; then', 1)[1].split(
+        "\n  fi", 1)[0]
+    assert 'READLINE_LINE="$line"; READLINE_POINT=${#line}' in off
+    assert "__ot_clr=" in off
+    assert "eval " not in off
+    assert "__ot_repaint" not in off
 
 
 # --- ↑/↓ 历史召回 = 历史命令（用户命令 + AI 工具命令），不含自然语言 ---
@@ -521,19 +540,9 @@ def test_script_tails_purge_legacy_history_junk():
 
 def test_script_tails_restore_history_quiet_window():
     """静默窗口必须按快照收口：用户原 HISTCONTROL / hist_ignore_space 还原；
-    快照缺失（静默行没跑过）不得动用户设置。
-
-    bash 的收口在注入链末行（bind 行尾部）而不在 eval 脚本里：eval 一执行
-    就收口的话，还没发的 bind 行落进历史（前导空格只在 ignorespace 仍开时
-    拦得住）——↑ 召回一条 bind 垃圾，与分片污染同款报障。"""
+    快照缺失（静默行没跑过）不得动用户设置。"""
     bash = build_script("bash", 1)
-    assert '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"' not in bash
-    from openterminal.shell.integration import injection_lines
-    last = injection_lines("bash", 1, "-d")[-1].decode()
-    assert "bind -x" in last, "收口须与 bind 同行（同一原生 accept-line）"
-    assert last.rstrip().endswith(
-        '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"')
-    assert last.index("bind -x") < last.index("HISTCONTROL=")
+    assert '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"' in bash
     zsh = build_script("zsh", 1)
     assert ('[[ -n "${__ot_his+x}" && "$__ot_his" != on ]]'
             ' && unsetopt hist_ignore_space') in zsh.replace(" 2>/dev/null", "")
@@ -673,23 +682,13 @@ def test_hook_unwraps_quoted_exec_body():
 
 
 
-def test_bash_repaint_same_row_erase_on_bash5():
-    """bash 5.x 重绘必须「k-1 次上移擦折行段 + 同行擦」，不得整段上移。
-
-    bash 5.x 的 readline 进 bind -x 回调前自己发 CR+EL 把回显行擦净、光标停在
-    回显行行首（真机 2026-10-08 字节级实测 CentOS bash 5.1.8：回车后先到
-    raw 4 字节 CR+EL，且早于 6337 上报标记）。此时重绘再 CUU k 次就上到回显行的
-    上一行、连真实输出一起吃掉——每命令吃一行（真机：sudo su - 的 Last login
-    行、上一条命令的青色行逐条消失，屏幕逐命令上塌）。bash 4 及更早按旧实测
-    （C-m 已画换行、光标在回显行下一行行首）保留 k 次上移擦，未在真机复核。
-    """
+def test_bash_repaint_uses_readline_cursor_position():
+    """各 Bash 版本都按 readline 回调时的光标位置同行擦，避免多删上一行。"""
     from openterminal.shell.integration import _BASH_SCRIPT
     repaint = _BASH_SCRIPT.split("__ot_repaint() {", 1)[1].split("__ot_run() {", 1)[0]
-    assert "BASH_VERSINFO" in repaint, "重绘未按 bash 大版本分流擦行几何"
-    v5, v4 = repaint.split("BASH_VERSINFO", 1)[1].split("else", 1)
-    assert "for ((i=1; i<k; i++))" in v5, "bash 5.x 分支须只上移 k-1 次擦折行段"
-    assert chr(92) + "r" + chr(92) + "033[2K" in v5, "bash 5.x 分支缺同行擦除"
-    assert "for ((i=0; i<k; i++))" in v4, "bash 4 分支须保留旧的 k 次上移擦"
+    assert "BASH_VERSINFO" not in repaint, "重绘几何不得按版本猜测"
+    assert "for ((i=1; i<k; i++))" in repaint, "只上移擦除前面的折行段"
+    assert "printf '\\r\\033[2K'" in repaint, "当前行须原位擦除"
 
 
 # --- 宏式 Enter（bind -x hook + accept-line）------------------------------

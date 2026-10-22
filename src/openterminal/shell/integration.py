@@ -160,31 +160,25 @@ if [ -z "$__ot_ps1_orig" ]; then __ot_ps1_orig="$PS1"; fi
 # 原生 PS1 存 __ot_ps1_orig 备用
 PS1='\[\033]133;A;'"$__ot_i"'\007\][\u@\H \w]\$ \[\033]133;B;'"$__ot_i"'\007\]'
 # 提交后重绘（§5.6）：命令在 bind -x 回调里自执行（宏尾 accept 的是空行），
-# 进回调前已把 \C-m 的换行画完——光标在回显行的下一行行首（真机 bash 5.1 对照
-# 实验：回调内 \r\033[2K 只擦到空行，白回显行恒漏）。故先 CUU 上一行回到回显行、
-# 清行、提示符（默认色）+命令重画、\n 收束本行（输出紧随其后）。
+# 进回调前 readline 已用 CR+EL 清过回显行，光标停在回显行行首（Bash 4.4
+# 与 5.1 均实测如此）。折行部分向上擦净后，在当前行重画提示符+命令并换行。
 # 颜色 $2 可选：默认 51 青（工具命令/用户命令），AI 自然语言行传 33 蓝
 # （Workbench 观感：用户输入蓝、命令青）。
 # bash readline 不支持输入中变色，仅提交后变色。
 __ot_repaint() {
   local p="${PWD/#$HOME/\~}" c='#'
   [ "$EUID" != 0 ] && c='$'
-  # 回显行可能折行（长命令）：按 提示符+文本 显示宽算视觉行数 K，循环 CUU+EL
-  # K 次把回显的每个折行段全擦掉——只擦一行会漏首折行段（真机「__ot_exec__
-  # 长命令白漏半行」根因）。宽算法：字符数 + UTF-8 额外字节/2（CJK/emoji 双宽
-  # 恰准）；向下取整宁漏勿过——多擦会毁上一行真实输出。
+  # 回显行可能折行（长命令）：按提示符+文本显示宽算视觉行数 K；readline 已清
+  # 当前行，只需上移 K-1 次擦掉折行段。宽算法：字符数 + UTF-8 额外字节/2
+  #（CJK/emoji 双宽恰准）；向下取整宁漏勿过，避免多擦上一行真实输出。
   local prompt="[${USER:-$(id -un)}@$HOSTNAME $p]$c "
   local s="$prompt$1" ch by w k i
   # $3=same：同行擦除。空行提交时 readline 不为 \C-m 画换行（无回显字符可收束），
   # 光标仍停在提示符行——上移擦会吃掉上一行（真机：连按 Enter 逐行吃掉连接
   # 横幅、提示符不前进＝"Enter 不换行"根因）。
-  # 非空行在 bash 5.x 上同理：readline 进 bind -x 回调前自己发 \r\033[K 把回显行
-  # 擦净、光标停在回显行行首（真机 2026-10-08 字节级实测 CentOS bash 5.1.8：
-  # keys=b'\r' → raw b'\r\x1b[K'，且早于 6337 上报标记）。此时再 CUU 就上到回显
-  # 行的上一行、连真实输出一起擦掉——每命令吃一行（真机：sudo su - 的 Last
-  # login 行、上一条命令的青色行逐条消失，屏幕逐命令上塌）。故 5.x 走「k-1 次
-  # 上移擦折行段 + 同行擦」；bash 4 及更早按旧实测（\C-m 已画换行、光标在回显
-  # 行下一行行首）保留 k 次上移擦——4.x 未在真机复核，宁保守不动。
+  # 非空行的 readline 在 bind -x 回调前先发 CR+EL 清除回显行，光标停在当前行
+  # 行首；远端 RHEL Bash 4.4 的自动命令集日志也确认该字节序列。若按版本上移 K
+  # 次，会多擦掉上一条命令（例如 sudo su -）；因此所有版本统一只上移 K-1 次。
   if [ "${3:-up}" = same ]; then
     printf '\r\033[2K'
   else
@@ -193,12 +187,8 @@ __ot_repaint() {
     w=$(( ch + (by - ch) / 2 ))
     k=$(( (w + ${COLUMNS:-80} - 1) / ${COLUMNS:-80} ))
     (( k < 1 )) && k=1
-    if (( ${BASH_VERSINFO[0]:-5} >= 5 )); then
-      for ((i=1; i<k; i++)); do printf '\033[1A\033[2K'; done
-      printf '\r\033[2K'
-    else
-      for ((i=0; i<k; i++)); do printf '\033[1A\033[2K'; done
-    fi
+    for ((i=1; i<k; i++)); do printf '\033[1A\033[2K'; done
+    printf '\r\033[2K'
   fi
   printf '%s\033[38;5;%sm%s\033[0m\n' "$prompt" "${2:-51}" "$1"
 }
@@ -339,16 +329,8 @@ __ot_submit() {
     return 0
   fi
   if [ "$__ot_off" = 1 ]; then
-    exp=$(builtin history -p -- "$line" 2>/dev/null) || exp=$line
-    [ -n "$exp" ] || exp=$line
-    history -s -- "$line" 2>/dev/null
-    READLINE_LINE=""; READLINE_POINT=0
-    printf '\r\n'
-    (exit ${__ot_last_ec:-0}) 2>/dev/null
-    [ -n "$__ot_tty_save" ] && stty "$__ot_tty_save" 2>/dev/null
-    eval "$exp"
-    __ot_last_ec=$?
-    [ -n "$__ot_rl_tty" ] && stty "$__ot_rl_tty" 2>/dev/null
+    READLINE_LINE="$line"; READLINE_POINT=${#line}
+    __ot_clr=
     return 0
   fi
   case "$t" in
@@ -469,10 +451,10 @@ if [ -n "$HISTFILE" ] && [ -r "$HISTFILE" ] \
   rm -f "$__ot_cf"; unset __ot_cf
 fi
 unset __ot_jk
-# 连接期静默窗口收口挪到注入链末行（injection_lines 的 bind 行尾部）：
-# 本脚本经 eval 执行时 bind 行还没发，此处收口会让 bind 行落进历史
-#（↑ 召回一条 ~200B 的 bind 垃圾，与用户报障过的分片污染同款）。
-# 快照缺失（静默行没跑过）时末行同样不动用户 HISTCONTROL。
+# 连接期静默窗口收口：按 line A 快照还原（用户原本开着 ignorespace 则
+# 保持开；快照缺失=静默行没跑过，不动用户 HISTCONTROL）。与 zsh 同位
+#（脚本尾），不在 injection_lines 的 bind 行上。
+[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"
 # 尾部吸收行：分片二次追加的拼接点必须落在本行参数上，
 # 否则上一行 export -f 名单会被拼接改名成不存在的假函数名
 : __ot_script_end
@@ -981,16 +963,13 @@ def injection_lines(shell: str, instance: int,
         # 中间键用 \C-o（单字节 0x0F）而非 \e[44~（多字节 CSI 序列）——
         # bash 4.2 的 bind -x 在宏展开时对多字节序列的 keymap 查找失败，
         # 单字节键无此问题（真机 RHEL 7.9 bash 4.2.46 验证）。
-        # 静默窗口收口跟在 bind 后（不再放在 eval 脚本尾）：收口太早会让
-        # 本行落进历史（前导空格只在 ignorespace 仍开时拦得住），↑ 召回
-        # 一条 bind 垃圾。本行发完时 \C-m 才换绑，整行走的仍是原生
-        # accept-line；快照缺失（静默行没跑过）不动用户 HISTCONTROL。
+        # 静默窗口收口在 _BASH_SCRIPT 尾（与 zsh 同位），本行只负责换绑。
+        # 本行发完时 \C-m 才换绑，整行走的仍是原生 accept-line。
         lines.append(
             "bind -x '\"\\C-o\": __ot_submit'"
             " 2>/dev/null; bind '\"\\e[45~\": accept-line'"
             " 2>/dev/null; bind '\"\\C-m\": \"\\C-o\\e[45~\"'"
-            " 2>/dev/null; bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null"
-            "; [ -n \"${__ot_hc+x}\" ] && HISTCONTROL=\"$__ot_hc\"")
+            " 2>/dev/null; bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null")
     # 前导空格：配合 history_quiet_line 的静默窗口（bash ignorespace / zsh
     # hist_ignore_space）让分片原生跳过入史——用户报障「↑ 召回的全是
     # __ot_inj base64 分片」的根修。hook 在位时首词剥离不受影响，
@@ -1118,6 +1097,20 @@ def toggle_line(shell: str, agent_on: bool) -> bytes:
     PowerShell 的赋值必须显式 ``$global:``——iex 在函数/handler 作用域里跑，
     裸赋值会随作用域销毁（bash 函数内裸赋值默认写全局变量，无此问题）。
     """
+    if shell == "bash":
+        agent_bindings = (
+            "bind -x '\"\\C-o\": __ot_submit' 2>/dev/null; "
+            "bind '\"\\e[45~\": accept-line' 2>/dev/null; "
+            "bind '\"\\C-m\": \"\\C-o\\e[45~\"' 2>/dev/null; "
+            "bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null"
+        )
+        if agent_on:
+            return f"__ot_off=0; {agent_bindings}".encode() + b"\r"
+        shell_bindings = (
+            "bind '\"\\C-m\": accept-line' 2>/dev/null; "
+            "bind '\"\\C-j\": accept-line' 2>/dev/null"
+        )
+        return f"{EXEC_PREFIX}__ot_off=1; {shell_bindings}".encode() + b"\r"
     val = 0 if agent_on else 1
     name = "$global:__ot_off" if shell == "powershell" else "__ot_off"
     return f"{EXEC_PREFIX}{name}={val}".encode() + b"\r"
