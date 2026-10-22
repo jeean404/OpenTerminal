@@ -469,9 +469,10 @@ if [ -n "$HISTFILE" ] && [ -r "$HISTFILE" ] \
   rm -f "$__ot_cf"; unset __ot_cf
 fi
 unset __ot_jk
-# 连接期静默窗口收口（history_quiet_line 设 ignorespace 让前导空格注入行
-# 原生跳过入史；快照缺失=静默行没跑过，不动用户 HISTCONTROL）
-[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"
+# 连接期静默窗口收口挪到注入链末行（injection_lines 的 bind 行尾部）：
+# 本脚本经 eval 执行时 bind 行还没发，此处收口会让 bind 行落进历史
+#（↑ 召回一条 ~200B 的 bind 垃圾，与用户报障过的分片污染同款）。
+# 快照缺失（静默行没跑过）时末行同样不动用户 HISTCONTROL。
 # 尾部吸收行：分片二次追加的拼接点必须落在本行参数上，
 # 否则上一行 export -f 名单会被拼接改名成不存在的假函数名
 : __ot_script_end
@@ -980,11 +981,16 @@ def injection_lines(shell: str, instance: int,
         # 中间键用 \C-o（单字节 0x0F）而非 \e[44~（多字节 CSI 序列）——
         # bash 4.2 的 bind -x 在宏展开时对多字节序列的 keymap 查找失败，
         # 单字节键无此问题（真机 RHEL 7.9 bash 4.2.46 验证）。
+        # 静默窗口收口跟在 bind 后（不再放在 eval 脚本尾）：收口太早会让
+        # 本行落进历史（前导空格只在 ignorespace 仍开时拦得住），↑ 召回
+        # 一条 bind 垃圾。本行发完时 \C-m 才换绑，整行走的仍是原生
+        # accept-line；快照缺失（静默行没跑过）不动用户 HISTCONTROL。
         lines.append(
             "bind -x '\"\\C-o\": __ot_submit'"
             " 2>/dev/null; bind '\"\\e[45~\": accept-line'"
             " 2>/dev/null; bind '\"\\C-m\": \"\\C-o\\e[45~\"'"
-            " 2>/dev/null; bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null")
+            " 2>/dev/null; bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null"
+            "; [ -n \"${__ot_hc+x}\" ] && HISTCONTROL=\"$__ot_hc\"")
     # 前导空格：配合 history_quiet_line 的静默窗口（bash ignorespace / zsh
     # hist_ignore_space）让分片原生跳过入史——用户报障「↑ 召回的全是
     # __ot_inj base64 分片」的根修。hook 在位时首词剥离不受影响，

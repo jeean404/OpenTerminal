@@ -8,7 +8,7 @@
 // 红线⑨：审批卡「执行」按钮几何上在盒内，但真鼠标点不到
 //   （既有冒烟用 el.click() 程序化点击，绕过命中测试，测不出这种情况）。
 //
-// 拓扑 = docker ot-repro（ubuntu@127.0.0.1:2222 跳板机 -> xiaojian 远端
+// 拓扑 = docker ot-repro（ubuntu@127.0.0.1:2222 跳板机 -> testuser 远端
 // bash -> `sudo su -` 切 root 登录壳，PROMPT_COMMAND/PS1 被重置 = hook 掉线）。
 // 用法: node tools/verify-web/repro-connect-chrome.cjs [port]
 //   前置: docker 容器 ot-repro 已起（.tmp/repro/setup-container.sh）
@@ -22,7 +22,7 @@ const PORT = Number(process.argv[2] || 8271);
 const SSH_PORT = Number(process.env.OT_REPRO_SSH_PORT || 2222);
 const TARGET = "jump";
 const HOME = path.join(lib.OUT, "connect-chrome-home");
-const PW = { ubuntu: "ub123456", xiaojian: "xj123456", root: "root123456" };
+const PW = { ubuntu: "ub123456", testuser: "xj123456", root: "root123456" };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const results = [];
@@ -74,7 +74,7 @@ async function butlerTick(page) {
         /密码|令牌/.test(title)) {
       const v = document.getElementById("modal-value");
       const rem = document.getElementById("modal-remember");
-      let val = pw.xiaojian;
+      let val = pw.testuser;
       if (body.indexOf("ubuntu") !== -1) val = pw.ubuntu;
       else if (body.indexOf("root") !== -1) val = pw.root;
       if (v) v.value = val;
@@ -89,7 +89,7 @@ async function butlerTick(page) {
 // （见 verify-post-final-freeze-harness）——只挂模态代答会一直卡在密码提示符。
 // 三处真机坑（都伪装成产品 bug）：
 //   ① 只看最后一行不够：PTY 会把「Permission denied…」与下一条提示符粘成一行；
-//   ② `[sudo] password for xiaojian:` 行尾是用户名不是 password，按行尾判定必漏；
+//   ② `[sudo] password for testuser:` 行尾是用户名不是 password，按行尾判定必漏；
 //   ③ 不能全屏正则抢第一个匹配：滚动历史里还留着上一条连接的旧密码提示符，
 //      会把外层主机的密码敲进内层 ssh（真机 Permission denied 连环）。
 // 故取**最后一次**形状匹配，且要求其后只剩冒号/空白。
@@ -275,7 +275,7 @@ function prepareHome() {
       OPENTERMINAL_HOME: HOME, PYTHONIOENCODING: "utf-8",
       OT_SEED_NAME: TARGET, OT_SEED_HOST: "127.0.0.1",
       OT_SEED_PORT: String(SSH_PORT), OT_SEED_USER: "ubuntu",
-      OT_SEED_COMMANDS: "ssh xiaojian@127.0.0.1",
+      OT_SEED_COMMANDS: "ssh testuser@127.0.0.1",
     }),
     encoding: "utf8",
   });
@@ -407,13 +407,13 @@ async function main() {
     record("A0 侧栏选中 " + TARGET, picked, picked ? "ok" : "侧栏无此目标");
     if (!picked) return finish(logPath);
 
-    // 等连接 + 连接后命令（ssh xiaojian）落到远端**提示符**。
-    // 不能只找 `xiaojian@`：内层 ssh 的密码提示符也含它，会把「卡在密码上」
+    // 等连接 + 连接后命令（ssh testuser）落到远端**提示符**。
+    // 不能只找 `testuser@`：内层 ssh 的密码提示符也含它，会把「卡在密码上」
     // 误判成「已就绪」（本轮 A1 假 PASS 的成因）。要 shell 提示符收尾。
     let ready = false;
     for (let i = 0; i < 180 && !ready; i++) {
       const t = await lib.snapshot(page);
-      if (/xiaojian@[^\n]*[#$%]\s*$/.test(t.replace(/\s+$/, ""))) ready = true;
+      if (/testuser@[^\n]*[#$%]\s*$/.test(t.replace(/\s+$/, ""))) ready = true;
       else await sleep(500);
     }
     await sleep(1800);

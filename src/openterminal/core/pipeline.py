@@ -880,8 +880,13 @@ class PipelineCore:
                         # sink 可能在写入停顿期已捕获提示符；drain 未再见时不覆盖
                         if drained is not None:
                             prompt = drained
-                        if prompt is not None:
-                            break
+                        # 这里不得因「提示符已到」提前停发：bash 的注入链是
+                        # base64…→ eval → bind 三段，eval 一落地 hook 的 PS1
+                        # 就带 OSC 标记地画提示符——在它处 break 会把末行
+                        # bind 丢下，\C-m 维持原生 accept-line，自然语言被
+                        # shell 当命令执行（真机 CI：'please' not found）。
+                        # 提示符只是「hook 已活」的成功凭据，留给循环结束
+                        # 后的等待逻辑消费；本循环的职责是把每一行都发完。
                         if _PS2_ECHO_RE.search(bytes(ps2_buf)):
                             _dbg("setup: 续行提示符指纹，清行重试",
                                  f"attempt={_attempt}")

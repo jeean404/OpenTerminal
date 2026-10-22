@@ -521,9 +521,19 @@ def test_script_tails_purge_legacy_history_junk():
 
 def test_script_tails_restore_history_quiet_window():
     """静默窗口必须按快照收口：用户原 HISTCONTROL / hist_ignore_space 还原；
-    快照缺失（静默行没跑过）不得动用户设置。"""
+    快照缺失（静默行没跑过）不得动用户设置。
+
+    bash 的收口在注入链末行（bind 行尾部）而不在 eval 脚本里：eval 一执行
+    就收口的话，还没发的 bind 行落进历史（前导空格只在 ignorespace 仍开时
+    拦得住）——↑ 召回一条 bind 垃圾，与分片污染同款报障。"""
     bash = build_script("bash", 1)
-    assert '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"' in bash
+    assert '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"' not in bash
+    from openterminal.shell.integration import injection_lines
+    last = injection_lines("bash", 1, "-d")[-1].decode()
+    assert "bind -x" in last, "收口须与 bind 同行（同一原生 accept-line）"
+    assert last.rstrip().endswith(
+        '[ -n "${__ot_hc+x}" ] && HISTCONTROL="$__ot_hc"')
+    assert last.index("bind -x") < last.index("HISTCONTROL=")
     zsh = build_script("zsh", 1)
     assert ('[[ -n "${__ot_his+x}" && "$__ot_his" != on ]]'
             ' && unsetopt hist_ignore_space') in zsh.replace(" 2>/dev/null", "")

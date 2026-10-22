@@ -141,8 +141,8 @@ test("canCut：L0 标记 → L1 提示符 → L2 静默 → L3 不切", () => {
 
 test("isShellSwitch：只认我方敲进去的换壳/跳板指令", () => {
   for (const ln of [
-    "sudo su -", "sudo su", "su -", "su root", "su - xiaojian",
-    "ssh xiaojian@10.0.0.12", "ssh -p 2222 ubuntu@127.0.0.1",
+    "sudo su -", "sudo su", "su -", "su root", "su - testuser",
+    "ssh testuser@10.0.0.12", "ssh -p 2222 ubuntu@127.0.0.1",
     "  sudo   su  -  ", "exec bash", "login", "screen -r",
   ]) {
     assert.equal(isShellSwitch(ln), true, "应判换壳: " + JSON.stringify(ln));

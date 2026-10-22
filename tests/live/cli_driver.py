@@ -106,6 +106,10 @@ def make_scripted_runner(scenario: str, core: "CliCore") -> type:
             self.est_input_tokens = 0
             self.est_output_tokens = 0
 
+        def claim_seq(self, name, command):
+            # 审批认领表（真实 TaskRunner 同名接口）：脚本场景无工具宣告，恒无卡
+            return None
+
         def _emit(self, kind: str, text: str = "") -> None:
             if self.on_event is not None:
                 self.on_event(TaskEvent(kind, text=text))
