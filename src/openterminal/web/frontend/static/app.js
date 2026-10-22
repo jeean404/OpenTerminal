@@ -180,10 +180,50 @@ class Session {
       this._layoutObserver = new ResizeObserver(() => {
         cancelAnimationFrame(this._layoutFrame);
         this._layoutFrame = requestAnimationFrame(() => {
-          if (!this._dead) this.fit();
+          if (!this._dead) {
+            this.fit();
+            this._followBlockStream();
+          }
         });
       });
       this._layoutObserver.observe(stage);
+      const blocks = stage.querySelector(".ot-blocks");
+      if (blocks) {
+        this._stageContentObserver = new ResizeObserver(() => {
+          this._followBlockStream();
+        });
+        this._stageContentObserver.observe(blocks);
+      }
+    }
+  }
+
+  _stageFollowTop(stage) {
+    const blocks = stage.querySelector(".ot-blocks");
+    if (!blocks) return Math.max(0, stage.scrollHeight - stage.clientHeight);
+    const bottom = blocks.getBoundingClientRect().bottom
+      - stage.getBoundingClientRect().top + stage.scrollTop;
+    return Math.max(0, bottom - stage.clientHeight);
+  }
+
+  _followBlockStream() {
+    if (this._dead || !this.paneEl) return;
+    const stage = this.paneEl.querySelector(".ot-stage");
+    if (!stage) return;
+    stage.scrollTop = this._stageFollowTop(stage);
+  }
+
+  _ensureTerminalCursorVisible() {
+    if (!this.paneEl) return;
+    const stage = this.paneEl.querySelector(".ot-stage");
+    const cursor = this.paneEl.querySelector(".xterm-cursor");
+    if (!stage || !cursor) return;
+    const stageRect = stage.getBoundingClientRect();
+    const cursorRect = cursor.getBoundingClientRect();
+    if (cursorRect.height === 0) return;
+    if (cursorRect.bottom > stageRect.bottom) {
+      stage.scrollTop += cursorRect.bottom - stageRect.bottom;
+    } else if (cursorRect.top < stageRect.top) {
+      stage.scrollTop -= stageRect.top - cursorRect.top;
     }
   }
 
@@ -266,6 +306,7 @@ class Session {
     // 单管线：唯一渲染实例，SSH 与 Agent 模式共用（命令/AI 输出全在网格里）
     const term = new Terminal({
       cursorBlink: true, fontSize: 13, scrollback: 5000, convertEol: true,
+      scrollOnUserInput: true,
       // registerMarker（卡片层锚定）在 xterm 5+ 为稳定 API；
       // allowProposedApi 保留以防后续接入装饰类扩展
       allowProposedApi: true,
@@ -290,6 +331,10 @@ class Session {
     // 其余按键原样透传，命令执行/英文自然语言仍由 shell hook 分类（行为不变）。
     // 全屏应用（vim/htop 走 alternate buffer）不拦截，Enter 照常送达。
     term.onData(d => {
+      if (d.includes("\r")) {
+        term.scrollToBottom();
+        this._ensureTerminalCursorVisible();
+      }
       // WS 未就绪（连接中/重连间隙）不丢键：缓存待开连后按序回放。旧实现
       // 静默丢弃——刚开页就打字时前几个 IME 提交整段消失（「整行只剩尾巴」
       // 嫌疑之一；回放走 _feedData 同一条 submit 拦截链，语义不旁路）
@@ -618,7 +663,11 @@ class Session {
   _writeTerm(u8) {
     if (this._dead) return;
     this._lastByteAt = Date.now();
-    this.term.write(u8);
+    this.term.write(u8, () => {
+      if (this._dead) return;
+      this.term.scrollToBottom();
+      this._ensureTerminalCursorVisible();
+    });
     this._scheduleHeal();
   }
 
@@ -3333,6 +3382,7 @@ if (inView) {
   close() {
     this._dead = true;
     if (this._layoutObserver) this._layoutObserver.disconnect();
+    if (this._stageContentObserver) this._stageContentObserver.disconnect();
     if (this._layoutFrame != null) cancelAnimationFrame(this._layoutFrame);
     if (this._healT) { clearTimeout(this._healT); this._healT = null; }
     if (this._wsRetryT) { clearTimeout(this._wsRetryT); this._wsRetryT = null; }

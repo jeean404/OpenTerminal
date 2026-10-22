@@ -73,6 +73,9 @@ function makeFakeTerm(lines, cursor) {
       }, 0);
     },
     buffer: {active: null, normal: null},
+    // xterm.js 真实 Terminal 的 API：_writeTerm 的 write 回调会调它，
+    // 假对象缺了会让整段 write 回调抛 TypeError（补丁新增调用点）。
+    scrollToBottom() {},
   };
   const buf = {
     get length() { return state.lines.length; },
