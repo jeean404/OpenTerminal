@@ -58,56 +58,7 @@
   --ap-blue: #6f92ff;
 }
 
-:root[data-wallpaper="aurora"] {
-  --wallpaper: radial-gradient(ellipse at 14% 8%, rgba(26, 144, 156, .32), transparent 38%),
-    radial-gradient(ellipse at 86% 92%, rgba(88, 75, 176, .30), transparent 42%),
-    linear-gradient(135deg, #0c1723, #10202a 48%, #111326);
-}
-:root[data-wallpaper="twilight"] {
-  --wallpaper: radial-gradient(ellipse at 82% 12%, rgba(142, 74, 190, .35), transparent 42%),
-    radial-gradient(ellipse at 12% 90%, rgba(52, 85, 171, .30), transparent 45%),
-    linear-gradient(140deg, #111326, #1b1730 52%, #10192a);
-}
-:root[data-wallpaper="ocean"] {
-  --wallpaper: radial-gradient(ellipse at 8% 72%, rgba(9, 125, 148, .34), transparent 40%),
-    radial-gradient(ellipse at 92% 18%, rgba(39, 101, 163, .30), transparent 43%),
-    linear-gradient(145deg, #091722, #0d2532 52%, #101b2c);
-}
-:root[data-wallpaper="sunset"] {
-  --wallpaper: radial-gradient(ellipse at 84% 12%, rgba(199, 97, 69, .30), transparent 40%),
-    radial-gradient(ellipse at 8% 88%, rgba(153, 67, 116, .30), transparent 43%),
-    linear-gradient(135deg, #211722, #281b28 48%, #171a2a);
-}
-:root[data-wallpaper="forest"] {
-  --wallpaper: radial-gradient(ellipse at 15% 15%, rgba(47, 127, 87, .30), transparent 40%),
-    radial-gradient(ellipse at 90% 86%, rgba(96, 130, 61, .24), transparent 43%),
-    linear-gradient(145deg, #101d1b, #14251f 52%, #151e20);
-}
-:root[data-wallpaper="desert"] {
-  --wallpaper: radial-gradient(ellipse at 88% 10%, rgba(184, 124, 53, .28), transparent 42%),
-    radial-gradient(ellipse at 8% 92%, rgba(157, 82, 59, .28), transparent 44%),
-    linear-gradient(135deg, #211b1a, #29211d 52%, #1c1b20);
-}
-:root[data-wallpaper="glacier"] {
-  --wallpaper: radial-gradient(ellipse at 12% 12%, rgba(73, 138, 177, .31), transparent 43%),
-    radial-gradient(ellipse at 92% 92%, rgba(95, 116, 174, .28), transparent 44%),
-    linear-gradient(145deg, #111a27, #172331 50%, #171b2b);
-}
-:root[data-wallpaper="blossom"] {
-  --wallpaper: radial-gradient(ellipse at 85% 12%, rgba(180, 88, 139, .30), transparent 42%),
-    radial-gradient(ellipse at 10% 92%, rgba(118, 79, 161, .30), transparent 43%),
-    linear-gradient(135deg, #201723, #251a2b 52%, #191827);
-}
-:root[data-wallpaper="nebula"] {
-  --wallpaper: radial-gradient(ellipse at 18% 16%, rgba(105, 68, 188, .34), transparent 40%),
-    radial-gradient(ellipse at 90% 84%, rgba(38, 108, 179, .32), transparent 43%),
-    linear-gradient(145deg, #111326, #17172d 50%, #101927);
-}
-:root[data-wallpaper="graphite"] {
-  --wallpaper: radial-gradient(ellipse at 8% 18%, rgba(82, 117, 130, .24), transparent 40%),
-    radial-gradient(ellipse at 88% 86%, rgba(91, 100, 129, .24), transparent 43%),
-    linear-gradient(140deg, #13171c, #1b2027 52%, #141820);
-}
+/* 桌面背景渐变与设置页预览共用同一份定义（见 .wallpaper-preview 段） */
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }   /* author display 不覆盖 hidden 语义 */
@@ -131,7 +82,7 @@ body::before {
   background-position: var(--wallpaper-position, center);
   background-repeat: var(--wallpaper-repeat, no-repeat);
   background-size: var(--wallpaper-size, cover);
-  opacity: var(--wallpaper-opacity, .35);
+  opacity: var(--wallpaper-opacity, .7);
   filter: brightness(var(--wallpaper-brightness, 100%));
 }
 body::after {
@@ -164,12 +115,53 @@ body.sidebar-collapsed #sidebar { display: none; }
 
 #sidebar-head {
   display: flex; align-items: center; gap: 6px;
-  padding: 8px 10px; border-bottom: 1px solid var(--border);
+  padding: 10px 10px 10px 14px; border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel2) 50%, transparent);
 }
-#sidebar-head .title { font-weight: 600; flex: 1; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-#sidebar-head button { color: var(--muted); padding: 2px 6px; border-radius: 4px; white-space: nowrap; flex: none; }
-#sidebar-head button:hover { background: var(--panel2); color: var(--text); }
+#sidebar-head .title {
+  font-weight: 700; font-size: 14px; letter-spacing: .02em; flex: 1;
+  white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+#btn-toggle-sidebar {
+  flex: none; width: 28px; height: 28px; border-radius: 8px;
+  color: var(--muted); font-size: 15px; line-height: 1;
+}
+#btn-toggle-sidebar:hover { background: var(--panel2); color: var(--text); }
+
+/* 操作区：主按钮（添加远程）+ 方形图标按钮（设置），与搜索框同宽对齐 */
+#sidebar-actions { display: flex; gap: 8px; padding: 12px 10px 0; }
+.side-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  height: 40px; border-radius: 11px; white-space: nowrap; flex: none;
+  font-size: 13.5px; font-weight: 600;
+}
+.side-btn svg { flex: none; }
+.side-btn-primary {
+  flex: 1; min-width: 0; padding: 0 14px; color: #fff;
+  background: linear-gradient(135deg, var(--accent),
+    color-mix(in srgb, var(--accent) 66%, #1b1030));
+  border: 1px solid color-mix(in srgb, var(--accent) 70%, #fff);
+  box-shadow: 0 4px 14px var(--accent-soft), inset 0 1px 0 rgba(255, 255, 255, .22);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+}
+.side-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 38%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, .28);
+  transform: translateY(-1px);
+}
+.side-btn-icon {
+  width: 40px; color: var(--muted);
+  background: color-mix(in srgb, var(--panel2) 70%, transparent);
+  border: 1px solid var(--border);
+}
+.side-btn-icon:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel2));
+}
+.side-btn-icon:hover svg { transform: rotate(45deg); }
+.side-btn-icon svg { transition: transform .3s ease; }
 
 .mp-active { color: var(--ok); white-space: nowrap; }
 .mp-error { color: var(--danger); }
@@ -245,6 +237,7 @@ body.settings-open #panes { display: none; }
 .theme-option strong { margin-top: 4px; font-size: 12px; }
 .theme-option small { color: var(--muted); font-size: 11px; }
 .theme-preview {
+  width: 100%; align-self: stretch;
   height: 76px; display: flex; align-items: flex-start; gap: 5px;
   padding: 10px; border: 1px solid var(--border); border-radius: 5px;
 }
@@ -278,56 +271,56 @@ body.settings-open #panes { display: none; }
   border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
 }
 .wallpaper-preview {
-  display: block; height: 76px; border-radius: 4px;
+  display: block; width: 100%; align-self: stretch; height: 76px; border-radius: 4px;
   background-image: var(--wallpaper); background-size: cover;
   border: 1px solid rgba(255, 255, 255, .12);
 }
-.wallpaper-preview[data-wallpaper-preview="aurora"] {
+:root[data-wallpaper="aurora"], .wallpaper-preview[data-wallpaper-preview="aurora"] {
   --wallpaper: radial-gradient(ellipse at 14% 8%, rgba(26,144,156,.62), transparent 55%),
     radial-gradient(ellipse at 86% 92%, rgba(88,75,176,.58), transparent 60%),
     linear-gradient(135deg,#0c1723,#10202a 48%,#111326);
 }
-.wallpaper-preview[data-wallpaper-preview="twilight"] {
+:root[data-wallpaper="twilight"], .wallpaper-preview[data-wallpaper-preview="twilight"] {
   --wallpaper: radial-gradient(ellipse at 82% 12%,rgba(142,74,190,.65),transparent 58%),
     radial-gradient(ellipse at 12% 90%,rgba(52,85,171,.58),transparent 60%),
     linear-gradient(140deg,#111326,#1b1730 52%,#10192a);
 }
-.wallpaper-preview[data-wallpaper-preview="ocean"] {
+:root[data-wallpaper="ocean"], .wallpaper-preview[data-wallpaper-preview="ocean"] {
   --wallpaper: radial-gradient(ellipse at 8% 72%,rgba(9,125,148,.65),transparent 56%),
     radial-gradient(ellipse at 92% 18%,rgba(39,101,163,.60),transparent 58%),
     linear-gradient(145deg,#091722,#0d2532 52%,#101b2c);
 }
-.wallpaper-preview[data-wallpaper-preview="sunset"] {
+:root[data-wallpaper="sunset"], .wallpaper-preview[data-wallpaper-preview="sunset"] {
   --wallpaper: radial-gradient(ellipse at 84% 12%,rgba(199,97,69,.65),transparent 57%),
     radial-gradient(ellipse at 8% 88%,rgba(153,67,116,.60),transparent 58%),
     linear-gradient(135deg,#211722,#281b28 48%,#171a2a);
 }
-.wallpaper-preview[data-wallpaper-preview="forest"] {
+:root[data-wallpaper="forest"], .wallpaper-preview[data-wallpaper-preview="forest"] {
   --wallpaper: radial-gradient(ellipse at 15% 15%,rgba(47,127,87,.65),transparent 56%),
     radial-gradient(ellipse at 90% 86%,rgba(96,130,61,.55),transparent 59%),
     linear-gradient(145deg,#101d1b,#14251f 52%,#151e20);
 }
-.wallpaper-preview[data-wallpaper-preview="desert"] {
+:root[data-wallpaper="desert"], .wallpaper-preview[data-wallpaper-preview="desert"] {
   --wallpaper: radial-gradient(ellipse at 88% 10%,rgba(184,124,53,.62),transparent 58%),
     radial-gradient(ellipse at 8% 92%,rgba(157,82,59,.60),transparent 60%),
     linear-gradient(135deg,#211b1a,#29211d 52%,#1c1b20);
 }
-.wallpaper-preview[data-wallpaper-preview="glacier"] {
+:root[data-wallpaper="glacier"], .wallpaper-preview[data-wallpaper-preview="glacier"] {
   --wallpaper: radial-gradient(ellipse at 12% 12%,rgba(73,138,177,.64),transparent 59%),
     radial-gradient(ellipse at 92% 92%,rgba(95,116,174,.58),transparent 60%),
     linear-gradient(145deg,#111a27,#172331 50%,#171b2b);
 }
-.wallpaper-preview[data-wallpaper-preview="blossom"] {
+:root[data-wallpaper="blossom"], .wallpaper-preview[data-wallpaper-preview="blossom"] {
   --wallpaper: radial-gradient(ellipse at 85% 12%,rgba(180,88,139,.65),transparent 58%),
     radial-gradient(ellipse at 10% 92%,rgba(118,79,161,.60),transparent 60%),
     linear-gradient(135deg,#201723,#251a2b 52%,#191827);
 }
-.wallpaper-preview[data-wallpaper-preview="nebula"] {
+:root[data-wallpaper="nebula"], .wallpaper-preview[data-wallpaper-preview="nebula"] {
   --wallpaper: radial-gradient(ellipse at 18% 16%,rgba(105,68,188,.68),transparent 56%),
     radial-gradient(ellipse at 90% 84%,rgba(38,108,179,.62),transparent 59%),
     linear-gradient(145deg,#111326,#17172d 50%,#101927);
 }
-.wallpaper-preview[data-wallpaper-preview="graphite"] {
+:root[data-wallpaper="graphite"], .wallpaper-preview[data-wallpaper-preview="graphite"] {
   --wallpaper: radial-gradient(ellipse at 8% 18%,rgba(82,117,130,.54),transparent 57%),
     radial-gradient(ellipse at 88% 86%,rgba(91,100,129,.52),transparent 60%),
     linear-gradient(140deg,#13171c,#1b2027 52%,#141820);
@@ -339,11 +332,64 @@ body.settings-open #panes { display: none; }
   border: 1px solid var(--border); border-radius: 8px;
   background: color-mix(in srgb, var(--panel) 62%, transparent);
 }
-.wallpaper-custom-heading {
-  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+.wallpaper-custom-heading { display: flex; flex-direction: column; gap: 3px; }
+.wallpaper-custom-heading p { margin: 0; color: var(--muted); font-size: 11px; }
+.wallpaper-gallery {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 12px; margin-top: 12px;
 }
-.wallpaper-custom-heading p { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
-.wallpaper-image-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.wallpaper-upload, .wallpaper-image {
+  position: relative; aspect-ratio: 16 / 10; min-width: 0; border-radius: 8px;
+}
+.wallpaper-upload {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; padding: 8px; text-align: center; cursor: pointer; color: var(--muted);
+  border: 1.5px dashed var(--border);
+  background: color-mix(in srgb, var(--panel2) 40%, transparent);
+  transition: border-color .15s, color .15s, background .15s;
+}
+.wallpaper-upload:hover, .wallpaper-upload.dragover {
+  border-color: var(--accent); color: var(--text); background: var(--accent-soft);
+}
+.wallpaper-upload.disabled { opacity: .5; cursor: not-allowed; pointer-events: none; }
+.wallpaper-upload-icon { font-size: 22px; line-height: 1; color: var(--accent); }
+.wallpaper-upload-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.wallpaper-upload-hint { font-size: 10px; line-height: 1.4; }
+.wallpaper-image {
+  overflow: hidden; cursor: pointer; background: var(--panel2);
+  border: 1px solid var(--border);
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.wallpaper-image img {
+  display: block; width: 100%; height: 100%; object-fit: cover;
+  transition: transform .25s ease;
+}
+.wallpaper-image:hover, .wallpaper-image:focus-visible {
+  border-color: var(--muted); transform: translateY(-2px); outline: none;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .35);
+}
+.wallpaper-image:hover img { transform: scale(1.06); }
+.wallpaper-image.selected {
+  border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent);
+}
+.wallpaper-image-name {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 8px 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #fff; font-size: 10px; pointer-events: none;
+  background: linear-gradient(transparent, rgba(0, 0, 0, .65));
+}
+.wallpaper-image-remove {
+  position: absolute; top: 5px; right: 5px; width: 22px; height: 22px;
+  display: grid; place-items: center; padding: 0; border-radius: 50%;
+  color: #fff; font-size: 15px; line-height: 1;
+  background: rgba(0, 0, 0, .62); border: 1px solid rgba(255, 255, 255, .25);
+  opacity: 0; transform: scale(.8);
+  transition: opacity .15s, transform .15s, background .15s;
+}
+.wallpaper-image:hover .wallpaper-image-remove,
+.wallpaper-image:focus-within .wallpaper-image-remove { opacity: 1; transform: none; }
+.wallpaper-image-remove:hover { background: var(--danger); }
+@media (hover: none) { .wallpaper-image-remove { opacity: 1; transform: none; } }
 .wallpaper-controls {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 18px; margin-top: 16px;
@@ -360,7 +406,7 @@ body.settings-open #panes { display: none; }
 .wallpaper-range > span { display: flex; justify-content: space-between; gap: 8px; }
 .wallpaper-range output { color: var(--text); font-variant-numeric: tabular-nums; }
 .wallpaper-range input { width: 100%; accent-color: var(--accent); }
-.wallpaper-error { margin: 10px 0 0; color: var(--danger); font-size: 12px; }
+.wallpaper-error { margin: 10px 0 0; color: var(--danger); font-size: 12px; white-space: pre-line; }
 .settings-primary {
   padding: 7px 12px; border-radius: 6px; color: #fff;
   background: var(--accent); font-weight: 600; white-space: nowrap;
@@ -417,7 +463,6 @@ body.settings-open #panes { display: none; }
   .settings-model-row { flex-wrap: wrap; }
   .settings-model-actions { margin-left: 46px; }
   .settings-section-heading { align-items: flex-start; }
-  .wallpaper-custom-heading { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 480px) {
   .settings-header { padding: 20px 16px 14px; }
@@ -1009,6 +1054,87 @@ body.sidebar-collapsed #btn-show-sidebar { display: block; }
 .modal-btns button { padding: 4px 14px; border: 1px solid var(--border); border-radius: 4px; }
 .modal-btns button:hover { background: var(--panel2); }
 .modal-btns button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+/* --- 界面打磨：按钮、窗口、焦点、滚动条 --- */
+button {
+  transition: background-color .15s, border-color .15s, color .15s,
+    box-shadow .15s, transform .1s, filter .15s;
+}
+button:active:not(:disabled) { transform: scale(.97); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible, .wallpaper-image:focus-visible,
+.wallpaper-upload:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+input:focus, select:focus { box-shadow: 0 0 0 3px var(--accent-soft); }
+input, select { transition: border-color .15s, box-shadow .15s; }
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent; }
+.tab { border-radius: 9px 9px 0 0; transition: background-color .15s, color .15s; }
+.tab.active { box-shadow: inset 0 2px 0 var(--accent); }
+.settings-close, .settings-model-actions button { border-radius: 8px; padding: 7px 14px; }
+.settings-close:hover, .settings-model-actions button:hover { background: var(--panel2); }
+.settings-nav-item { border-radius: 8px; transition: background-color .15s, color .15s; }
+.settings-nav-item.active { box-shadow: inset 3px 0 0 var(--accent); }
+.settings-primary { border-radius: 8px; padding: 8px 14px; }
+.theme-option, .wallpaper-option { border-radius: 12px; transition: border-color .15s, transform .15s, box-shadow .15s; }
+.theme-option:hover { transform: translateY(-1px); }
+.wallpaper-custom { border-radius: 12px; }
+.wallpaper-group-title {
+  display: flex; align-items: baseline; gap: 8px; margin: 22px 0 10px;
+  font-size: 12px; font-weight: 600; letter-spacing: .02em;
+}
+.wallpaper-group-title small { color: var(--muted); font-weight: 400; font-size: 11px; }
+.wallpaper-group-title:first-of-type { margin-top: 4px; }
+.wallpaper-custom { margin-top: 0; }
+.wallpaper-status { margin: 0 0 8px; color: var(--muted); font-size: 11px; }
+#modal-root {
+  background: rgba(4, 7, 14, .55); backdrop-filter: blur(6px);
+  animation: otFade .15s ease-out;
+}
+.modal {
+  border-radius: 14px; padding: 20px 22px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .04);
+  animation: otPop .18s ease-out;
+}
+.modal h3 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.modal-btns { margin-top: 18px; }
+.modal-btns button { padding: 7px 18px; border-radius: 8px; background: color-mix(in srgb, var(--panel2) 80%, transparent); }
+.modal-btns button.primary:hover { filter: brightness(1.1); background: var(--accent); }
+.modal-body input { padding: 8px 10px; border-radius: 8px; }
+@keyframes otFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes otPop { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
+
+/* --- 动态背景：缓慢漂移的渐变，减少动态偏好下静止 --- */
+:root[data-wallpaper="flow-aurora"], .wallpaper-preview[data-wallpaper-preview="flow-aurora"] {
+  --wallpaper: radial-gradient(ellipse at 20% 20%, rgba(32,190,170,.75), transparent 45%),
+    radial-gradient(ellipse at 80% 30%, rgba(70,110,255,.65), transparent 50%),
+    radial-gradient(ellipse at 50% 90%, rgba(150,70,220,.55), transparent 55%),
+    linear-gradient(135deg, #07141f, #0c2230 50%, #120f2b);
+}
+:root[data-wallpaper="flow-sunset"], .wallpaper-preview[data-wallpaper-preview="flow-sunset"] {
+  --wallpaper: radial-gradient(ellipse at 15% 25%, rgba(255,120,70,.75), transparent 45%),
+    radial-gradient(ellipse at 85% 20%, rgba(220,70,150,.65), transparent 50%),
+    radial-gradient(ellipse at 55% 95%, rgba(120,80,220,.6), transparent 55%),
+    linear-gradient(135deg, #1d1020, #2a1530 50%, #141633);
+}
+:root[data-wallpaper="flow-nebula"], .wallpaper-preview[data-wallpaper-preview="flow-nebula"] {
+  --wallpaper: radial-gradient(ellipse at 25% 30%, rgba(120,80,255,.8), transparent 45%),
+    radial-gradient(ellipse at 80% 70%, rgba(30,150,255,.7), transparent 50%),
+    radial-gradient(ellipse at 60% 10%, rgba(255,90,200,.45), transparent 50%),
+    linear-gradient(145deg, #0b0a1f, #14123a 50%, #0a1830);
+}
+:root[data-wallpaper^="flow-"]:not([data-wallpaper-active]) body::before {
+  background-size: 260% 260%;
+  animation: otDrift 28s ease-in-out infinite alternate;
+}
+@keyframes otDrift {
+  0% { background-position: 0% 0%; }
+  50% { background-position: 100% 40%; }
+  100% { background-position: 30% 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-wallpaper^="flow-"]:not([data-wallpaper-active]) body::before { animation: none; }
+  #modal-root, .modal { animation: none; }
+}
 
 /* --- 连接表单弹窗（添加/编辑远程机器）--- */
 .form-grid {
