@@ -182,11 +182,14 @@ async def test_worker_agent_exec_flow_and_ai_collapse_once(monkeypatch, tmp_path
         w.backend.on_start(cmd)                     # 模型登记（可并发先到）
         fut = loop.create_future()
         w._exec_future = fut
-        w._suppress_live = True
         w._pending_report = (i + 1, "EXEC", "eval 注入 " + cmd)
         await w.exec._on_exec_start(i + 1)
         assert w._exec_stack[-1]["ctx"] == "agent"
+        # 抑制窗与工具执行互斥（runner 全程持 _runner_lock），输出到达时
+        # 窗已关上 → 直写主 xterm；窗内 Agent 帧输出不外显的口径见
+        # test_exec_events 的重注入用例
         await w.exec._on_exec_text("out-of-" + cmd + "\n")
+        w._suppress_live = True                     # 模拟 D 收束前夕注入窗未关
         await w.exec._on_exec_end(i + 1, 0, "/tmp")
         res = await asyncio.wait_for(fut, timeout=1)
         assert res.exit_code == 0
