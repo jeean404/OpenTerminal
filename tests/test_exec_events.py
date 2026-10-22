@@ -309,6 +309,22 @@ async def test_worker_exec_text_swallowed_in_injection_window(monkeypatch):
     assert ("bytes", b"root") in sink.messages, "窗口外用户输出照常直通"
 
 
+async def test_agent_exec_text_swallowed_during_reinjection(monkeypatch):
+    """嵌套壳重注入期间即使仍处于 Agent 执行帧，也不能把探测/注入回显送上屏。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._suppress_live = True
+    w._exec_stack.append({"ctx": "agent", "line": "sudo su -", "inst": 1})
+
+    await w.exec._on_exec_text("__OTPROBE__bash5.2|-d\r\n")
+    await asyncio.sleep(0.02)
+
+    assert not [m for m in sink.messages if m[0] == "bytes"], \
+        "抑制窗口内 Agent 执行帧的输出不得外显"
+    assert w._exec_buf.endswith(b"__OTPROBE__bash5.2|-d\r\n"), \
+        "抑制只影响终端显示，不应破坏命令输出采集"
+
+
 def _wire_pad_prompt(w):
     """替身 send_raw：看到 __ot_pad 注入行即模拟 hook 打完空行后的提示符重画。"""
     sess = w.session

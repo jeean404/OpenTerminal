@@ -274,6 +274,39 @@ async def test_ensure_integrated_reinjects_matching_shell(monkeypatch):
     assert any(b"__ot_inj" in d for d in raws)
 
 
+async def test_ensure_integrated_swallows_delayed_echo_after_prompt(monkeypatch):
+    """注入后的延迟 PTY 回显仍在抑制窗口内，不得漏出探测/注入命令。"""
+    w, sink = await _make_worker(monkeypatch)
+    await asyncio.wait_for(w.connected.wait(), timeout=2)
+    w._interactive = True
+    w._last_mark_at = 1.0
+
+    async def _fake_probe():
+        return "bash", "-d"
+    monkeypatch.setattr(w.hook, "_probe_shell_kind", _fake_probe)
+    base = w.session.send_raw
+    delayed = False
+
+    async def _raw(data):
+        nonlocal delayed
+        await base(data)
+        if b"bind -x" in data and not delayed:
+            delayed = True
+            w._ev_prompt.set()
+
+            async def _late_echo():
+                await asyncio.sleep(0.1)
+                await w.exec._on_stream_event(
+                    ("exec", 'echo "__OTPROBE__bash5.2|-d"'))
+            asyncio.create_task(_late_echo())
+    w.session.send_raw = _raw
+
+    assert await w.hook._ensure_integrated() is True
+    await asyncio.sleep(0.02)
+    assert not [m for m in sink.messages if m[0] == "bytes"], \
+        "提示符标记之后到达的命令回显也必须保持隐藏"
+
+
 async def test_hook_gone_clears_when_nested_shell_exits(monkeypatch):
     """嵌套 shell（su -）退出、_open_cmds 清空：_hook_gone 复位，外层
     hook 的标记/函数从未丢过，健康路径恢复。"""

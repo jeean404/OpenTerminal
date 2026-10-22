@@ -168,9 +168,20 @@ class HookGate:
                 await asyncio.sleep(0.04)
             try:
                 await asyncio.wait_for(self.core._ev_prompt.wait(), 2.0)
-                # zsh POSTEDIT 重绘可能落在 A 标记之后：抑制窗口多留 80ms
-                # 把它一并吞掉，否则每任务注入的重绘行泄漏进主屏（§5.5）
-                await asyncio.sleep(0.08)
+                # 远端 PTY/SSH 可能把命令回显与提示符标记拆包迟到；固定短延时
+                # 到期就关闭抑制会把探测/注入命令漏到主屏。等输出静默一小段，
+                # 并设置上限避免持续输出时卡住任务启动。
+                quiet_for = 0.15
+                quiet_deadline = time.monotonic() + 0.75
+                while True:
+                    self.core._ev_stream.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self.core._ev_stream.wait(), quiet_for)
+                    except asyncio.TimeoutError:
+                        break
+                    if time.monotonic() >= quiet_deadline:
+                        break
                 return True
             except asyncio.TimeoutError:
                 return False

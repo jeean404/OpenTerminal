@@ -565,7 +565,7 @@ class ExecEvents:
                     self.core._exec_truncated = True
             else:
                 self.core._exec_truncated = True
-            if ctx == "agent":
+            if ctx == "agent" and not self.core._suppress_live:
                 await self.core.emit_bytes(raw)   # 输出直写主 xterm（§5.3）
             # probe：只捕获不转发（隐藏探测无前端副作用）
         elif ctx == "silent":
