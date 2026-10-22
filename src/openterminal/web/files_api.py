@@ -17,7 +17,8 @@
 * 新建文件走 ``"x"``（FXF_EXCL）——``"w"`` 会把同名旧文件截成 0 字节；
 * 上传/保存一律「临时文件 + 改名」原子替换：``open(path,'wb')`` 一打开
   就把旧文件截成 0 字节，中途失败时用户原文件已经没了；改成先写
-  ``*.otpart`` 再改名上去，失败只清临时文件，原文件原样保留。
+  ``*.otpart`` 再改名上去，提交前原文件原样保留。分块上传的临时文件
+  会保留以供续传，旧式单请求上传失败则清理临时文件。
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import base64
 import hashlib
 import posixpath
 import stat as stat_mod
+import time
+import weakref
 from contextlib import suppress
 from typing import Any
 from urllib.parse import quote as urlquote
@@ -35,6 +38,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 _CHUNK = 128 * 1024
+_UPLOAD_CHUNK = 1024 * 1024
 # 在线编辑的读取/写入上限：编辑器走浏览器内存，超限拒绝并提示用下载
 _EDIT_LIMIT = 2 * 1024 * 1024
 
@@ -290,6 +294,13 @@ def _temp_name(remote: str) -> str:
     return f"{remote}.otpart-{secrets.token_hex(4)}"
 
 
+def _upload_temp_name(remote: str, upload_id: str) -> str:
+    if (len(upload_id) != 32
+            or any(c not in "0123456789abcdef" for c in upload_id)):
+        raise PanelError(400, "bad_upload_id", "上传标识不合法")
+    return f"{remote}.otpart-{upload_id}"
+
+
 async def _replace(sftp, tmp: str, remote: str) -> None:
     """临时文件改名顶替目标（POSIX rename-to-existing）。
 
@@ -304,6 +315,11 @@ async def _replace(sftp, tmp: str, remote: str) -> None:
     with suppress(Exception):
         await sftp.remove(remote)
     await sftp.rename(tmp, remote)
+
+
+async def _create_empty_upload(sftp, path: str) -> None:
+    async with sftp.open(path, "wb"):
+        pass
 
 
 # --- 通道 -----------------------------------------------------------------
@@ -421,6 +437,15 @@ def install_files_errors(app) -> None:
 
 def make_files_router(tabs: dict, check_token) -> APIRouter:
     router = APIRouter(prefix="/api/tabs/{tab_id}/files")
+    upload_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+        weakref.WeakValueDictionary())
+
+    def _upload_lock(key: str) -> asyncio.Lock:
+        lock = upload_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            upload_locks[key] = lock
+        return lock
 
     def _worker(tab_id: str):
         worker = tabs.get(tab_id)
@@ -667,6 +692,122 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
             raise PanelError(500, "io",
                              f"上传失败: {type(exc).__name__}: {exc}") from None
         return {"ok": True, "path": remote, "size": written}
+
+    @router.get("/upload/status")
+    async def upload_status(request: Request, tab_id: str, path: str = ".",
+                            name: str = "", upload_id: str = ""):
+        check_token(request.headers)
+        ch = await _channel(tab_id)
+        remote = _join(path, name)
+        tmp = _upload_temp_name(remote, upload_id)
+        import asyncssh
+
+        try:
+            attrs = await ch.sftp.stat(tmp)
+        except asyncssh.SFTPNoSuchFile:
+            return {"offset": 0}
+        except Exception as exc:            # noqa: BLE001
+            status, code = _code(exc)
+            raise PanelError(status, code,
+                             f"查询上传状态失败: {exc}") from None
+        return {"offset": attrs.size or 0}
+
+    @router.post("/upload/lease")
+    async def upload_lease(request: Request, tab_id: str, path: str = ".",
+                           name: str = "", upload_id: str = "",
+                           active: bool = True):
+        check_token(request.headers)
+        worker = _worker(tab_id)
+        remote = _join(path, name)
+        tmp = _upload_temp_name(remote, upload_id)
+        leases = getattr(worker, "_ot_active_file_uploads", None)
+        if leases is None:
+            leases = {}
+            worker._ot_active_file_uploads = leases
+        if active:
+            leases[tmp] = time.monotonic()
+        else:
+            leases.pop(tmp, None)
+        return {"ok": True}
+
+    @router.post("/upload/chunk")
+    async def upload_chunk(request: Request, tab_id: str, path: str = ".",
+                           name: str = "", upload_id: str = "",
+                           offset: int = 0, total: int = 0):
+        check_token(request.headers)
+        ch = await _channel(tab_id)
+        remote = _join(path, name)
+        tmp = _upload_temp_name(remote, upload_id)
+        if offset < 0 or total < 0 or offset > total:
+            raise PanelError(400, "bad_offset", "上传位置不合法")
+        body = bytearray()
+        async for part in request.stream():
+            body.extend(part)
+            if len(body) > _UPLOAD_CHUNK:
+                raise PanelError(413, "chunk_too_large", "上传分块超过 1 MiB")
+        if not body or offset + len(body) > total:
+            raise PanelError(400, "bad_chunk", "上传分块长度不合法")
+        import asyncssh
+
+        try:
+            async with _upload_lock(tmp):
+                try:
+                    attrs = await ch.sftp.stat(tmp)
+                    current = attrs.size or 0
+                except asyncssh.SFTPNoSuchFile:
+                    current = 0
+                if current != offset:
+                    raise PanelError(409, "upload_offset",
+                                     "上传位置已变化，请从服务端位置继续",
+                                     offset=current)
+                async with ch.sftp.open(tmp, "ab") as f:
+                    await f.write(bytes(body))
+        except PanelError:
+            raise
+        except asyncssh.SFTPError as exc:
+            status, code = _code(exc)
+            raise PanelError(status, code, f"写入上传分块失败: {exc}") from None
+        except Exception as exc:            # noqa: BLE001
+            raise PanelError(
+                500, "io",
+                f"写入上传分块失败: {type(exc).__name__}: {exc}") from None
+        return {"offset": offset + len(body)}
+
+    @router.post("/upload/complete")
+    async def upload_complete(request: Request, tab_id: str, path: str = ".",
+                              name: str = "", upload_id: str = "",
+                              total: int = 0):
+        check_token(request.headers)
+        ch = await _channel(tab_id)
+        remote = _join(path, name)
+        tmp = _upload_temp_name(remote, upload_id)
+        if total < 0:
+            raise PanelError(400, "bad_size", "文件长度不合法")
+        import asyncssh
+
+        async with _upload_lock(tmp):
+            try:
+                attrs = await ch.sftp.stat(tmp)
+            except asyncssh.SFTPNoSuchFile:
+                if total:
+                    raise PanelError(409, "upload_incomplete",
+                                     "上传数据尚未完成", offset=0) from None
+                await _io("创建空上传文件失败",
+                          _create_empty_upload(ch.sftp, tmp))
+                attrs = await _io("检查上传文件失败", ch.sftp.stat(tmp))
+            except Exception as exc:        # noqa: BLE001
+                status, code = _code(exc)
+                raise PanelError(status, code,
+                                 f"检查上传文件失败: {exc}") from None
+            current = attrs.size or 0
+            if current != total:
+                raise PanelError(409, "upload_incomplete",
+                                 "上传数据尚未完成", offset=current)
+            await _io("完成上传失败", _replace(ch.sftp, tmp, remote))
+            worker = tabs.get(tab_id)
+            if worker is not None:
+                getattr(worker, "_ot_active_file_uploads", {}).pop(tmp, None)
+        return {"ok": True, "path": remote, "size": current}
 
     @router.get("/download")
     async def download(request: Request, tab_id: str, path: str):

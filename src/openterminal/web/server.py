@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 import webbrowser
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -33,6 +34,17 @@ from .protocol import parse_client
 from .worker import TabWorker
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
+_UPLOAD_LEASE_TTL = 90.0
+_REAPER_POLL = 30.0
+
+
+def _has_active_file_upload(worker, *, now: float | None = None) -> bool:
+    leases = getattr(worker, "_ot_active_file_uploads", {})
+    current = time.monotonic() if now is None else now
+    for key, touched in list(leases.items()):
+        if current - touched > _UPLOAD_LEASE_TTL:
+            leases.pop(key, None)
+    return bool(leases)
 
 
 def _conn_fields(payload: dict) -> tuple[str | None, str | None, int | None]:
@@ -88,13 +100,21 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
     _REAPER_GRACE = 300.0   # 5 分钟
 
     async def _reap_later(tab_id: str) -> None:
-        await asyncio.sleep(_REAPER_GRACE)
-        reapers.pop(tab_id, None)
-        worker = tabs.get(tab_id)
-        # attach 时会取消本任务；这里再核一层 sink 兜底
-        if worker is not None and worker._sink is None:
+        first_check = True
+        while True:
+            await asyncio.sleep(_REAPER_GRACE if first_check else _REAPER_POLL)
+            first_check = False
+            worker = tabs.get(tab_id)
+            # attach 时会取消本任务；这里再核一层 sink 兜底
+            if worker is None or worker._sink is not None:
+                reapers.pop(tab_id, None)
+                return
+            if _has_active_file_upload(worker):
+                continue
+            reapers.pop(tab_id, None)
             tabs.pop(tab_id, None)
             await worker.close()
+            return
 
     def _cancel_reaper(tab_id: str) -> None:
         t = reapers.pop(tab_id, None)

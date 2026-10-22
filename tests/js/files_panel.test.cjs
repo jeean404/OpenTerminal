@@ -60,6 +60,131 @@ test("_url 上传把文件名放进 query（服务端按它剥目录成分）", 
     "/api/tabs/t1/files/upload?path=%2Fsrv&name=hello+%E4%B8%96%E7%95%8C.txt");
 });
 
+test("续传标识由文件路径和属性稳定生成，不依赖会话或浏览器存储", () => {
+  const oldStorage = Object.getOwnPropertyDescriptor(global, "localStorage");
+  const oldCrypto = Object.getOwnPropertyDescriptor(global, "crypto");
+  const values = new Map();
+  Object.defineProperty(global, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key) => values.get(key) || null,
+      setItem: (key, value) => values.set(key, value),
+    },
+  });
+  Object.defineProperty(global, "crypto", {
+    configurable: true,
+    value: require("node:crypto").webcrypto,
+  });
+  try {
+    const panel = {_conn: {host: "server", port: 22, user: "alice"},
+      _toast() {}};
+    const file = {name: "archive.bin", size: 1024, lastModified: 1234};
+    const first = FilePanel.prototype._upId.call(panel, {
+      dir: "/srv", file,
+    });
+    const resumed = FilePanel.prototype._upId.call(panel, {
+      dir: "/srv", file,
+    });
+    assert.match(first, /^[0-9a-f]{32}$/);
+    assert.equal(resumed, first);
+
+    const otherSession = {
+      tabId: "new-session",
+      _conn: {host: "other-server", port: 2200, user: "bob"},
+      _toast() {},
+    };
+    Object.defineProperty(global, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: () => null,
+        setItem: () => { throw new Error("storage unavailable"); },
+      },
+    });
+    const afterReconnect = FilePanel.prototype._upId.call(otherSession, {
+      dir: "/srv", file,
+    });
+    assert.equal(afterReconnect, first);
+  } finally {
+    if (oldStorage) Object.defineProperty(global, "localStorage", oldStorage);
+    else delete global.localStorage;
+    if (oldCrypto) Object.defineProperty(global, "crypto", oldCrypto);
+    else delete global.crypto;
+  }
+});
+
+test("上传从服务端已有偏移开始，并在完成后清除续传标识", async () => {
+  const globals = ["localStorage", "crypto", "authFetch", "getToken",
+    "XMLHttpRequest"];
+  const saved = new Map(globals.map((key) =>
+    [key, Object.getOwnPropertyDescriptor(global, key)]));
+  const values = new Map();
+  const sent = [];
+  const leases = [];
+  Object.defineProperty(global, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key) => values.get(key) || null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: (key) => values.delete(key),
+    },
+  });
+  Object.defineProperty(global, "crypto", {
+    configurable: true,
+    value: require("node:crypto").webcrypto,
+  });
+  global.getToken = () => "";
+  global.authFetch = async (url) => {
+    const parsed = new URL(url, "http://test");
+    if (parsed.pathname.endsWith("/upload/status"))
+      return {ok: true, json: async () => ({offset: 2})};
+    if (parsed.pathname.endsWith("/upload/lease")) {
+      leases.push(parsed.searchParams.get("active"));
+      return {ok: true, json: async () => ({ok: true})};
+    }
+    assert.equal(parsed.pathname.endsWith("/upload/complete"), true);
+    return {ok: true, json: async () => ({ok: true})};
+  };
+  global.XMLHttpRequest = class {
+    constructor() { this.upload = {}; }
+    open(_method, url) { this.url = url; }
+    setRequestHeader() {}
+    send(body) {
+      const parsed = new URL(this.url, "http://test");
+      const offset = Number(parsed.searchParams.get("offset"));
+      sent.push({offset, data: body});
+      this.status = 200;
+      this.responseText = JSON.stringify({offset: offset + body.size});
+      this.onload();
+    }
+  };
+  try {
+    const panel = Object.create(FilePanel.prototype);
+    panel.tabId = "current-tab";
+    panel._conn = {host: "server", port: 22, user: "alice"};
+    panel._toast = () => {};
+    panel._upPaint = () => {};
+    panel._upEnd = () => {};
+    const file = new Blob(["abcde"]);
+    Object.defineProperties(file, {
+      name: {value: "resume.bin"},
+      lastModified: {value: 1234},
+    });
+    const item = {file, dir: "/srv", state: "running", xhr: null, row: null};
+    await panel._upRun(item);
+    assert.equal(item.state, "done");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].offset, 2);
+    assert.equal(sent[0].data.size, 3);
+    assert.deepEqual(leases, ["true", "false"]);
+    assert.equal(values.size, 0);
+  } finally {
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(global, key, descriptor);
+      else delete global[key];
+    }
+  }
+});
+
 test("连接徽标：默认端口不显示，非默认端口带 :port", () => {
   const fn = FilePanel.prototype._connLabel;
   assert.equal(fn.call({_conn: {host: "h", user: "root", port: 22}}), "root@h");

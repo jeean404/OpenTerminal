@@ -64,10 +64,11 @@ class FakeRemoteWriter:
     的原因。``mode='x'``（FXF_EXCL）在已存在时抛 SFTPFailure。
     """
 
-    def __init__(self, sftp, path, *, excl=False):
+    def __init__(self, sftp, path, *, excl=False, append=False):
         self.sftp = sftp
         self.path = path
-        self.buf = bytearray()
+        self.append = append
+        self.buf = bytearray(sftp.files.get(path, b"")) if append else bytearray()
         self.excl = excl
 
     async def write(self, data):
@@ -77,7 +78,8 @@ class FakeRemoteWriter:
         if self.excl and self.path in self.sftp.files:
             from asyncssh import SFTPFailure
             raise SFTPFailure(f"already exists: {self.path}")
-        self.sftp.files[self.path] = b""      # 开即创建/截断
+        if not self.append:
+            self.sftp.files[self.path] = b""  # 开即创建/截断
         return self
 
     async def __aexit__(self, exc_type, *exc):
@@ -117,7 +119,8 @@ class FakeSftp:
     def open(self, path, mode="rb"):
         if mode.startswith("r"):
             return FakeRemoteFile(self.files[path])
-        return FakeRemoteWriter(self, path, excl="x" in mode)
+        return FakeRemoteWriter(self, path, excl="x" in mode,
+                                append="a" in mode)
 
     async def realpath(self, path):
         return path
@@ -459,6 +462,108 @@ def test_upload_streams_raw_body_to_joined_path():
                         headers={"x-ot-token": "secret"})
         assert r.status_code == 200
         assert sftp.files["/tmp/hello 世界.txt"] == b"HELLO"
+
+
+def test_chunk_upload_resumes_and_atomically_replaces_target():
+    tabs, sftp = ssh_tabs()
+    sftp.files["/tmp/archive.bin"] = b"OLD"
+    params = {"path": "/tmp", "name": "archive.bin",
+              "upload_id": "a" * 32, "total": 6}
+    headers = {"x-ot-token": "secret"}
+    with make_client(tabs) as client:
+        status = client.get("/api/tabs/t1/files/upload/status",
+                            params=params, headers=headers)
+        assert status.json() == {"offset": 0}
+        first = client.post("/api/tabs/t1/files/upload/chunk",
+                            params={**params, "offset": 0},
+                            content=b"ABC", headers=headers)
+        assert first.status_code == 200
+        assert first.json() == {"offset": 3}
+        assert sftp.files["/tmp/archive.bin"] == b"OLD"
+
+        resumed = client.get("/api/tabs/t1/files/upload/status",
+                             params=params, headers=headers)
+        assert resumed.json() == {"offset": 3}
+        second = client.post("/api/tabs/t1/files/upload/chunk",
+                             params={**params, "offset": 3},
+                             content=b"DEF", headers=headers)
+        assert second.status_code == 200
+        complete = client.post("/api/tabs/t1/files/upload/complete",
+                               params=params, headers=headers)
+        assert complete.status_code == 200
+        assert complete.json() == {
+            "ok": True, "path": "/tmp/archive.bin", "size": 6}
+        assert sftp.files["/tmp/archive.bin"] == b"ABCDEF"
+        assert not any(".otpart-" in path for path in sftp.files)
+
+
+def test_upload_lease_marks_and_releases_active_file_transfer():
+    tabs, _ = ssh_tabs()
+    params = {"path": "/tmp", "name": "resume.bin",
+              "upload_id": "e" * 32}
+    headers = {"x-ot-token": "secret"}
+    with make_client(tabs) as client:
+        active = client.post("/api/tabs/t1/files/upload/lease",
+                             params={**params, "active": "true"},
+                             headers=headers)
+        assert active.status_code == 200
+        assert len(tabs["t1"]._ot_active_file_uploads) == 1
+        released = client.post("/api/tabs/t1/files/upload/lease",
+                               params={**params, "active": "false"},
+                               headers=headers)
+        assert released.status_code == 200
+        assert tabs["t1"]._ot_active_file_uploads == {}
+
+
+def test_chunk_upload_rejects_wrong_offset_and_bad_upload_id():
+    tabs, _ = ssh_tabs()
+    params = {"path": "/tmp", "name": "x.bin",
+              "upload_id": "b" * 32, "total": 4}
+    headers = {"x-ot-token": "secret"}
+    with make_client(tabs) as client:
+        first = client.post("/api/tabs/t1/files/upload/chunk",
+                            params={**params, "offset": 0},
+                            content=b"AB", headers=headers)
+        assert first.status_code == 200
+        stale = client.post("/api/tabs/t1/files/upload/chunk",
+                            params={**params, "offset": 0},
+                            content=b"CD", headers=headers)
+        assert stale.status_code == 409
+        assert stale.json()["offset"] == 2
+        bad_id = client.get("/api/tabs/t1/files/upload/status",
+                            params={**params, "upload_id": "../bad"},
+                            headers=headers)
+        assert bad_id.status_code == 400
+        assert bad_id.json()["code"] == "bad_upload_id"
+
+
+def test_chunk_upload_does_not_complete_until_total_is_present():
+    tabs, sftp = ssh_tabs()
+    sftp.files["/tmp/x.bin"] = b"ORIGINAL"
+    params = {"path": "/tmp", "name": "x.bin",
+              "upload_id": "c" * 32, "total": 4}
+    with make_client(tabs) as client:
+        client.post("/api/tabs/t1/files/upload/chunk",
+                    params={**params, "offset": 0},
+                    content=b"AB", headers={"x-ot-token": "secret"})
+        complete = client.post("/api/tabs/t1/files/upload/complete",
+                               params=params, headers={"x-ot-token": "secret"})
+        assert complete.status_code == 409
+        assert complete.json()["offset"] == 2
+        assert sftp.files["/tmp/x.bin"] == b"ORIGINAL"
+
+
+def test_chunk_upload_can_complete_empty_file():
+    tabs, sftp = ssh_tabs()
+    with make_client(tabs) as client:
+        complete = client.post(
+            "/api/tabs/t1/files/upload/complete",
+            params={"path": "/tmp", "name": "empty.bin",
+                    "upload_id": "d" * 32, "total": 0},
+            headers={"x-ot-token": "secret"})
+        assert complete.status_code == 200
+        assert complete.json()["size"] == 0
+        assert sftp.files["/tmp/empty.bin"] == b""
 
 
 def test_upload_filename_cannot_escape_target_dir():

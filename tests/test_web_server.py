@@ -1,10 +1,21 @@
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from openterminal.config import Config, TargetConfig
 from openterminal.connections import (
     find_saved_target, load_saved_targets, save_saved_targets,
 )
-from openterminal.web.server import _resolve_target_name, create_app
+from openterminal.web.server import (
+    _has_active_file_upload, _resolve_target_name, create_app,
+)
+
+
+def test_active_upload_lease_prevents_reaper_until_stale():
+    worker = SimpleNamespace(_ot_active_file_uploads={"upload": 100.0})
+    assert _has_active_file_upload(worker, now=150.0)
+    assert not _has_active_file_upload(worker, now=191.0)
+    assert worker._ot_active_file_uploads == {}
 
 
 def test_api_targets_payload():

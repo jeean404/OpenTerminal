@@ -115,6 +115,10 @@ second in the browser (`ot web`). Here's what happens:
 
 - Server sidebar + multi-tab terminals; Agent view and plain Shell view
   per tab, each tab showing its own connection status
+- The file panel supports chunked uploads; after a network interruption or
+  page refresh, select the same file again to resume from the uploaded offset.
+  Active uploads also keep the file connection alive while a disconnected
+  terminal tab is waiting for cleanup.
 - Browser-dialog password and host-key entry; optional LAN access with a
   mandatory token for non-loopback binds
 

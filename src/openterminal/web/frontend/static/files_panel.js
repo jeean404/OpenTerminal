@@ -14,6 +14,7 @@
 // 列表交互：单击＝选中，双击目录＝进入、双击文件＝打开编辑器；下载是
 // 独立的 ⬇ 按钮，不跟单击绑在一起。
 const UP_MAX = 5;   // 同时上传的文件数上限，其余排队
+const UP_CHUNK_SIZE = 1024 * 1024;
 
 class FilePanel {
   constructor(session) {
@@ -753,55 +754,230 @@ class FilePanel {
     }
   }
 
-  // 裸 body 上传：文件名走 query（服务端剥掉目录成分），body 就是文件字节。
-  // 不走 multipart——那要求 python-multipart，缺包时整个 web 服务起不来；
-  // 也省掉服务端临时文件，直接流进远端。
-  _upRun(it) {
-    const f = it.file;
-    const xhr = new XMLHttpRequest();
-    it.xhr = xhr;
-    xhr.open("POST", this._url("upload", {path: it.dir, name: f.name}));
-    const t = getToken();
-    if (t) xhr.setRequestHeader("x-ot-token", t);
-    const fail = (msg) => {
+  _upId(it) {
+    const target = this._conn || {};
+    const identity = JSON.stringify([
+      it.dir,
+      it.file.name, it.file.size, it.file.lastModified,
+    ]);
+    const key = `ot-upload:${identity}`;
+    const legacyKey = `ot-upload:${JSON.stringify([
+      target.host, target.port, target.user, it.dir,
+      it.file.name, it.file.size, it.file.lastModified,
+    ])}`;
+    it.uploadKey = key;
+    it.uploadLegacyKey = legacyKey;
+    let hash = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
+    for (let i = 0; i < identity.length; i++) {
+      const code = identity.charCodeAt(i);
+      hash = hash.map((value) =>
+        Math.imul(value ^ code, 0x01000193) >>> 0);
+    }
+    const stableId = hash.map((value) => value.toString(16).padStart(8, "0")).join("");
+    try {
+      const prior = localStorage.getItem(key) || localStorage.getItem(legacyKey);
+      if (prior && /^[0-9a-f]{32}$/.test(prior)) {
+        localStorage.setItem(key, prior);
+        return prior;
+      }
+      localStorage.setItem(key, stableId);
+    } catch (e) {
+      it.uploadKey = null;
+    }
+    return stableId;
+  }
+
+  _upStatus(it, params) {
+    return authFetch(this._url("upload/status", params)).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+      return body.offset;
+    });
+  }
+
+  async _upLease(params, active) {
+    const r = await authFetch(this._url("upload/lease", {
+      path: params.path, name: params.name, upload_id: params.upload_id,
+      active: String(active),
+    }), {method: "POST"});
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+  }
+
+  _upRequest(it, url, body, progress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      it.xhr = xhr;
+      xhr.open("POST", url);
+      const token = getToken();
+      if (token) xhr.setRequestHeader("x-ot-token", token);
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && it.state === "running") progress(event.loaded);
+      };
+      xhr.onload = () => {
+        it.xhr = null;
+        resolve({status: xhr.status, text: xhr.responseText});
+      };
+      xhr.onerror = () => {
+        it.xhr = null;
+        reject(new Error("网络错误"));
+      };
+      xhr.onabort = () => {
+        it.xhr = null;
+        if (it.state === "canceled") this._upEnd(it);
+        reject(new Error("上传已取消"));
+      };
+      xhr.send(body);
+    });
+  }
+
+  async _upPost(it, url, body, progress) {
+    let retriedToken = false;
+    for (;;) {
+      const response = await this._upRequest(it, url, body, progress);
+      if (response.status !== 401 || retriedToken) return response;
+      let tokenish = true;
+      try {
+        const json = JSON.parse(response.text);
+        if (json && json.code && json.code !== "unauthorized") tokenish = false;
+      } catch (e) { /* 无法解析响应时按令牌问题处理 */ }
+      if (!tokenish) return response;
+      await promptForToken();
+      if (it.state !== "running") throw new Error("上传已取消");
+      retriedToken = true;
+    }
+  }
+
+  async _upRun(it) {
+    const file = it.file;
+    let params;
+    let leaseTimer = null;
+    let leaseActive = false;
+    let leaseChain = Promise.resolve();
+    const fail = (error) => {
+      if (it.state !== "running") return;
       it.state = "error";
-      it.err = msg;
+      it.err = error.message || String(error);
       this._upPaint(it, 0);
-      this._toast(`上传失败 ${f.name}：${msg}`, true);
+      this._toast(`上传失败 ${file.name}：${it.err}`, true);
       this._upEnd(it);
     };
-    this._upPaint(it, 0);
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && it.state === "running") this._upPaint(it, e.loaded / e.total);
-    };
-    xhr.onload = () => {
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    try {
+      params = {path: it.dir, name: file.name, upload_id: this._upId(it),
+        total: file.size};
+      await this._upLease(params, true);
+      leaseActive = true;
+      leaseTimer = setInterval(() => {
+        leaseChain = leaseChain.then(() => this._upLease(params, true)).catch((error) => {
+          if (it.state === "running")
+            this._toast(`上传保活失败 ${file.name}：${error.message || error}`, true);
+        });
+      }, 30000);
+      const refreshOffset = async () => {
+        const current = await this._upStatus(it, params);
+        if (!Number.isSafeInteger(current) || current < 0 || current > file.size)
+          throw new Error("服务端续传位置无效");
+        return current;
+      };
+      let offset = await refreshOffset();
       if (it.state !== "running") return;
-      if (xhr.status === 401) {
-        // 只有真的令牌问题才弹令牌框（业务错误也可能回 401）
-        let tokenish = true;
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > file.size)
+        throw new Error("服务端续传位置无效");
+      let attemptsComplete = 0;
+      while (it.state === "running") {
+        while (offset < file.size && it.state === "running") {
+          const end = Math.min(offset + UP_CHUNK_SIZE, file.size);
+          const url = this._url("upload/chunk", {...params, offset});
+          let attempts = 0;
+          for (;;) {
+            if (it.state !== "running") return;
+            let response;
+            try {
+              response = await this._upPost(it, url, file.slice(offset, end),
+                (loaded) => this._upPaint(it, (offset + loaded) / file.size));
+            } catch (error) {
+              if (it.state !== "running") return;
+              if (attempts >= 3) throw error;
+              await wait(500 * (2 ** attempts++));
+              if (it.state !== "running") return;
+              offset = await refreshOffset();
+              if (offset >= file.size) break;
+              continue;
+            }
+            let result = {};
+            try { result = JSON.parse(response.text); } catch (e) { /* 下方报 HTTP 错误 */ }
+            if (response.status === 409 && result.code === "upload_offset") {
+              if (!Number.isSafeInteger(result.offset) || result.offset < 0
+                  || result.offset > file.size)
+                throw new Error("服务端返回了无效的续传位置");
+              if (result.offset === offset) throw new Error(result.detail || "上传位置冲突");
+              offset = result.offset;
+              break;
+            }
+            if (response.status !== 200) {
+              if (response.status >= 500 && attempts < 3) {
+                await wait(500 * (2 ** attempts++));
+                if (it.state !== "running") return;
+                offset = await refreshOffset();
+                if (offset >= file.size) break;
+                continue;
+              }
+              throw new Error(result.detail || `HTTP ${response.status}`);
+            }
+            if (!Number.isSafeInteger(result.offset) || result.offset <= offset
+                || result.offset > file.size)
+              throw new Error("服务端返回了无效的续传位置");
+            offset = result.offset;
+            break;
+          }
+        }
+        if (it.state !== "running") return;
+        const completeUrl = this._url("upload/complete", params);
+        let completed;
         try {
-          const j = JSON.parse(xhr.responseText);
-          if (j && j.code && j.code !== "unauthorized") tokenish = false;
-        } catch (e) { /* 读不出 body 按令牌问题 */ }
-        if (tokenish) {
-          it.xhr = null;
-          promptForToken().then(() => { if (it.state === "running") this._upRun(it); });
-          return;
+          completed = await authFetch(completeUrl, {method: "POST"});
+        } catch (error) {
+          if (attemptsComplete >= 3) throw error;
+          await wait(500 * (2 ** attemptsComplete++));
+          offset = await refreshOffset();
+          continue;
+        }
+        const result = await completed.json().catch(() => ({}));
+        if (completed.status === 409 && result.code === "upload_incomplete") {
+          if (!Number.isSafeInteger(result.offset) || result.offset < 0
+              || result.offset >= file.size)
+            throw new Error("服务端返回了无效的续传位置");
+          offset = result.offset;
+          continue;
+        }
+        if (!completed.ok) throw new Error(result.detail || `HTTP ${completed.status}`);
+        break;
+      }
+      if (it.state !== "running") return;
+      try {
+        if (it.uploadKey) localStorage.removeItem(it.uploadKey);
+        if (it.uploadLegacyKey) localStorage.removeItem(it.uploadLegacyKey);
+      }
+      catch (error) { this._toast("上传已完成，但无法清理本地续传记录", true); }
+      it.state = "done";
+      this._toast(`已上传 ${file.name}`);
+      this._upEnd(it);
+    } catch (error) {
+      if (it.state === "running") fail(error);
+    } finally {
+      clearInterval(leaseTimer);
+      if (leaseActive) {
+        await leaseChain;
+        try {
+          await this._upLease(params, false);
+        } catch (error) {
+          if (it.state !== "done")
+            this._toast(`释放上传保活失败 ${file.name}：${error.message || error}`, true);
         }
       }
-      if (xhr.status !== 200) {
-        let detail = xhr.status;
-        try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (e) { /* 保持状态码 */ }
-        fail(String(detail));
-        return;
-      }
-      it.state = "done";
-      this._toast(`已上传 ${f.name}`);
-      this._upEnd(it);
-    };
-    xhr.onerror = () => { if (it.state === "running") fail("网络错误"); };
-    xhr.onabort = () => this._upEnd(it);
-    xhr.send(f);
+    }
   }
 
   // --- 行内操作 -------------------------------------------------------------
