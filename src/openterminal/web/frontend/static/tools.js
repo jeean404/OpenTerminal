@@ -285,3 +285,6 @@ function initToolsPanel() {
 }
 
 initToolsPanel();
+
+// 语言切换：卡片文案重绘一遍（整页文本替换覆盖不到动态生成的插值句）
+if (typeof onLangChange === "function") onLangChange(loadTools);

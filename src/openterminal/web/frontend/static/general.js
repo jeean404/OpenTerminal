@@ -153,3 +153,6 @@ function initGeneralPanel() {
 }
 
 initGeneralPanel();
+
+// 语言切换：控件文案主要靠整页文本替换，这里把选中态等再同步一遍
+if (typeof onLangChange === "function") onLangChange(syncGeneralControls);

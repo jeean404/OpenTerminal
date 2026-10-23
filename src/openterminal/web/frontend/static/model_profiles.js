@@ -150,3 +150,6 @@ async function handleModelProfileAction(action, id, data) {
 }
 
 document.getElementById("btn-add-model-profile").onclick = () => openModelProfileForm();
+
+// 语言切换：列表行重绘一遍
+if (typeof onLangChange === "function") onLangChange(showModelProfiles);

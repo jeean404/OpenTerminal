@@ -164,6 +164,8 @@ function cleanup() {
     scale.store === "1.15" && scale.root === "115%", JSON.stringify(scale));
 
   step("切换界面语言");
+  // 挂个标记：刷新过页面它就没了。这是「原地静态切换」的核心断言
+  await page.evaluate(() => { window.__otNoReloadProbe = "alive"; });
   await page.click('[data-general-lang="en"]');
   await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 20000 });
   // 切语言是整页刷新：得重新进设置页才能读到面板内容
@@ -182,12 +184,33 @@ function cleanup() {
     h2: (document.querySelector('[data-settings-panel="general"] h2') || {}).textContent,
     row: (document.querySelector(".settings-row-text strong") || {}).textContent,
   }));
+  const noReload = await page.evaluate(() => window.__otNoReloadProbe === "alive");
+  check("切语言不刷新页面", noReload === true,
+    "标记仍在 = 整个切换过程没触发过 reload");
   check("切到英文后全站文案换掉",
     en.stored === "en" && en.nav.includes("General") && en.nav.includes("Skills")
       && en.h2 === "General" && en.row === "Interface language", JSON.stringify(en));
+  // 带插值的句子（「N 个文件 · 大小」）靠重绘回调，整页文本替换换不回来——
+  // 必须在英文态下开一次技能页才能证明它真的换了
+  step("英文态下带插值的文案");
+  await page.click('[data-settings-section="skills"]');
+  await page.waitForSelector(".skill-card", { timeout: 20000 });
+  await sleep(400);
+  const enCard = await page.evaluate(() => {
+    const card = document.querySelector(".skill-card");
+    return {
+      foot: (card && card.querySelector(".skill-size") || {}).textContent || "",
+      desc: (card && card.querySelector(".skill-desc") || {}).textContent || "",
+    };
+  });
+  check("英文态下插值句也换了",
+    /files/.test(enCard.foot) && !/个文件/.test(enCard.foot), JSON.stringify(enCard));
+  await page.screenshot({ path: path.join(lib.OUT, "settings-skills-en.png") });
+
   await page.screenshot({ path: path.join(lib.OUT, "settings-general-en.png") });
 
   step("切回中文");
+  await page.click('[data-settings-section="general"]');
   await page.click('[data-general-lang="zh"]');
   await page.waitForFunction(() => document.documentElement.lang === "zh-CN", { timeout: 20000 });
   await page.waitForSelector("#btn-settings", { timeout: 20000 });

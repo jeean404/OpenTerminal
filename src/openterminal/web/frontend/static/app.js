@@ -3644,6 +3644,10 @@ window.addEventListener("ot-term-options-change", event => {
   });
 });
 
+// 语言切换：侧栏条目带插值句，重绘一遍。终端面板**不重建**——那会毁掉 xterm
+// 的屏幕状态，它的固定文案由 i18n.js 的整页文本替换就地换掉。
+if (typeof onLangChange === "function") onLangChange(() => renderTargets());
+
 window.addEventListener("ot-theme-change", () => {
   Object.values(sessions).forEach(session => {
     if (!session.term) return;

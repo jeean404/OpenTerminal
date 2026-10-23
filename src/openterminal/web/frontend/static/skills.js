@@ -204,6 +204,8 @@ async function openSkillDetail(name) {
 
 function renderSkillDetail(skill) {
   const detail = document.getElementById("skills-detail");
+  // 记住当前详情页是哪个 skill：语言切换时要在原地重绘它，不能丢上下文
+  detail.dataset.skillName = skill.name;
   detail.innerHTML = `
     <div class="skill-detail-head">
       <div class="skill-detail-title">
@@ -392,3 +394,16 @@ function initSkillsPanel() {
 }
 
 initSkillsPanel();
+
+// 语言切换：卡片上的「N 个文件 · 大小」带插值，整页文本替换换不回来，得重绘。
+// 详情页开着就重绘详情（保住上下文），否则刷卡片列表。
+if (typeof onLangChange === "function") {
+  onLangChange(() => {
+    const detail = document.getElementById("skills-detail");
+    if (detail && !detail.hidden && detail.dataset.skillName) {
+      openSkillDetail(detail.dataset.skillName);
+    } else {
+      loadSkills();
+    }
+  });
+}
