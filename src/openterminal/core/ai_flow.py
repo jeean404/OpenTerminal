@@ -110,19 +110,33 @@ class AiFlow:
     async def _ensure_agent(self) -> None:
         """首个 AI 任务时构建 agent，已建则复用。self.core.agent/backend 从 None
         变就绪的唯一入口（建连不再预建）。"""
-        if self.core.agent is None:
-            await self._rebuild_agent()
+        if self.core.agent is not None:
+            return
+        # 预热与首任务可能并发：串行化，后到者等先到者建完直接复用
+        lock = self.core.__dict__.get("_agent_build_lock")
+        if lock is None:
+            lock = self.core.__dict__.setdefault(
+                "_agent_build_lock", asyncio.Lock())
+        async with lock:
+            if self.core.agent is None:
+                await self._rebuild_agent()
+
     async def _prewarm_agent(self) -> None:
-        """后台预热 AI 栈导入（只导入不构建：构建依赖 profile/model，留主
-        线程）。建连完成即跑，首条自然语言的 task_start 不再等秒级 import；
-        失败静默——首任务回退按需导入。"""
+        """后台预热：导入 AI 栈（含 TaskRunner）并预建 agent（含 MCP 工具
+        拉取）。建连完成即跑，用户回车后不再等秒级 import / MCP 握手 / 建图
+        才请求模型。失败静默——首任务回退按需构建。"""
         def _import_stack() -> None:
             _impl._load_agent_stack()
-            from .. import agent  # noqa: F401 - 预导入模块本体，_run_task
+            from ..agent import runner  # noqa: F401 - TaskRunner 引入 deepagents/langchain，
             # 调用点 `from ..agent.runner import TaskRunner` 命中 sys.modules 零成本
         try:
             await asyncio.to_thread(_import_stack)
-        except Exception:  # noqa: BLE001 - 预热失败不阻断，首任务按需导入
+            if self.core.profile is not None and self.core.agent is None:
+                profile = self.core.profile
+                await self._ensure_agent()
+                if self.core.profile is not profile and self.core.agent is not None:
+                    await self._rebuild_agent()   # 预建期间画像被手动改过
+        except Exception:  # noqa: BLE001 - 预热失败不阻断，首任务按需导入/构建
             pass
 
     # --- 命令历史长期记忆（SQLite）---
