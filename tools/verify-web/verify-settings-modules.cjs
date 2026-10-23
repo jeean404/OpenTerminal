@@ -85,6 +85,24 @@ function cleanup() {
     return v && !v.hidden;
   });
 
+  // ---------- 完整性：关键全局必须都在 ----------
+  // 文件被写坏（截断/语法错）时脚本仍能加载，只有点按钮才暴露；先在入口钉一次
+  step("检查关键全局");
+  const globals = await page.evaluate(() => ({
+    showSettings: typeof showSettings,
+    loadSkills: typeof loadSkills,
+    loadTools: typeof loadTools,
+    openSkillDetail: typeof openSkillDetail,
+    openMcpForm: typeof openMcpForm,
+    showModelProfiles: typeof showModelProfiles,
+    clearGeneralPrefs: typeof clearGeneralPrefs,
+    applyStaticI18n: typeof applyStaticI18n,
+    t: typeof t,
+  }));
+  const dead = Object.entries(globals).filter(([, v]) => v !== "function").map(([k]) => k);
+  check("各模块关键全局都已定义", dead.length === 0,
+    dead.length ? "缺失: " + dead.join(",") : "9 个都在");
+
   // ---------- 导航 ----------
   step("检查导航分类");
   const nav = await page.$$eval("[data-settings-section]",
