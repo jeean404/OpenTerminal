@@ -90,7 +90,9 @@ class AiFlow:
             self.core.profile, self._agent_session(), self.core.cfg, self.core.policy,
             model=_impl.build_chat_model(self.core._model),
             remote_target=remote,
-            tools=tools or [])
+            tools=tools or [],
+            # 手动命令摘要的数据源：中间件每轮模型调用时来取增量
+            manual_history=getattr(self.core, "manual_history", None))
 
     async def _gather_tools(self) -> list:
         """启用中的 MCP 工具。拉不到就当没有——绝不挡住 agent 构建。"""

@@ -21,7 +21,7 @@ from ..policy import Policy
 from ..skills import skill_routes, skill_sources
 from ..skills.gating import GatedSkillsMiddleware
 from .backend import PtyShellBackend
-from .middleware import DenyMiddleware, ToolErrorRetryMiddleware
+from .middleware import DenyMiddleware, ManualHistoryMiddleware, ToolErrorRetryMiddleware
 from .model import build_chat_model
 from .prompt import build_system_prompt
 from .sysprobe import SystemProfile
@@ -36,6 +36,7 @@ def build_agent(
     model: Any = None,
     remote_target: bool = False,
     tools: list | None = None,
+    manual_history: Any = None,
 ):
     """返回 (compiled_agent, session_allowed_commands)。
 
@@ -84,6 +85,10 @@ def build_agent(
         "when": _when,
         "description": _description,
     }}))
+    # 用户手动敲的命令不在消息历史里：由这个中间件按增量并进末条消息，
+    # 模型才知道「刚才发生了什么」（见 core/manual_history.py 的分层）
+    if manual_history is not None:
+        middleware.append(ManualHistoryMiddleware(manual_history))
 
     agent = create_deep_agent(
         model=model or build_chat_model(cfg.model),

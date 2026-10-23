@@ -20,6 +20,7 @@ import time
 from collections import deque
 
 from .messages import ServerMsg, _dbg, _ansi_free
+from .manual_history import ManualHistory
 from ..shell.integration import is_internal_line
 from ..session.base import CommandResult
 
@@ -71,6 +72,7 @@ class ExecEvents:
             ("_intr_swallow_until", 0.0),  # ^C 回显吞除窗口（跨块悬置）
             ("_intr_pending", b""),        # 悬置的块尾 "^"（等跨块 C）
             ("_user_out", bytearray()),  # 当前用户命令输出捕获（救援上下文）
+            ("manual_history", ManualHistory()),  # 手动命令滚动摘要（agent 中间件读）
             ("_curtain", False),        # 提示符幕帘：任务期扣住提示符重绘字节
             ("_curtain_parts", []),     # 扣住的 live 文本（按序）
             ("_curtain_at", 0.0),       # 关帘时刻（防呆：超时自动放行）
@@ -592,6 +594,10 @@ class ExecEvents:
             self.core._open_cmd_at.pop(inst, None)
             if line:
                 self.core.transcript.append("direct", command=line, exit_code=ec)
+                # 给 agent 的「现场感」：手动命令的摘要（增量送进消息历史）
+                self.core.manual_history.record(
+                    line, ec, bytes(self.core._user_out),
+                    cwd=cwd or (self.core._runner.cwd if self.core._runner else None))
             if not self.core._open_cmds:
                 # 嵌套 shell（su - 等）退出：外层 hook 的标记/函数从未丢过，
                 # 复位换壳判定，健康路径/pad 恢复

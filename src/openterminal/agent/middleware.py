@@ -109,3 +109,68 @@ class ToolErrorRetryMiddleware(AgentMiddleware):
             raise
         except Exception as e:  # noqa: BLE001 - 异常转 tool 错误回模型
             return self._feedback(tc, e)
+
+
+def _augment_message(message, section: str):
+    """把一段文本并到消息正文末尾（不动消息类型与工具调用形状）。"""
+    content = message.content
+    if isinstance(content, str):
+        new = (content + "\n\n" if content else "") + section
+    elif isinstance(content, list):
+        new = list(content) + [{"type": "text", "text": "\n\n" + section}]
+    else:
+        new = section
+    try:
+        return message.model_copy(update={"content": new})
+    except Exception:  # noqa: BLE001 - 拷不动就原样返回，宁可少送也别送坏
+        return message
+
+
+class ManualHistoryMiddleware(AgentMiddleware):
+    """把「用户手动敲过的命令」并进消息历史，让模型有现场感。
+
+    用户自己在终端敲的命令不在 agent 的消息历史里（_run_task 只把自然语言
+    原文交给 TaskRunner），模型因此不知道刚才发生了什么。全塞进上下文又太
+    占，所以走中间件，三条性质正好对上：
+
+    - **进消息历史，不是系统提示词**。系统提示词一换就作废整段前缀缓存；
+      改写末条消息则前面照旧命中缓存。这是走消息历史最大的好处。
+    - **并进最近一条消息**：本轮模型看到的是「用户的话 + 这期间他手动敲了
+      什么」，语义上就是同一次交待，不必让模型去对两条独立消息。
+    - **增量**（provider 只给没送过的）：同一段命令不会一轮轮重复，上下文
+      只随新命令增长，正好压住「全塞会占上下文」那条。
+
+    provider 是可调用（返回 str，空串=没有新东西→原样返回 request），或一个
+    带 `take_new()` 的对象（core 侧的 ManualHistory）。两种都收，免得调用方
+    传错形态就静默不工作。agent 层不 import core，便于单测。
+    """
+
+    def __init__(self, provider) -> None:
+        # 对象形态统一折成 callable：传错成对象也不至于一个字都不注入
+        self._provider = getattr(provider, "take_new", provider)
+
+    def modify_request(self, request):
+        if not self._provider:
+            return request
+        try:
+            section = self._provider()
+        except Exception:  # noqa: BLE001 - 摘要是加分项，绝不挡住模型调用
+            return request
+        if not section:
+            return request
+        messages = list(request.messages)
+        if not messages:
+            from langchain_core.messages import HumanMessage
+
+            messages.append(HumanMessage(content=section))
+        else:
+            messages[-1] = _augment_message(messages[-1], section)
+        return request.override(messages=messages)
+
+    # 框架入口是 wrap_model_call（modify_request 只是我们的辅助函数，没人替
+    # 我们调）——只实现后者等于什么都没挂上，实测踩过。
+    def wrap_model_call(self, request, handler):
+        return handler(self.modify_request(request))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(self.modify_request(request))
