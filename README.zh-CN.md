@@ -57,6 +57,8 @@ Xshell 可以省了。
 - 斜杠命令:`/help` 查命令 · `/target` 切主机 · `/system` 手动方言 ·
   `/clear` 新任务 · `/model` 查看模型 · `/exit` 退出
 - 有界自纠:同一失败最多重试一次,工具调用轮次有预算上限
+- 你在任务之间手动敲的命令也会作为上下文给到模型——送的是滚动摘要
+  （命令 + 退出码 + 输出尾部）并进上一条消息，不是原始输出，不占窗口
 - 状态行显示本会话 token 用量——网关回传就用真值,不回传退化为
   tiktoken 本地估算
 
@@ -73,6 +75,19 @@ Xshell 可以省了。
 
 - 内置技能包随包分发(如 `markdown-tables`);其 `SKILL.md` 挂在
   `/skills/` 虚拟路径下,模型遇到对应任务才按需读取
+- 在 Web 界面的「技能」入口管理：卡片网格带悬浮效果，每个技能可单独
+  启停（停用后下一轮对话就不再加载，不用重启会话），点进详情页看渲染好
+  的 `SKILL.md`，顶部可返回卡片页
+- 添加方式：上传 `.md` / `.zip`、从本机目录导入、或用表单新建。内置技能
+  可停用不可删除；删掉同名用户技能会回退到内置版本
+
+**MCP 工具**
+
+- 在 Web 界面的「工具」入口接入 MCP 服务器——直接粘贴 Claude Desktop /
+  `.mcp.json` 的配置，一次可导入多个（支持 stdio、HTTP、SSE）。同名更新、
+  新名新增，任一条非法则整体不写，不会导入一半
+- 每台服务器可启停，「连接测试」会真的连上去列出它暴露的工具。MCP 工具
+  是加性的，与内置的文件/执行工具并存
 
 **SSH 与连接**
 
@@ -101,6 +116,11 @@ Xshell 可以省了。
   上传进行中会阻止终端断线回收任务关闭文件连接
 - 密码、主机密钥用浏览器弹窗输入;可选局域网访问,绑定非本机地址
   必须带 token
+- **设置**：通用（终端字号、滚动缓冲、光标、选中即复制）、外观（主题、
+  背景），以及技能 / 工具 / 模型三个入口。界面语言在中文与英文之间
+  **原地切换**，不刷新页面
+- 自定义背景存在本机 `~/.openterminal/wallpapers/`，铺放参数进 SQLite，
+  换浏览器不丢；媒体走支持 Range 的静态路由，视频背景拖进度条也流畅
 
 **无头 / 脚本**
 
@@ -293,7 +313,8 @@ ot exec -t prod-web -c "df -h /" --output json
 持久 shell 会话。自然语言直接交给 Agent 多轮调用工具,命令执行是 Agent
 的子能力(经同一会话);三级策略在 Agent 中间件层强制,提示词内容绕不过
 审批闸门。内置技能以文件形式挂在 `/skills/` 下,模型读技能和读普通参考
-文件走同一条路。
+文件走同一条路。MCP 工具经 `langchain-mcp-adapters` 接进来,与内置工具并列;
+技能停用是在下一轮对话的提示词里过滤掉,不是卸载挂载点。
 
 显示走**单管线**:PTY 字节流原样直达终端,shell 集成 hook 用带内 OSC 标记
 记账(历史/退出码/AI 上下文),AI 工具命令经 `__ot_exec__` 注入同一个 PTY,
@@ -307,7 +328,9 @@ ot exec -t prod-web -c "df -h /" --output json
 | 存储 | 位置 | 内容 |
 |---|---|---|
 | 配置 | `~/.openterminal/config.toml` | 模型网关 / shell 超时 / 策略 / 目标 |
-| 连接 | `~/.openterminal/connections.db` | 记住的连接及其命令集 |
+| 数据库 | `~/.openterminal/connections.db` | 记住的连接及命令集、模型配置、技能启停、MCP 服务器、背景参数 |
+| 技能 | `~/.openterminal/skills/` | 用户技能包（每目录一个 `SKILL.md`），同名覆盖内置 |
+| 背景 | `~/.openterminal/wallpapers/` | 自定义背景媒体；浏览器端不留存 |
 | 命令历史 | `~/.openterminal/history.db` | 每 target 的历史,重连灌回 shell |
 | 密码 | 系统凭据库(keyring) | 连接密码、命令集内联密码——不落明文文件 |
 | 主机画像缓存 | `~/.openterminal/hosts.toml` | 免重复探测 |
@@ -328,6 +351,15 @@ cd src/openterminal/web/frontend/ui && npm ci && npm test  # React island
 OT_TEST_SSH=1 OT_TEST_SSH_HOST=127.0.0.1 OT_TEST_SSH_PORT=2222 pytest -m ssh
 ```
 
+浏览器级验证会起真 Chrome 打真服务端，每条自成一体、跑完自动清理、
+逐项打印 PASS/FAIL:
+
+```sh
+node tools/verify-web/verify-settings-modules.cjs   # 设置页：通用 / 技能 / 工具
+node tools/verify-web/verify-manual-history.cjs     # 手动命令进消息历史，系统提示词不动
+node tools/verify-web/verify-wallpaper-storage.cjs  # 背景换浏览器不丢
+```
+
 ## 贡献
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)。欢迎提 Issue 和 Pull Request。
@@ -335,6 +367,7 @@ OT_TEST_SSH=1 OT_TEST_SSH_HOST=127.0.0.1 OT_TEST_SSH_PORT=2222 pytest -m ssh
 ## 致谢
 
 - [deepagents](https://github.com/langchain-ai/deepagents) & LangGraph — Agent 运行时
+- [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) — MCP 客户端
 - [xterm.js](https://xtermjs.org/) — 浏览器终端(内置于 `web/frontend/vendor/`)
 - [asyncssh](https://github.com/ronf/asyncssh) — SSH 客户端
 

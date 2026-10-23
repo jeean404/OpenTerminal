@@ -68,6 +68,9 @@ second in the browser (`ot web`). Here's what happens:
   override dialect · `/clear` new task · `/model` show model · `/exit` quit
 - Bounded self-correction: a failed command is retried at most once,
   tool-call turns are budget-capped
+- Commands you type by hand between tasks reach the model as context — a
+  rolling summary (command, exit code, output tail) merged into the last
+  message, not the raw output, so it doesn't bloat the window
 - Session token usage on the status line — exact when the gateway reports
   it, a local tiktoken estimate otherwise
 
@@ -85,6 +88,21 @@ second in the browser (`ot web`). Here's what happens:
 - Skill packs ship inside the package (e.g. `markdown-tables`); their
   `SKILL.md` files are mounted at `/skills/` and the model pulls one in
   only when the task calls for it
+- Manage them from the web UI's **Skills** entry: a card grid with hover,
+  per-skill on/off (off drops it from the model's next turn — no session
+  restart), and a detail page with the rendered `SKILL.md`
+- Add skills by uploading a `.md` or `.zip`, importing a local folder, or
+  writing one from a form. Built-ins can be disabled but not deleted;
+  deleting a same-named user skill falls back to the built-in.
+
+**MCP tools**
+
+- Connect MCP servers from the web UI's **Tools** entry — paste a Claude
+  Desktop / `.mcp.json` config and import several at once (stdio, HTTP and
+  SSE). Same-named entries are updated, new names are added, and one bad
+  entry rejects the whole import rather than landing half of it.
+- Toggle each server; a live test-connection lists the tools it exposes.
+  MCP tools are additive and join the built-in file/shell tools.
 
 **SSH & connections**
 
@@ -121,6 +139,13 @@ second in the browser (`ot web`). Here's what happens:
   terminal tab is waiting for cleanup.
 - Browser-dialog password and host-key entry; optional LAN access with a
   mandatory token for non-loopback binds
+- **Preferences** — General (terminal font size, scrollback, cursor, copy
+  on select), Appearance (theme, wallpapers), plus the Skills / Tools /
+  Model entries. Interface language switches between 中文 and English in
+  place, without a page reload.
+- Custom wallpapers live on the machine (`~/.openterminal/wallpapers`) with
+  their options in SQLite, so they survive switching browsers. Media is
+  served with Range support, so video wallpapers scrub smoothly.
 
 **Headless / scripting**
 
@@ -336,7 +361,9 @@ execution is a sub-capability of the agent, over the same session. The
 tiered policy is enforced as agent middleware, so the approval gate can't
 be bypassed by prompt content. Built-in skills are mounted as files under
 `/skills/`, so the agent loads them the same way it loads any other
-reference file.
+reference file. MCP tools come in through `langchain-mcp-adapters` and join
+the built-in tool set; a disabled skill is filtered out of the model's next
+turn rather than unmounted.
 
 Display is a **single pipeline**: PTY bytes go straight to the terminal,
 shell-integration hooks keep the books via in-band OSC markers (history /
@@ -353,7 +380,9 @@ in-memory and cleared on restart. What persists is factual state:
 | Store | Location | Contents |
 |---|---|---|
 | Config | `~/.openterminal/config.toml` | gateway / shell budgets / policy / targets |
-| Connections | `~/.openterminal/connections.db` | remembered connections and their command sets |
+| Database | `~/.openterminal/connections.db` | remembered connections and command sets, model profiles, skill enable state, MCP servers, wallpaper state |
+| Skills | `~/.openterminal/skills/` | user skill packs (`SKILL.md` per folder), overriding built-ins by name |
+| Wallpapers | `~/.openterminal/wallpapers/` | custom wallpaper media; the browser keeps none of it |
 | Command history | `~/.openterminal/history.db` | per-target history, replayed into the shell on reconnect |
 | Passwords | OS credential store (keyring) | connection passwords and command-set secrets — never written to plaintext files |
 | Host profiles | `~/.openterminal/hosts.toml` | per-host system profile cache |
@@ -374,6 +403,15 @@ Real-sshd tests are opt-in:
 OT_TEST_SSH=1 OT_TEST_SSH_HOST=127.0.0.1 OT_TEST_SSH_PORT=2222 pytest -m ssh
 ```
 
+Browser-level checks drive a real Chrome against a live server. Each is
+self-contained, cleans up after itself, and prints PASS/FAIL:
+
+```sh
+node tools/verify-web/verify-settings-modules.cjs   # settings: general / skills / tools
+node tools/verify-web/verify-manual-history.cjs     # manual commands reach the model; system prompt untouched
+node tools/verify-web/verify-wallpaper-storage.cjs  # wallpapers survive switching browsers
+```
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome.
@@ -381,6 +419,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome.
 ## Acknowledgments
 
 - [deepagents](https://github.com/langchain-ai/deepagents) & LangGraph — agent runtime
+- [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) — MCP client
 - [xterm.js](https://xtermjs.org/) — browser terminal (vendored in `web/frontend/vendor/`)
 - [asyncssh](https://github.com/ronf/asyncssh) — SSH client
 
