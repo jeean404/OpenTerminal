@@ -202,10 +202,12 @@ pip install -e .
 
 Configure a model gateway under **Settings → Models** after starting `ot web`.
 The **Settings → Appearance** page offers three color themes and ten built-in
-textured wallpapers. You can also upload a local image and adjust its fit,
-tiling, position, opacity, and brightness. Images are stored in the current
-browser, never uploaded to the server. Appearance applies across the Web UI
-and works offline.
+textured wallpapers. You can also upload a local image (PNG / JPEG / WebP, up to
+12 MB) or a short clip (MP4 / WebM, up to 64 MB) and adjust its fit, tiling,
+position, opacity, and brightness. A clip plays back as a muted, looping
+background — a seamlessly looping clip gives the best result. Everything is
+stored in the current browser, never uploaded to the server. Appearance applies
+across the Web UI and works offline.
 The CLI continues to support settings from environment variables or `config.toml`.
 
 ## Quick start

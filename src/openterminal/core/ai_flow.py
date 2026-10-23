@@ -78,7 +78,7 @@ class AiFlow:
         """agent 工具执行用的会话：交互式 = InteractiveRunner（同 PTY 注入），
         否则原始 session（哨兵批处理，仅记账，无 AI 输入通道）。"""
         return self.core._runner if self.core._interactive else self.core.session
-    def _build_agent_now(self) -> None:
+    def _build_agent_now(self, tools: list | None = None) -> None:
         """立即构建/重建 agent。AI 栈经 _impl._load_agent_stack 惰性载入模块级名字
         （deepagents/langchain 约 4s 导入由此与启动路径解耦）；测试 monkeypatch
         的 _impl.build_agent 桩在此生效（非 None 即跳过真导入）。"""
@@ -89,12 +89,27 @@ class AiFlow:
         self.core.agent, self.core.allowed, self.core.backend = _impl.build_agent(
             self.core.profile, self._agent_session(), self.core.cfg, self.core.policy,
             model=_impl.build_chat_model(self.core._model),
-            remote_target=remote)
-    def _ensure_agent(self) -> None:
+            remote_target=remote,
+            tools=tools or [])
+
+    async def _gather_tools(self) -> list:
+        """启用中的 MCP 工具。拉不到就当没有——绝不挡住 agent 构建。"""
+        try:
+            from ..agent.mcp import gather_mcp_tools
+            return await gather_mcp_tools()
+        except Exception:  # noqa: BLE001 - 工具是加分项，不是前置条件
+            return []
+
+    async def _rebuild_agent(self) -> None:
+        """重建 agent 并刷新 MCP 工具（换模型 / 换系统方言 / 改工具开关）。"""
+        tools = await self._gather_tools()
+        await asyncio.to_thread(self._build_agent_now, tools)
+
+    async def _ensure_agent(self) -> None:
         """首个 AI 任务时构建 agent，已建则复用。self.core.agent/backend 从 None
         变就绪的唯一入口（建连不再预建）。"""
         if self.core.agent is None:
-            self._build_agent_now()
+            await self._rebuild_agent()
     async def _prewarm_agent(self) -> None:
         """后台预热 AI 栈导入（只导入不构建：构建依赖 profile/model，留主
         线程）。建连完成即跑，首条自然语言的 task_start 不再等秒级 import；
@@ -473,7 +488,7 @@ class AiFlow:
             # 事件循环整个冻住：实测 sleep(0.12) 被拖成 8.9s，task_start 虽已
             # emit 却同样迟到 9s 才达前端（分析卡/思考徽标一起迟到）。放线程
             # 池跑构建，循环不被挡：task_start 毫秒级达前端，卡即出
-            await asyncio.to_thread(self._ensure_agent)
+            await self._ensure_agent()
         except Exception as e:  # noqa: BLE001 - 构建失败发 error 事件让前端收尾
             await self.core.emit_msg(ServerMsg(
                 type="event", event={"kind": "error",
@@ -612,7 +627,7 @@ class AiFlow:
                 type="status", text=f"已切换模型：{model_id}"))
             return
         try:
-            self._build_agent_now()
+            await self._rebuild_agent()
             await self.core.emit_msg(ServerMsg(
                 type="status", text=f"已切换模型：{model_id}"))
         except Exception as e:  # noqa: BLE001 - 切换失败提示，不影响会话

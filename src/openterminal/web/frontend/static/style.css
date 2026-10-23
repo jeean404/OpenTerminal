@@ -100,6 +100,23 @@ body::after {
   opacity: .32;
   mix-blend-mode: screen;
 }
+
+/* 视频背景：background-image 装不下 video，改用真实 <video> 图层。
+   树序落在 body::before 之上、body::after 星点纹理之下，与静态图同一套变量。 */
+.wallpaper-video {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: var(--wallpaper-object-fit, cover);
+  object-position: var(--wallpaper-position, center);
+  opacity: var(--wallpaper-opacity, .7);
+  filter: brightness(var(--wallpaper-brightness, 100%));
+  pointer-events: none;
+  background-color: var(--bg);
+}
+:root[data-wallpaper-active="video"] body::before { background-image: none; }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
 input { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; }
 input:focus { outline: none; border-color: var(--accent); }
@@ -390,6 +407,20 @@ body.settings-open #panes { display: none; }
 .wallpaper-image:focus-within .wallpaper-image-remove { opacity: 1; transform: none; }
 .wallpaper-image-remove:hover { background: var(--danger); }
 @media (hover: none) { .wallpaper-image-remove { opacity: 1; transform: none; } }
+.wallpaper-image-kind {
+  position: absolute; top: 5px; left: 5px;
+  padding: 2px 6px; border-radius: 999px;
+  color: #fff; font-size: 9px; font-weight: 700; line-height: 1.4;
+  background: rgba(0, 0, 0, .62); border: 1px solid rgba(255, 255, 255, .22);
+  pointer-events: none;
+}
+.wallpaper-check {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 8px;
+  color: var(--text); font-size: 11px; cursor: pointer;
+}
+.wallpaper-check input { accent-color: var(--accent); }
+.wallpaper-check small { color: var(--muted); }
 .wallpaper-controls {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 18px; margin-top: 16px;
@@ -1078,7 +1109,7 @@ input, select { transition: border-color .15s, box-shadow .15s; }
 .theme-option:hover { transform: translateY(-1px); }
 .wallpaper-custom { border-radius: 12px; }
 .wallpaper-group-title {
-  display: flex; align-items: baseline; gap: 8px; margin: 22px 0 10px;
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; margin: 22px 0 10px;
   font-size: 12px; font-weight: 600; letter-spacing: .02em;
 }
 .wallpaper-group-title small { color: var(--muted); font-weight: 400; font-size: 11px; }
@@ -1463,3 +1494,224 @@ input, select { transition: border-color .15s, box-shadow .15s; }
 .tcard.done .aphead { background: rgba(63, 185, 80, 0.13); }
 .tcard.failed { border-color: var(--warn); background: #1c1608; }
 .tcard.failed .aphead { background: rgba(210, 153, 34, 0.14); }
+
+/* --- 设置页新增模块：通用 / 技能 / 工具 --- */
+
+.settings-heading-actions { display: flex; gap: 8px; align-items: center; }
+.settings-btn-sm { padding: 3px 10px; font-size: 11px; }
+
+/* 设置行：左说明右控件，通用页统一走这个排版 */
+.settings-rows {
+  display: flex; flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 13px 4px; border-bottom: 1px solid var(--border);
+}
+.settings-row-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.settings-row-text strong { font-size: 13px; font-weight: 600; }
+.settings-row-text small { color: var(--muted); font-size: 11px; }
+.settings-row-control { display: flex; align-items: center; gap: 10px; }
+.settings-row-control output { color: var(--muted); font-size: 12px; min-width: 22px; text-align: right; }
+.settings-row input[type="range"] { width: 170px; accent-color: var(--accent); }
+.settings-row select {
+  font: inherit; color: var(--text); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+}
+.settings-row select:focus { outline: none; border-color: var(--accent); }
+
+/* 开关（skill 启停 / MCP 启停 / 通用设置共用） */
+.switch { position: relative; display: inline-flex; flex: none; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: relative; display: block;
+  width: 36px; height: 20px; border-radius: 999px; cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--border);
+  transition: background .15s, border-color .15s;
+}
+.switch-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--muted); transition: transform .15s, background .15s;
+}
+.switch input:checked + .switch-track {
+  background: var(--accent-soft); border-color: var(--accent);
+}
+.switch input:checked + .switch-track::after {
+  transform: translateX(16px); background: var(--accent);
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* 卡片网格：技能与 MCP 服务器共用同一套卡片骨架 */
+.skill-grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
+}
+.skill-card, .mcp-card {
+  position: relative; display: flex; flex-direction: column; gap: 10px;
+  padding: 14px; border-radius: 12px; cursor: pointer;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 64%, transparent);
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.skill-card:hover, .skill-card:focus-visible,
+.mcp-card:hover, .mcp-card:focus-visible {
+  border-color: var(--muted); transform: translateY(-2px); outline: none;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .35);
+}
+.skill-card:focus-visible, .mcp-card:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.skill-card-off, .mcp-card-off { opacity: .62; }
+.skill-card-off:hover, .mcp-card-off:hover { opacity: 1; }
+
+.skill-card-head { display: flex; align-items: center; gap: 10px; }
+.skill-mark {
+  display: grid; place-items: center; flex: none;
+  width: 34px; height: 34px; border-radius: 9px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 14px; font-weight: 700;
+}
+.skill-mark-lg { width: 42px; height: 42px; font-size: 17px; }
+.skill-card-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.skill-card-title strong {
+  font-size: 13px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.skill-card-title small { color: var(--muted); font-size: 11px; }
+.skill-desc {
+  margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.55; flex: 1;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.skill-card-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.skill-size { color: var(--muted); font-size: 10.5px; flex: none; }
+.mcp-actions { display: flex; gap: 6px; }
+
+/* 右上角删除键：hover 浮出，触屏常显（照 .wallpaper-image-remove 的先例） */
+.skill-remove {
+  position: absolute; top: 8px; right: 8px;
+  width: 22px; height: 22px; border-radius: 50%; line-height: 1;
+  display: grid; place-items: center; font-size: 14px;
+  color: var(--muted); background: var(--panel2); border: 1px solid var(--border);
+  opacity: 0; transform: scale(.8);
+  transition: opacity .15s, transform .15s, background .15s, color .15s;
+}
+.skill-card:hover .skill-remove, .skill-card:focus-within .skill-remove,
+.mcp-card:hover .skill-remove, .mcp-card:focus-within .skill-remove {
+  opacity: 1; transform: none;
+}
+.skill-remove:hover { color: var(--danger); border-color: var(--danger); }
+@media (hover: none) { .skill-remove { opacity: 1; transform: none; } }
+
+.mcp-endpoint { margin: 0; }
+.mcp-endpoint code {
+  display: block; padding: 7px 9px; border-radius: 7px;
+  background: var(--term-bg); color: var(--muted);
+  font-family: var(--mono); font-size: 11px;
+  overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.mcp-tools {
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px;
+}
+.mcp-tool-list {
+  margin: 8px 0 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.mcp-tool-list li code {
+  display: inline-block; padding: 2px 6px; border-radius: 5px;
+  background: var(--accent-soft); color: var(--accent);
+  font-family: var(--mono); font-size: 11px;
+}
+.mcp-tool-list li p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+
+/* 技能详情页：卡片页与详情页两级，返回按钮在面板顶部 */
+.skill-back { margin-bottom: 14px; }
+.skill-detail { display: flex; flex-direction: column; gap: 14px; }
+.skill-detail-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+}
+.skill-detail-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.skill-detail-title h3 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.skill-detail-sub { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
+.skill-detail-desc { margin: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
+.skill-detail-meta {
+  margin: 0; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 64%, transparent);
+}
+.skill-detail-meta div { display: flex; gap: 12px; align-items: baseline; }
+.skill-detail-meta dt {
+  flex: none; width: 96px; color: var(--muted); font-size: 11px;
+}
+.skill-detail-meta dd {
+  margin: 0; min-width: 0; color: var(--text); font-size: 11.5px; overflow-wrap: anywhere;
+}
+.skill-detail-meta code { font-family: var(--mono); color: var(--cyan); }
+.skill-detail-h { margin: 4px 0 0; font-size: 13px; font-weight: 600; }
+.skill-detail-body {
+  padding: 16px 18px; border-radius: 10px; line-height: 1.7; font-size: 12.5px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 64%, transparent);
+  overflow-x: auto;
+}
+.skill-detail-body h1, .skill-detail-body h2, .skill-detail-body h3 {
+  margin: 1.1em 0 .5em; font-size: 14px;
+}
+.skill-detail-body h1 { font-size: 16px; }
+.skill-detail-body p { margin: .55em 0; }
+.skill-detail-body code {
+  font-family: var(--mono); padding: 1px 5px; border-radius: 4px;
+  background: var(--panel2); font-size: 11.5px;
+}
+.skill-detail-body pre {
+  padding: 12px; border-radius: 8px; overflow-x: auto;
+  background: var(--term-bg); border: 1px solid var(--border);
+}
+.skill-detail-body pre code { padding: 0; background: none; }
+.skill-detail-body table { border-collapse: collapse; width: 100%; }
+.skill-detail-body th, .skill-detail-body td {
+  border: 1px solid var(--border); padding: 5px 9px; text-align: left; font-size: 11.5px;
+}
+.skill-detail-body th { background: var(--panel2); }
+.skill-detail-actions { display: flex; gap: 8px; }
+
+/* 浮层提示：照 .fp-toast 的做法，各面板自己持有一个节点 */
+.skill-toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  margin: 0; padding: 8px 16px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  font-size: 12px; opacity: 0; pointer-events: none;
+  transition: opacity .2s; z-index: 40;
+}
+.skill-toast.show { opacity: .94; }
+.skill-toast.bad { color: var(--danger); border-color: var(--danger); }
+
+/* 添加技能弹窗 */
+.skill-add { display: flex; flex-direction: column; gap: 12px; }
+.skill-add-tabs { align-self: flex-start; }
+.skill-add-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.skill-add label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.skill-add input, .skill-add textarea {
+  font: inherit; color: var(--text); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+}
+.skill-add textarea {
+  font-family: var(--mono); font-size: 11.5px; resize: vertical; line-height: 1.5;
+}
+.skill-add input:focus, .skill-add textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+.skill-file-drop {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 22px 14px; border-radius: 10px; cursor: pointer; text-align: center;
+  border: 1px dashed var(--border);
+  transition: border-color .15s, background .15s;
+}
+.skill-file-drop:hover, .skill-file-drop.dragover {
+  border-color: var(--accent); background: var(--accent-soft);
+}

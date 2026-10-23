@@ -1,10 +1,20 @@
+"use strict";
+
+function _t(key, ...args) {
+  // node 测试单独 require 本文件时全局 t 不存在：回落原文，但占位符仍要替换，
+  // 否则断言会拿到带 {0} 的键
+  const text = (typeof t === "function") ? t(key) : key;
+  if (!args.length) return text;
+  return String(text).replace(/\{(\d+)\}/g, (whole, n) =>
+    args[Number(n)] === undefined ? whole : String(args[Number(n)]));
+}
+
 // OpenTerminal Web 前端：左侧服务器列表 + 右侧多 tab 终端。
 // 单管线架构（docs/design-single-pipeline.md）：一个全屏连续 xterm 是唯一渲染
 // 管线，PTY 字节直写（SSH/Agent 统一）——Tab 补全、历史、Ctrl+R、vim/top、
 // 嵌套 shell、clear 全部走终端原生；AI 卡片以 React island 分区挂载（阿里
 // workbench 同款）：卡片占 pad 打孔预留的空白行，输出永远从卡片下方流走。
 // 分析卡（流式）、总结卡（mdLite 表格）、审批卡（按钮/编辑/快捷键）。
-"use strict";
 
 // HTML 转义（与 md_lite.js 的 esc 同实现；island 的 md_lite 打包进了 ui.js，
 // index.html 不再全局装载 md_lite.js，这里本地补一份给 modal/tab 等用）
@@ -41,8 +51,8 @@ function setToken(v) {
 
 function promptForToken() {
   return new Promise(resolve => {
-    modalShell("访问令牌", `<input type="password" id="modal-value" autofocus>`, [
-      {label: "确定", primary: true, onClick: () => {
+    modalShell(_t("访问令牌"), `<input type="password" id="modal-value" autofocus>`, [
+      {label: _t("确定"), primary: true, onClick: () => {
         setToken(document.getElementById("modal-value").value);
         resolve();
         return true; // close
@@ -107,7 +117,7 @@ function modalDismissPassword() {
   }
 }
 
-function modalConfirm(title, message, onOk, yesLabel = "信任", noLabel = "拒绝") {
+function modalConfirm(title, message, onOk, yesLabel = _t("信任"), noLabel = _t("拒绝")) {
   modalShell(title, `<p>${esc(message)}</p>`, [
     {label: yesLabel, primary: true, onClick: () => onOk(true)},
     {label: noLabel, onClick: () => onOk(false)},
@@ -231,7 +241,7 @@ class Session {
     const tabBtn = document.createElement("button");
     tabBtn.className = "tab";
     tabBtn.id = `tabbtn-${this.tabId}`;
-    tabBtn.innerHTML = `<span class="dot tab-dot connecting" title="连接状态"></span><span class="tab-name">${esc(this.name)}</span><span class="tab-x" title="关闭">×</span>`;
+    tabBtn.innerHTML = `<span class="dot tab-dot connecting" title="${_t("连接状态")}"></span><span class="tab-name">${esc(this.name)}</span><span class="tab-x" title="${_t("关闭")}">×</span>`;
     tabBtn.querySelector(".tab-name").onclick = () => activateTab(this.tabId);
     tabBtn.querySelector(".tab-x").onclick = ev => { ev.stopPropagation(); closeTab(this.tabId); };
     document.getElementById("tabs").appendChild(tabBtn);
@@ -247,23 +257,23 @@ class Session {
           <button data-mode="agent" class="on">Agent</button>
         </div>
         <div class="pane-host" id="host-${this.tabId}"></div>
-        <button class="files-toggle" id="filesbtn-${this.tabId}" tabindex="-1" title="远程文件：登录该主机的家目录（上传/下载）">📁 文件</button>
+        <button class="files-toggle" id="filesbtn-${this.tabId}" tabindex="-1" title="${_t("远程文件：登录该主机的家目录（上传/下载）")}">${_t("📁 文件")}</button>
       </div>
       <div class="ot-stage" id="stage-${this.tabId}">
         <div class="ot-blocks" id="blocks-${this.tabId}"></div>
         <div class="term" id="term-${this.tabId}"></div>
       </div>
       <div class="statusbar">
-        <span class="status-connect" id="conn-${this.tabId}" title="正在建立连接"><i class="cspin"></i><span>连接中</span><span class="cdots"></span></span>
-        <span class="status-think" id="think-${this.tabId}" hidden title="任务未结束：AI 正在分析或执行"><i class="tspin"></i><span class="ttext">AI 正在思考</span><span class="tdots"></span></span>
+        <span class="status-connect" id="conn-${this.tabId}" title="${_t("正在建立连接")}"><i class="cspin"></i><span>${_t("连接中")}</span><span class="cdots"></span></span>
+        <span class="status-think" id="think-${this.tabId}" hidden title="${_t("任务未结束：AI 正在分析或执行")}"><i class="tspin"></i><span class="ttext">${_t("AI 正在思考")}</span><span class="tdots"></span></span>
         <span class="status-text" id="status-${this.tabId}"></span>
         <span class="status-meta">
           <span class="status-cmdset" id="cs-${this.tabId}"></span>
-          <button class="status-newtask" id="newtask-${this.tabId}" tabindex="-1" title="开启新会话（/clear）：清掉本轮 AI 卡片与任务上下文">新会话</button>
-          <button class="status-stop" id="stop-${this.tabId}" hidden tabindex="-1" title="停止当前任务（Ctrl+C）">⏹</button>
-          <span class="status-tokens" id="tokens-${this.tabId}" title="累计 token 消耗（输入/输出）"></span>
-          <select class="status-model" id="model-${this.tabId}" tabindex="-1" title="切换模型"></select>
-          <span class="status-time" id="time-${this.tabId}" title="任务耗时"></span>
+          <button class="status-newtask" id="newtask-${this.tabId}" tabindex="-1" title="${_t("开启新会话（/clear）：清掉本轮 AI 卡片与任务上下文")}">${_t("新会话")}</button>
+          <button class="status-stop" id="stop-${this.tabId}" hidden tabindex="-1" title="${_t("停止当前任务（Ctrl+C）")}">⏹</button>
+          <span class="status-tokens" id="tokens-${this.tabId}" title="${_t("累计 token 消耗（输入/输出）")}"></span>
+          <select class="status-model" id="model-${this.tabId}" tabindex="-1" title="${_t("切换模型")}"></select>
+          <span class="status-time" id="time-${this.tabId}" title="${_t("任务耗时")}"></span>
           <span class="status-size" id="size-${this.tabId}"></span>
         </span>
       </div>`;
@@ -304,8 +314,14 @@ class Session {
 
   _buildTerm() {
     // 单管线：唯一渲染实例，SSH 与 Agent 模式共用（命令/AI 输出全在网格里）
+    // 通用设置里的终端偏好（字号/缓冲/光标）在这里落地；缺省值与设置页一致
+    const termOpts = window.__otTermOptions || {};
     const term = new Terminal({
-      cursorBlink: true, fontSize: 13, scrollback: 5000, convertEol: true,
+      cursorBlink: termOpts.cursorBlink !== false,
+      fontSize: Number(termOpts.fontSize) || 13,
+      scrollback: Number(termOpts.scrollback) || 5000,
+      cursorStyle: termOpts.cursorStyle || "block",
+      convertEol: true,
       scrollOnUserInput: true,
       // registerMarker（卡片层锚定）在 xterm 5+ 为稳定 API；
       // allowProposedApi 保留以防后续接入装饰类扩展
@@ -317,13 +333,20 @@ class Session {
     this.fitAddon = new FitAddon.FitAddon();
     term.loadAddon(this.fitAddon);
     term.open(this.paneEl.querySelector(`#term-${this.tabId}`));
+    // 选中即复制：监听常驻，开关只在触发时判断（免得反复注册/注销）
+    term.onSelectionChange(() => {
+      if ((window.__otTermOptions || {}).copyOnSelect) {
+        const sel = term.getSelection();
+        if (sel) this._copyText(sel);
+      }
+    });
     // 连接中浮层：盖在终端区中央，两阶段文案（连接中 → 初始化 Agent，由
     // worker 的 stage 事件切换），ready/closed/error 即撤（setStatus 统一
     // 切换）；须在 term.open 之后插入，xterm 接管容器
     const termEl = this.paneEl.querySelector(`#term-${this.tabId}`);
     termEl.insertAdjacentHTML("beforeend",
       `<div class="connect-overlay" id="connov-${this.tabId}">` +
-      `<i class="cspin"></i><span class="ctext">连接中</span>` +
+      `<i class="cspin"></i><span class="ctext">${_t("连接中")}</span>` +
       `<span class="cdots"></span></div>`);
     // 键盘字节直发 PTY（契约：input 保留）。外部分类触发链：agent 模式下
     // 整行带自然语言特征（CJK/? 前缀）时不发回车，改送 submit 让 worker 直接
@@ -344,7 +367,7 @@ class Session {
         if (this._keyBacklogBytes <= 65536) this._keyBacklog.push(d);
         else if (!this._keyBacklogWarned) {
           this._keyBacklogWarned = true;
-          this.setStatus("closed", "连接未就绪，输入缓存已满，后续按键被丢弃");
+          this.setStatus("closed", _t("连接未就绪，输入缓存已满，后续按键被丢弃"));
         }
         return;
       }
@@ -430,7 +453,7 @@ class Session {
     const now = Date.now();
     if ((this._holdDepth || 0) > 0 && this._holdSince &&
         now - this._holdSince > 10000) {
-      console.warn("[ot] 扣流泄漏强制放行:", (this._holdTags || []).join(","));
+      console.warn(_t("[ot] 扣流泄漏强制放行:"), (this._holdTags || []).join(","));
       this._holdDepth = 1;
       this._releaseBytes();
     }
@@ -440,8 +463,8 @@ class Session {
     // sender 卡死/sink 僵尸），等 onclose 永不触发——主动close走退避重连
     if (this._lastSendAt > this._lastMsgAt &&
         now - this._lastSendAt > 8000 && now - this._lastMsgAt > 15000) {
-      console.warn("[ot] 连接无响应，主动重连");
-      this.setStatus("closed", "连接无响应，正在重连");
+      console.warn(_t("[ot] 连接无响应，主动重连"));
+      this.setStatus("closed", _t("连接无响应，正在重连"));
       this._failPads();
       try { ws.close(); } catch (e) { this.connectWS(); }
     }
@@ -567,7 +590,7 @@ class Session {
       if (bl) for (const d of bl) this._feedData(d);
       // 退避重连成功的回连：worker 宽限期内 PTY 还活着，不会再发 ready，
       // 自行把状态翻回已连接（若 PTY 已死，首个键走 worker 重连链再纠正）
-      if (this._everRetried && !this._dead) this.setStatus("connected", "连接已恢复");
+      if (this._everRetried && !this._dead) this.setStatus("connected", _t("连接已恢复"));
     };
     // PTY 原始字节走二进制帧直写唯一 xterm（契约），JSON 控制事件走 handleMsg
     ws.onmessage = ev => {
@@ -585,7 +608,7 @@ class Session {
     ws.onclose = ev => {
       this._pwCapture = null;   // 断线终结登录期密码捕获，重连后不残留
       this._pwEntered = null;
-      this.setStatus("closed", "连接已关闭");
+      this.setStatus("closed", _t("连接已关闭"));
       this._failPads();
       // 断线自动重连（指数退避）；4401/4404（鉴权失败/worker 已回收）重试无意义
       if (!this._dead && ev.code !== 4401 && ev.code !== 4404) {
@@ -604,7 +627,7 @@ class Session {
     const delay = Math.min(10000, 500 * 2 ** (this._wsRetries || 0));
     this._wsRetries = (this._wsRetries || 0) + 1;
     if (this._wsRetries === 1 || this._wsRetries % 8 === 0)
-      console.warn(`[ot] 第 ${this._wsRetries} 次重连，${delay}ms 后`);
+      console.warn(_t("[ot] 第 {0} 次重连，{1}ms 后", this._wsRetries, delay));
     this._wsRetryT = setTimeout(() => {
       this._wsRetryT = null;
       if (!this._dead) this.connectWS();
@@ -733,7 +756,7 @@ class Session {
     this._welcomeTimer = setTimeout(() => {
       this._welcomeTimer = null;
       if (this._welcomeHold) {
-        console.warn("[ot] 欢迎横幅扣留到点，强制放行");
+        console.warn(_t("[ot] 欢迎横幅扣留到点，强制放行"));
         this._releaseWelcome();
       }
     }, 1600);
@@ -875,7 +898,7 @@ class Session {
     if (!el) {
       el = document.createElement("div");
       el.className = "copy-toast";
-      el.textContent = "已复制";
+      el.textContent = _t("已复制");
       this.paneEl.appendChild(el);
     }
     clearTimeout(this._toastTimer);
@@ -913,8 +936,8 @@ class Session {
       b.onclick = () => { menu.remove(); fn(); };
       menu.appendChild(b);
     };
-    mk("复制", !sel, () => this._copyText(sel));
-    mk("粘贴", false, () => this._pasteText());
+    mk(_t("复制"), !sel, () => this._copyText(sel));
+    mk(_t("粘贴"), false, () => this._pasteText());
     document.body.appendChild(menu);
     // 菜单内部点击不冒泡（避免 document 级关闭先于按钮 click 触发）
     menu.addEventListener("mousedown", ev => ev.stopPropagation());
@@ -1005,13 +1028,13 @@ class Session {
             this._blockView = new BlockView(host, { feed: this._feed, follow: false });
           }
         } catch (e) {
-          console.error("[ot] 块流初始化失败，回退 decoration 路径:", e);
+          console.error(_t("[ot] 块流初始化失败，回退 decoration 路径:"), e);
           this._blocks = null;
           this._blockView = null;
         }
         return this._feed;
       }).catch(e => {
-        console.error("[ot] 卡片层加载失败:", e);
+        console.error(_t("[ot] 卡片层加载失败:"), e);
         this._feedPromise = null;   // 允许下次事件重试
         return null;
       });
@@ -1888,7 +1911,7 @@ if (inView) {
       this._ghostKey = key;
       this._ghostDec.onRender(el => {
         el.classList.add("ot-ghost");
-        el.textContent = "输入自然语言任务，AI 帮你执行；? 前缀强制 AI，! 强制命令";
+        el.textContent = _t("输入自然语言任务，AI 帮你执行；? 前缀强制 AI，! 强制命令");
       });
       try { this.term.refresh(0, this.term.rows - 1); } catch (e) {}
     } catch (e) { this._hideGhost(); }
@@ -2249,7 +2272,7 @@ if (inView) {
 
   _fusePads() {
     this._padFused = true;
-    this.setStatus(this.status, "占位补差已熔断，卡片按已垫高度截断");
+    this.setStatus(this.status, _t("占位补差已熔断，卡片按已垫高度截断"));
     for (const slot of this._slots.values()) {
       this._clampCard(slot);
       slot.padOut = 0;   // 熔断后不再补差：在途额清零，落账只认缓冲
@@ -2280,7 +2303,7 @@ if (inView) {
   _fallbackPlain(slot) {
     const md = this._cardsText && this._cardsText.get(slot.id);
     if (md) this._writePlain(md.replace(/[*`#>|]/g, ""));
-    this.setStatus(this.status, "卡片渲染失败，已降级为纯文本");
+    this.setStatus(this.status, _t("卡片渲染失败，已降级为纯文本"));
   }
 
   _writePlain(text) {
@@ -2714,7 +2737,7 @@ if (inView) {
     this._taskTeardown();
     this._ensureFeed().then(f => f && f.handle({kind: "task_fail", reason: kind}));
     this.setStatus(kind === "denied" ? "error" : this.status,
-                   text || (kind === "denied" ? "✗ 已拒绝" : "任务已中止"));
+                   text || (kind === "denied" ? _t("✗ 已拒绝") : _t("任务已中止")));
     this._scheduleHeal();
     this._endSweepSoon();
   }
@@ -2909,7 +2932,7 @@ if (inView) {
     }).catch(e => {
       // 卡片层中途抛错也不能让审批静默死掉——core 在等决策，任务会假死。
       // 转模态兜底，决策永远有可点入口；已有模态就不叠第二张。
-      console.error("[ot] 审批武装失败，转模态兜底:", e);
+      console.error(_t("[ot] 审批武装失败，转模态兜底:"), e);
       if (this._dead || this._approvalResolved ||
           this._approvalKey !== key) return;
       try {
@@ -2928,16 +2951,16 @@ if (inView) {
     // modal.js 缺席（加载失败/测试环境）时不得抛穿——看门狗循环的 toModal
     // 会把异常吃成 unhandledRejection，测试互相污染
     if (typeof modalShell !== "function") {
-      console.warn("[ot] 模态组件缺失（modal.js 未载），审批模态兜底不可用");
+      console.warn(_t("[ot] 模态组件缺失（modal.js 未载），审批模态兜底不可用"));
       return;
     }
-    modalShell("审批：" + (command || ""),
+    modalShell(_t("审批：") + (command || ""),
       `<p>${esc(reasons || "")}</p>`,
-      [{label: "批准", primary: true,
+      [{label: _t("批准"), primary: true,
         onClick: () => this._sendDecision({type: "approve"}, command, key)},
-       {label: "拒绝",
+       {label: _t("拒绝"),
         onClick: () => this._sendDecision(
-          {type: "reject", message: "用户拒绝了该命令"}, command, key)}]);
+          {type: "reject", message: _t("用户拒绝了该命令")}, command, key)}]);
   }
 
   // 决策单发出口：卡内 Ctrl+Enter（feed onDecision）与模态按钮都会到，
@@ -3037,7 +3060,7 @@ if (inView) {
     const ov = document.getElementById(`connov-${this.tabId}`);
     if (!ov) return;
     const t = ov.querySelector(".ctext");
-    if (t) t.textContent = stage === "agent_init" ? "初始化 Agent" : "连接中";
+    if (t) t.textContent = stage === "agent_init" ? _t("初始化 Agent") : _t("连接中");
   }
 
   _fmtDuration(ms) {
@@ -3102,14 +3125,14 @@ if (inView) {
     if (!el) return;
     clearTimeout(this._csTimer);
     if (msg.state === "paused") {
-      el.innerHTML = '命令集暂停：请在终端输入密码 ' +
-        '<button class="status-cmdset-resume" tabindex="-1">继续</button>';
+      el.innerHTML = _t("命令集暂停：请在终端输入密码 ") +
+        `<button class="status-cmdset-resume" tabindex="-1">${_t("继续")}</button>`;
       el.querySelector(".status-cmdset-resume").onclick = () =>
         this.sendJson({type: "cmdset_resume"});
       return;
     }
     if (msg.state === "done") {
-      el.textContent = "命令集执行完毕";
+      el.textContent = _t("命令集执行完毕");
       this._csTimer = setTimeout(() => { el.textContent = ""; }, 4000);
       return;
     }
@@ -3118,9 +3141,9 @@ if (inView) {
     // (core 对 `>` 行传空串),防密码泄进状态栏。
     const cmd = msg.cmd ? String(msg.cmd) : "";
     const short = cmd.length > 40 ? cmd.slice(0, 40) + "…" : cmd;
-    el.textContent = `命令集 ${msg.index || ""}/${msg.total || ""}` +
+    el.textContent = _t("命令集 {0}/{1}", msg.index || "", msg.total || "") +
       (short ? "：" + short : "");
-    el.title = cmd ? "正在执行：" + cmd : "";
+    el.title = cmd ? _t("正在执行：") + cmd : "";
   }
 
   _setStopVisible(visible) {
@@ -3142,24 +3165,24 @@ if (inView) {
       // 不能一路「AI 正在思考」——用户看到的就是假死（bug2 观感根因）。
       const elapsed = this._taskStartedAt
         ? Math.max(0, Math.round((Date.now() - this._taskStartedAt) / 1000)) : 0;
-      let text = elapsed ? `AI 正在思考 ${elapsed}s` : "AI 正在思考";
-      let title = "任务未结束：AI 正在分析或执行";
+      let text = elapsed ? _t("AI 正在思考 {0}s", elapsed) : _t("AI 正在思考");
+      let title = _t("任务未结束：AI 正在分析或执行");
       if (this._runningTool) {
         const t = this._runningTool.length > 36
           ? this._runningTool.slice(0, 36) + "…" : this._runningTool;
-        text = "执行中: " + t;
-        title = "正在执行: " + this._runningTool;
+        text = _t("执行中: ") + t;
+        title = _t("正在执行: ") + this._runningTool;
       }
       if (this._approvalOpen) {
-        text = "等待审批";
-        title = "命令等待你的决定（Ctrl+Enter 执行 / Ctrl+Backspace 拒绝）";
+        text = _t("等待审批");
+        title = _t("命令等待你的决定（Ctrl+Enter 执行 / Ctrl+Backspace 拒绝）");
       }
       // Phase 3 徽标增强：三态文案拼进度计数（progress 心跳 1s 刷）——
       // 「思考中 12s · 已生成 N 字 · in X / out Y」。tokens 为 runner 估算口径，
       // usage 事件到后由 _renderTokens 修正在状态栏右侧（此处保持心跳值）
       const p = this._progress;
       if (p && (p.chars || p.tokensIn || p.tokensOut)) {
-        text += ` · 已生成 ${p.chars || 0} 字 · in ${p.tokensIn || 0} / out ${p.tokensOut || 0}`;
+        text += _t(" · 已生成 {0} 字 · in {1} / out {2}", p.chars || 0, p.tokensIn || 0, p.tokensOut || 0);
       }
       if (tt) tt.textContent = text;
       el.title = title;
@@ -3179,7 +3202,7 @@ if (inView) {
       case "ready": {
         this._pwCapture = null;   // 登录成功：退出密码内联捕获
         this.setStatus("connected",
-          `已连接 ${msg.host}${msg.distro ? "（" + msg.distro + "）" : ""}`);
+          _t("已连接 {0}{1}", msg.host, msg.distro ? "（" + msg.distro + "）" : ""));
         this.interactive = !!msg.interactive;
         // 欢迎横幅：紧随 ready 的第一条 status 是横幅文案；落点锚在首个
         // 提示符文本上（OSC 133 标记被后端消费，不会到达前端）
@@ -3203,14 +3226,14 @@ if (inView) {
         // 凭据库只进验证过的密码；记住后下次连接自动填充、免提示直进）
         if (this._pwEntered) {
           this._pwEntered = null;
-          modalConfirm("记住密码",
-            "已成功登录。记住该主机的密码？下次连接将自动登录" +
-            "（写入系统凭据库，不落数据库）",
+          modalConfirm(_t("记住密码"),
+            _t("已成功登录。记住该主机的密码？下次连接将自动登录") +
+            _t("（写入系统凭据库，不落数据库）"),
             ok => {
               if (ok) this.sendJson({type: "auth",
                                      auth_kind: "password_remember",
                                      text: ""});
-            }, "记住", "不记住");
+            }, _t("记住"), _t("不记住"));
         }
         break;
       }
@@ -3245,18 +3268,18 @@ if (inView) {
           if (this._pwCapture && this._pwCapture.submitted)
             this._writeTerm("\r\nPermission denied, please try again.");
           this._pwNewline();
-          this._writeTerm(msg.label || "密码: ");
+          this._writeTerm(msg.label || _t("密码: "));
           // 撤连接浮层让提示符可见（ready/closed 自会撤，无需恢复）
           const ov = document.getElementById(`connov-${this.tabId}`);
           if (ov) ov.hidden = true;
           this._pwCapture = {kind: "password", buf: "", submitted: false};
           break;
         }
-        modalAsk("密码", msg.label, (value, remember) => {
+        modalAsk(_t("密码"), msg.label, (value, remember) => {
           this.sendJson({type: "auth", auth_kind: msg.auth_kind || "password",
                          text: value, remember});
         }, {remember: msg.auth_kind !== "cmdset",
-            rememberLabel: "记住密码（写入系统凭据库，不落数据库）",
+            rememberLabel: _t("记住密码（写入系统凭据库，不落数据库）"),
             // 嵌套密码模态取消/点遮罩：改终端手输，通知 core 立即退出验证
             // 窗口（否则手输的密码被 hold 到超时才放行）
             onCancel: msg.auth_kind === "nested_password" ? () => {
@@ -3272,22 +3295,22 @@ if (inView) {
         // 手输密码验证成功后的「记住」询问（嵌套 ssh/sudo，P1-3/P1-4）：
         // 同意 → remember_yes 按后端留档键写 keyring；拒绝 → remember_no
         // 只清档。文案对齐 ready 后的「记住密码」确认框
-        modalConfirm("记住密码",
-          msg.text || "已成功登录。记住该密码？下次自动填充" +
-                      "（写入系统凭据库，不落数据库）",
+        modalConfirm(_t("记住密码"),
+          msg.text || _t("已成功登录。记住该密码？下次自动填充") +
+                      _t("（写入系统凭据库，不落数据库）"),
           ok => {
             this.sendJson({type: "auth",
                            auth_kind: ok ? "remember_yes" : "remember_no",
                            text: ""});
-          }, "记住", "不记住");
+          }, _t("记住"), _t("不记住"));
         break;
       case "ask_host_key":
-        modalConfirm("主机密钥", msg.message, ok => {
+        modalConfirm(_t("主机密钥"), msg.message, ok => {
           this.sendJson({type: "auth", auth_kind: "host_key", text: String(ok)});
         });
         break;
       case "interrupt":
-        this._onTaskFail("interrupt", msg.text || "已中断");
+        this._onTaskFail("interrupt", msg.text || _t("已中断"));
         break;
       case "mode":
         // 后端 hook 开关确认
@@ -3302,10 +3325,10 @@ if (inView) {
       case "closed":
         this._pwCapture = null;   // 连接终结：退出密码内联捕获
         this._pwEntered = null;   // 失败的连接不弹「记住密码」
-        this.setStatus("closed", msg.text || "连接已关闭");
+        this.setStatus("closed", msg.text || _t("连接已关闭"));
         break;
       case "reconnected":
-        this.setStatus("connected", msg.text || "已重新连接");
+        this.setStatus("connected", msg.text || _t("已重新连接"));
         break;
       // --- AI 事件：新契约顶层直接下发；兼容旧 {type:"event"} 包装 ---
       case "event":
@@ -3354,7 +3377,7 @@ if (inView) {
       case "term_close": this._onTermClose(ev); break;
       case "ai_card": this._onAiCard(ev.markdown); break;
       case "final": this._onFinal(ev.text); break;
-      case "interrupt": this._onTaskFail("interrupt", ev.text || "已中断"); break;
+      case "interrupt": this._onTaskFail("interrupt", ev.text || _t("已中断")); break;
       case "rescue": this._showRescue(ev); break;
       case "denied":
       case "limit":
@@ -3362,7 +3385,7 @@ if (inView) {
         // 系统异常（模型/工具超时、崩溃等）入红色警告卡展示（真机约定：
         // 报错信息都进红卡）。denied 是策略拒绝、limit 是预算停——业务
         // 语义，不入红卡
-        if (ev.kind === "error") this._onAlert({text: ev.text || "系统异常"});
+        if (ev.kind === "error") this._onAlert({text: ev.text || _t("系统异常")});
         this._onTaskFail(ev.kind, ev.text);
         break;
       case "session_cleared":
@@ -3463,7 +3486,7 @@ function renderTargets() {
 
   const direct = (data.direct || []).filter(matchesQuery);
   if (direct.length) {
-    nav.appendChild(sep("直接连接"));
+    nav.appendChild(sep(_t("直接连接")));
     direct.forEach(t => nav.appendChild(entry(t)));
   }
 }
@@ -3487,9 +3510,9 @@ function entry(t) {
     (sub.replace(/[@:]/g, "") ? `<span class="t-sub">${esc(sub)}</span>` : "") +
     "</span>" +
     '<span class="t-actions">' +
-    '<button data-a="copy" title="复制为新的连接">⧉</button>' +
-    '<button data-a="edit" title="编辑">✎</button>' +
-    '<button data-a="del" title="删除">✕</button></span>';
+    `<button data-a="copy" title="${_t("复制为新的连接")}">⧉</button>` +
+    `<button data-a="edit" title="${_t("编辑")}">✎</button>` +
+    `<button data-a="del" title="${_t("删除")}">✕</button></span>`;
   b.onclick = ev => {
     if (ev.target.closest(".t-actions")) return;
     openTab(t.name);
@@ -3512,7 +3535,7 @@ function localEntry() {
   b.dataset.name = "local";
   b.innerHTML =
     '<span class="t-main"><span class="t-label">local</span>' +
-    '<span class="t-sub">本机终端</span></span>';
+    `<span class="t-sub">${_t("本机终端")}</span></span>`;
   b.onclick = () => openTab("local");
   return b;
 }
@@ -3523,37 +3546,37 @@ function connForm(opts = {}) {
   const edit = opts.edit || null;
   const copy = opts.copy || null;        // 复制模式：预填源连接信息，保存新建
   const src = copy || edit;              // 预填来源（复制=源连接，编辑=被编辑对象）
-  const title = (copy ? "复制" : edit ? "编辑" : "添加") + "远程机器";
+  const title = (copy ? _t("复制") : edit ? _t("编辑") : _t("添加")) + _t("远程机器");
   // 复制默认名 = 原名 + 「 副本」：POST /api/saved 按 name upsert，同名保存会
   // 覆盖原连接而非新建，预加后缀保证落成独立新连接（用户可再改）
-  const nameVal = copy ? ((copy.name || "").replace(/ 副本$/, "") + " 副本")
+  const nameVal = copy ? ((copy.name || "").replace(/ 副本$/, "") + _t(" 副本"))
                        : (edit ? edit.name : "");
   // 连接后命令集:仅远程机器表单。密码写 > @名字=密码,保存后服务端
   // 抽取入凭据库并把该行改写为 > @名字 回传(弹窗即关,无需回显刷新)
   const cmdRow = `
-      <label>连接后命令</label>
+      <label>${_t("连接后命令")}</label>
       <textarea id="f-commands" rows="4" spellcheck="false"
-                placeholder="连接成功后自动逐行执行。自动应答写 &gt; @名字=密码（保存后转为引用）">${esc(src && src.commands ? src.commands : "")}</textarea>`;
+                placeholder="${_t("连接成功后自动逐行执行。自动应答写 &gt; @名字=密码（保存后转为引用）")}">${esc(src && src.commands ? src.commands : "")}</textarea>`;
   modalShell(title, `
     <div class="form-grid">
-      <label>主机名</label>
+      <label>${_t("主机名")}</label>
       <input id="f-name" type="text" autocomplete="off"
-             placeholder="如 web01，留空默认 user@IP" value="${esc(nameVal)}">
-      <label>IP 地址</label>
+             placeholder="${_t("如 web01，留空默认 user@IP")}" value="${esc(nameVal)}">
+      <label>${_t("IP 地址")}</label>
       <input id="f-host" type="text" autocomplete="off"
-             placeholder="如 192.168.1.10" value="${esc(src ? src.host : "")}">
-      <label>端口</label>
+             placeholder="${_t("如 192.168.1.10")}" value="${esc(src ? src.host : "")}">
+      <label>${_t("端口")}</label>
       <input id="f-port" type="text" autocomplete="off"
-             placeholder="默认 22" value="${src && src.port ? src.port : ""}">
-      <label>用户名</label>
+             placeholder="${_t("默认 22")}" value="${src && src.port ? src.port : ""}">
+      <label>${_t("用户名")}</label>
       <input id="f-user" type="text" autocomplete="off"
-             placeholder="如 root" value="${src && src.user ? src.user : ""}">
-      <label>密码</label>
+             placeholder="${_t("如 root")}" value="${src && src.user ? src.user : ""}">
+      <label>${_t("密码")}</label>
       <input id="f-pass" type="password" autocomplete="new-password"
-             placeholder="${copy || edit ? "留空则不修改" : "存入系统凭据库，不写数据库"}">
+             placeholder="${copy || edit ? _t("留空则不修改") : _t("存入系统凭据库，不写数据库")}">
       ${cmdRow}
     </div>`, [
-    {label: "确定", primary: true, onClick: () => {
+    {label: _t("确定"), primary: true, onClick: () => {
       const hostEl = document.getElementById("f-host");
       const host = hostEl.value.trim();
       if (!host) {                    // IP/地址必填：标红、不关闭弹窗
@@ -3576,17 +3599,17 @@ function connForm(opts = {}) {
         .then(r => r.json().then(d => ({ok: r.ok, d}))
                       .catch(() => ({ok: r.ok, d: {}})))
         .then(({ok, d}) => {
-          if (!ok) { alert("保存失败：" + (d.detail || "请检查表单内容")); return; }
+          if (!ok) { alert(_t("保存失败：") + (d.detail || _t("请检查表单内容"))); return; }
           loadTargets();
           if (d.warning) alert(d.warning);
           // 新增远程机器：保存成功后直接开 tab 尝试连接；复制不自动开——先落列表
           // 让用户确认/改完再连，避免误连出多个重复 tab
           if (!edit && !copy) openTab(d.name || payload.name || host);
         })
-        .catch(() => alert("保存失败：网络错误"));
+        .catch(() => alert(_t("保存失败：网络错误")));
       return true;
     }},
-    {label: "取消", onClick: () => {}},
+    {label: _t("取消"), onClick: () => {}},
   ]);
   // 复制/编辑聚焦 IP 地址（最可能改动）；新增聚焦主机名
   const first = document.getElementById(copy || edit ? "f-host" : "f-name");
@@ -3595,17 +3618,31 @@ function connForm(opts = {}) {
 
 function connDelete(t) {
   const sub = `${t.user ? t.user + "@" : ""}${t.host || ""}${t.port ? ":" + t.port : ":22"}`;
-  modalConfirm(`删除连接`,
-    `确定删除 ${t.name}（${sub}）吗？\n记住的密码将一并从系统凭据库清除。`,
+  modalConfirm(_t("删除连接"),
+    _t("确定删除 {0}（{1}）吗？\n记住的密码将一并从系统凭据库清除。", t.name, sub),
     ok => {
       if (!ok) return;
       authFetch(`/api/saved/${encodeURIComponent(t.name)}`, {method: "DELETE"})
         .then(() => loadTargets());
-    }, "删除", "取消");
+    }, _t("删除"), _t("取消"));
 }
 
 // --- 全局事件 ---
 document.getElementById("btn-add-remote").onclick = () => connForm({});
+
+// 通用设置改动：落到所有已打开的终端（与主题刷新同一条路）
+window.addEventListener("ot-term-options-change", event => {
+  const opt = event.detail || {};
+  Object.values(sessions).forEach(session => {
+    const term = session.term;
+    if (!term) return;
+    if (opt.fontSize) term.options.fontSize = opt.fontSize;
+    if (opt.scrollback) term.options.scrollback = opt.scrollback;
+    if (opt.cursorStyle) term.options.cursorStyle = opt.cursorStyle;
+    if (typeof opt.cursorBlink === "boolean") term.options.cursorBlink = opt.cursorBlink;
+    term.refresh(0, term.rows - 1);
+  });
+});
 
 window.addEventListener("ot-theme-change", () => {
   Object.values(sessions).forEach(session => {

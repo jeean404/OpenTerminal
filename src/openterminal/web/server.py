@@ -30,6 +30,8 @@ from ..model_profiles import (
 )
 from ..frontend.render import console
 from .files_api import install_files_errors, make_files_router
+from .skills_api import make_skills_router
+from .tools_api import make_tools_router
 from .protocol import parse_client
 from .worker import TabWorker
 
@@ -144,6 +146,8 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
             raise HTTPException(401, "token 缺失或不正确")
 
     app.include_router(make_files_router(tabs, _check_token))
+    app.include_router(make_skills_router(_check_token))
+    app.include_router(make_tools_router(_check_token))
     install_files_errors(app)
 
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="static")

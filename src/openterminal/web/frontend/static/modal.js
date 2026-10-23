@@ -1,3 +1,12 @@
+function _t(key, ...args) {
+  // node 测试单独 require 本文件时全局 t 不存在：回落原文，但占位符仍要替换，
+  // 否则断言会拿到带 {0} 的键
+  const text = (typeof t === "function") ? t(key) : key;
+  if (!args.length) return text;
+  return String(text).replace(/\{(\d+)\}/g, (whole, n) =>
+    args[Number(n)] === undefined ? whole : String(args[Number(n)]));
+}
+
 // 通用模态框：从 app.js 抽出独立成文件，node --test 可直接加载
 // （module.exports 守卫，照 md_lite.js / pad_ledger.js 的先例）。
 //
@@ -51,12 +60,12 @@ function modalShell(title, bodyHtml, buttons, opts = {}) {
     try {
       r = b.onClick ? b.onClick() : true;
     } catch (e) {
-      console.error("modal onClick 失败:", e);
+      console.error(_t("modal onClick 失败:"), e);
       return;
     }
     if (r && typeof r.then === "function") {
       r.then((v) => { if (v !== false) close(); })
-       .catch((e) => console.error("modal onClick 失败:", e));
+       .catch((e) => console.error(_t("modal onClick 失败:"), e));
       return;
     }
     if (r !== false) close();
@@ -95,12 +104,12 @@ function modalAsk(title, message, onOk, opts = {}) {
     `id="modal-value" autofocus>` +
     rememberHtml,
     [
-      {label: "确定", primary: true, onClick: () => {
+      {label: _t("确定"), primary: true, onClick: () => {
         const remember = opts.remember
           ? document.getElementById("modal-remember").checked : false;
         onOk(document.getElementById("modal-value").value, remember);
       }},
-      {label: "取消", onClick: () => { opts.onCancel && opts.onCancel(); }},
+      {label: _t("取消"), onClick: () => { opts.onCancel && opts.onCancel(); }},
     ],
     {onDismiss: opts.onCancel, root: opts.root});
   const r = opts.root || document.getElementById("modal-root");
@@ -109,7 +118,7 @@ function modalAsk(title, message, onOk, opts = {}) {
   if (v) v.focus();
 }
 
-function modalConfirm(title, message, onOk, yesLabel = "信任", noLabel = "拒绝",
+function modalConfirm(title, message, onOk, yesLabel = _t("信任"), noLabel = _t("拒绝"),
                       opts = {}) {
   modalShell(title, `<p>${_esc(message)}</p>`, [
     {label: yesLabel, primary: true, onClick: () => onOk(true)},

@@ -1132,7 +1132,7 @@ class PipelineCore:
             return
         self.profile = replace(self.profile, **MANUAL_PRESETS[parts[1]])
         if self.agent is not None:
-            self.ai._build_agent_now()   # 已建才重建；未建由 _ensure_agent 用新画像
+            await self.ai._rebuild_agent()   # 已建才重建；未建由 _ensure_agent 用新画像
         await self.emit_msg(ServerMsg(
             type="status", text=f"系统方言已手动设为 {parts[1]}"))
 

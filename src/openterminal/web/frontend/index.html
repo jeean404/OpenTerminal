@@ -8,6 +8,8 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <video id="wallpaper-video" class="wallpaper-video" muted loop playsinline
+         preload="metadata" aria-hidden="true" tabindex="-1" hidden></video>
   <aside id="sidebar">
     <div id="sidebar-head">
       <span class="title">OpenTerminal</span>
@@ -41,11 +43,127 @@
       </header>
       <div class="settings-layout">
         <nav class="settings-nav" aria-label="设置分类">
-          <button type="button" class="settings-nav-item active" data-settings-section="appearance">外观</button>
+          <button type="button" class="settings-nav-item active" data-settings-section="general">通用</button>
+          <button type="button" class="settings-nav-item" data-settings-section="appearance">外观</button>
+          <button type="button" class="settings-nav-item" data-settings-section="skills">技能</button>
+          <button type="button" class="settings-nav-item" data-settings-section="tools">工具</button>
           <button type="button" class="settings-nav-item" data-settings-section="models">模型</button>
         </nav>
         <div class="settings-content">
-          <section class="settings-section" data-settings-panel="appearance">
+          <section class="settings-section" data-settings-panel="general">
+            <div class="settings-section-heading">
+              <div>
+                <h2>通用</h2>
+                <p>界面与终端的常用偏好。改动立即生效，只保存在这台浏览器上。</p>
+              </div>
+            </div>
+            <div class="settings-subsection">
+              <div class="settings-subsection-heading">
+                <h3>界面</h3>
+                <p>语言与整体字号。</p>
+              </div>
+              <div class="settings-rows">
+                <div class="settings-row">
+                  <span class="settings-row-text">
+                    <strong>界面语言</strong>
+                    <small>切换后立即刷新页面，全站文案一起换</small>
+                  </span>
+                  <div class="seg" role="radiogroup" aria-label="界面语言">
+                    <button type="button" data-general-lang="zh">中文</button>
+                    <button type="button" data-general-lang="en">English</button>
+                  </div>
+                </div>
+                <div class="settings-row">
+                  <span class="settings-row-text">
+                    <strong>界面字号</strong>
+                    <small>影响侧栏与设置页的文字大小</small>
+                  </span>
+                  <div class="seg" role="radiogroup" aria-label="界面字号">
+                    <button type="button" data-general-scale="0.9">小</button>
+                    <button type="button" data-general-scale="1">标准</button>
+                    <button type="button" data-general-scale="1.15">大</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="settings-subsection">
+              <div class="settings-subsection-heading">
+                <h3>终端</h3>
+                <p>对所有已打开和新建的终端立即生效。</p>
+              </div>
+              <div class="settings-rows">
+                <label class="settings-row">
+                  <span class="settings-row-text"><strong>终端字号</strong></span>
+                  <span class="settings-row-control">
+                    <input id="general-font-size" type="range" min="11" max="22" value="13">
+                    <output id="general-font-size-value" aria-live="polite">13</output>
+                  </span>
+                </label>
+                <label class="settings-row">
+                  <span class="settings-row-text">
+                    <strong>滚动缓冲行数</strong>
+                    <small>往上翻可见的历史输出长度</small>
+                  </span>
+                  <select id="general-scrollback">
+                    <option value="1000">1 000 行</option>
+                    <option value="5000">5 000 行</option>
+                    <option value="20000">20 000 行</option>
+                  </select>
+                </label>
+                <label class="settings-row">
+                  <span class="settings-row-text"><strong>光标样式</strong></span>
+                  <select id="general-cursor">
+                    <option value="block">方块</option>
+                    <option value="underline">下划线</option>
+                    <option value="bar">竖线</option>
+                  </select>
+                </label>
+                <label class="settings-row">
+                  <span class="settings-row-text"><strong>光标闪烁</strong></span>
+                  <span class="switch">
+                    <input id="general-cursor-blink" type="checkbox">
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </span>
+                </label>
+                <label class="settings-row">
+                  <span class="settings-row-text">
+                    <strong>选中即复制</strong>
+                    <small>在终端里选中文字就进剪贴板</small>
+                  </span>
+                  <span class="switch">
+                    <input id="general-copy-on-select" type="checkbox">
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </span>
+                </label>
+              </div>
+            </div>
+            <div class="settings-subsection">
+              <div class="settings-subsection-heading">
+                <h3>其他</h3>
+                <p>排查问题用的开关，以及本地偏好的清理。</p>
+              </div>
+              <div class="settings-rows">
+                <label class="settings-row">
+                  <span class="settings-row-text">
+                    <strong>调试日志</strong>
+                    <small>打开后在浏览器控制台输出内部事件流水</small>
+                  </span>
+                  <span class="switch">
+                    <input id="general-debug" type="checkbox">
+                    <span class="switch-track" aria-hidden="true"></span>
+                  </span>
+                </label>
+                <div class="settings-row">
+                  <span class="settings-row-text">
+                    <strong>清除本地偏好</strong>
+                    <small>还原主题、背景与本页所有设置</small>
+                  </span>
+                  <button type="button" id="btn-general-reset" class="settings-secondary">清除</button>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="settings-section" data-settings-panel="appearance" hidden>
             <div class="settings-section-heading">
               <div>
                 <h2>外观</h2>
@@ -77,17 +195,18 @@
               <div id="wallpaper-photos" class="wallpaper-gallery" role="radiogroup" aria-label="风景背景"></div>
               <h4 class="wallpaper-group-title">渐变 <small>轻量纯色氛围</small></h4>
               <div id="wallpaper-options" class="wallpaper-options" role="radiogroup" aria-label="渐变背景"></div>
-              <h4 class="wallpaper-group-title">我的图片 <small>仅保存在本浏览器，不会上传</small></h4>
+              <h4 class="wallpaper-group-title">我的图片 / 视频 <small>仅保存在本浏览器，不会上传 · 图片 ≤ 12 MB · 视频 MP4 / WebM ≤ 64 MB，静音循环</small></h4>
               <div class="wallpaper-custom">
                 <p id="wallpaper-image-status" class="wallpaper-status" hidden></p>
-                <div id="wallpaper-gallery" class="wallpaper-gallery" role="radiogroup" aria-label="自定义图片">
+                <div id="wallpaper-gallery" class="wallpaper-gallery" role="radiogroup" aria-label="自定义背景">
                   <label class="wallpaper-upload" id="wallpaper-upload" for="wallpaper-image-input">
                     <span class="wallpaper-upload-icon" aria-hidden="true">＋</span>
-                    <span class="wallpaper-upload-title">上传图片</span>
-                    <span class="wallpaper-upload-hint">点击选择或拖拽到此处<br>PNG / JPEG / WebP，≤ 12 MB</span>
+                    <span class="wallpaper-upload-title">上传图片或视频</span>
+                    <span class="wallpaper-upload-hint">点击选择或拖拽到此处</span>
                   </label>
                 </div>
-                <input id="wallpaper-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden>
+                <input id="wallpaper-image-input" type="file"
+                       accept="image/png,image/jpeg,image/webp,video/mp4,video/webm" multiple hidden>
                 <p class="wallpaper-error" id="wallpaper-error" role="status" hidden></p>
               </div>
               <h4 class="wallpaper-group-title">显示调节 <small>对所有背景生效</small></h4>
@@ -118,9 +237,35 @@
                     <span>亮度 <output id="wallpaper-brightness-value" aria-live="polite">100%</output></span>
                     <input id="wallpaper-brightness" type="range" min="40" max="160" value="100">
                   </label>
+                  <label class="wallpaper-check">
+                    <input id="wallpaper-video-play" type="checkbox" checked>
+                    <span>播放视频背景 <small>关闭后停在静止画面，省 CPU</small></span>
+                  </label>
                 </div>
               </div>
             </div>
+          </section>
+          <section class="settings-section" data-settings-panel="skills" hidden>
+            <div class="settings-section-heading">
+              <div>
+                <h2>技能</h2>
+                <p>技能是打包好的能力说明，模型按需加载。停用后下一轮对话就不再加载它。</p>
+              </div>
+              <button type="button" id="btn-add-skill" class="settings-primary">＋ 添加技能</button>
+            </div>
+            <button type="button" id="btn-skill-back" class="settings-secondary skill-back" hidden>← 返回技能列表</button>
+            <div id="skills-list" class="skill-grid"></div>
+            <div id="skills-detail" class="skill-detail" hidden></div>
+          </section>
+          <section class="settings-section" data-settings-panel="tools" hidden>
+            <div class="settings-section-heading">
+              <div>
+                <h2>工具</h2>
+                <p>接入 MCP 服务器后，智能体会多出它提供的工具。改动对新建的终端生效。</p>
+              </div>
+              <button type="button" id="btn-add-mcp" class="settings-primary">＋ 添加服务器</button>
+            </div>
+            <div id="tools-list" class="skill-grid"></div>
           </section>
           <section class="settings-section" data-settings-panel="models" hidden>
             <div class="settings-section-heading">
@@ -139,12 +284,18 @@
   <div id="modal-root"></div>
   <script src="/vendor/xterm.js"></script>
   <script src="/vendor/addon-fit.js"></script>
+  <script src="/static/i18n.js"></script>
+  <script src="/static/i18n_en.js"></script>
   <script src="/static/pad_ledger.js"></script>
   <script src="/static/block_stream.js"></script>
   <script src="/static/block_view.js"></script>
   <script src="/static/modal.js"></script>
+  <script src="/static/md_lite.js"></script>
   <script src="/static/settings.js"></script>
   <script src="/static/model_profiles.js"></script>
+  <script src="/static/general.js"></script>
+  <script src="/static/skills.js"></script>
+  <script src="/static/tools.js"></script>
   <script src="/static/files_panel.js"></script>
   <script src="/static/app.js"></script>
 </body>

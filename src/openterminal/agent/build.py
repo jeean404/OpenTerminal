@@ -10,7 +10,6 @@ from typing import Any
 
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
-from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
     ModelRetryMiddleware,
@@ -20,6 +19,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from ..config import Config
 from ..policy import Policy
 from ..skills import skill_routes, skill_sources
+from ..skills.gating import GatedSkillsMiddleware
 from .backend import PtyShellBackend
 from .middleware import DenyMiddleware, ToolErrorRetryMiddleware
 from .model import build_chat_model
@@ -35,11 +35,15 @@ def build_agent(
     *,
     model: Any = None,
     remote_target: bool = False,
+    tools: list | None = None,
 ):
     """返回 (compiled_agent, session_allowed_commands)。
 
     remote_target：目标是 SSH/远端 shell——此时 session.cwd 是远端路径，不能当
     本机文件根（见 backend._local_root），文件工具回退到用户主目录。
+
+    tools：MCP 等外部工具（见 agent/mcp.gather_mcp_tools）。工具发现是异步的，
+    故由调用方在建 agent 前拉好传进来——本函数保持同步，仍在 to_thread 里跑。
     """
     policy = policy or Policy(
         mode=cfg.policy.mode,
@@ -83,6 +87,8 @@ def build_agent(
 
     agent = create_deep_agent(
         model=model or build_chat_model(cfg.model),
+        # MCP 工具是加性的，不会顶掉内置的 ls/read_file/execute 等
+        tools=tools or [],
         backend=_with_skills(backend, middleware),
         # 本机文件根一并告知模型：虚拟路径落地在本机哪里必须能向用户交代，
         # 否则「下载到我本机」写完只报 /x，用户在磁盘上找不到文件
@@ -97,8 +103,8 @@ def _with_skills(backend: PtyShellBackend, middleware: list):
     """给 agent 挂上内置/用户两层 Agent Skills（渐进式披露）。
 
     skill 目录在文件沙箱（shell cwd）之外，故经 CompositeBackend 以
-    /skills/... 虚拟前缀挂进文件系统：SkillsMiddleware 把 skill 清单
-    注入系统提示词，模型按需 read_file 加载 SKILL.md 全文；用户目录
+    /skills/... 虚拟前缀挂进文件系统：GatedSkillsMiddleware 把 skill 清单
+    注入系统提示词（停用的 skill 被过滤掉，见 skills/gating.py），模型按需 read_file 加载 SKILL.md 全文；用户目录
     后挂，同名 skill 覆盖内置。backend 本身原样返回给调用方（回调、
     cwd 语义不变），composite 只作为 agent 的文件/命令入口。
     """
@@ -110,6 +116,6 @@ def _with_skills(backend: PtyShellBackend, middleware: list):
         routes={p: FilesystemBackend(root_dir=str(d)) for p, d in routes.items()},
     )
     middleware.append(
-        SkillsMiddleware(backend=agent_backend, sources=skill_sources())
+        GatedSkillsMiddleware(backend=agent_backend, sources=skill_sources())
     )
     return agent_backend

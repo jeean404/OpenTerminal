@@ -1,3 +1,12 @@
+function _t(key, ...args) {
+  // node 测试单独 require 本文件时全局 t 不存在：回落原文，但占位符仍要替换，
+  // 否则断言会拿到带 {0} 的键
+  const text = (typeof t === "function") ? t(key) : key;
+  if (!args.length) return text;
+  return String(text).replace(/\{(\d+)\}/g, (whole, n) =>
+    args[Number(n)] === undefined ? whole : String(args[Number(n)]));
+}
+
 // 文件面板：远程目录浏览/上传/下载（走 REST，不占 WebSocket）。
 // 面板仍是 absolute 覆盖层（不改 DOM 结构），但打开时终端让位收缩：
 // pane.fp-open → .term margin-right，fit() 同步 PTY 列宽与卡片重贴。
@@ -117,16 +126,16 @@ class FilePanel {
     el.innerHTML = `
       <div class="fp-head">
         <div class="fp-head-top">
-          <span class="fp-title">远程文件</span>
+          <span class="fp-title">${_t("远程文件")}</span>
           <span class="fp-badge"></span>
-          <button class="fp-btn fp-icon" data-act="close" title="关闭面板">×</button>
+          <button class="fp-btn fp-icon" data-act="close" title="${_t("关闭面板")}">×</button>
         </div>
         <div class="fp-head-acts">
-          <button class="fp-btn fp-icon" data-act="home" title="回到登录用户的家目录">⌂</button>
-          <button class="fp-btn fp-icon" data-act="link" title="连接设置：IP / 端口 / 用户名 / 密码">⚙</button>
-          <button class="fp-btn fp-icon" data-act="mkdir" title="新建文件夹">⊞</button>
-          <button class="fp-btn fp-icon" data-act="create" title="新建文件">＋</button>
-          <button class="fp-btn fp-icon" data-act="refresh" title="刷新">⟳</button>
+          <button class="fp-btn fp-icon" data-act="home" title="${_t("回到登录用户的家目录")}">⌂</button>
+          <button class="fp-btn fp-icon" data-act="link" title="${_t("连接设置：IP / 端口 / 用户名 / 密码")}">⚙</button>
+          <button class="fp-btn fp-icon" data-act="mkdir" title="${_t("新建文件夹")}">⊞</button>
+          <button class="fp-btn fp-icon" data-act="create" title="${_t("新建文件")}">＋</button>
+          <button class="fp-btn fp-icon" data-act="refresh" title="${_t("刷新")}">⟳</button>
         </div>
       </div>
       <div class="fp-path"></div>
@@ -135,8 +144,8 @@ class FilePanel {
       <div class="fp-uploads" hidden></div>
       <div class="fp-foot">
         <input type="file" class="fp-input" multiple hidden>
-        <button class="fp-btn fp-icon fp-up" data-act="pick" title="上传文件">⬆</button>
-        <span class="fp-hint">可拖文件进列表上传，双击进入 / 打开</span>
+        <button class="fp-btn fp-icon fp-up" data-act="pick" title="${_t("上传文件")}">⬆</button>
+        <span class="fp-hint">${_t("可拖文件进列表上传，双击进入 / 打开")}</span>
       </div>`;
     this.pane.appendChild(el);
     this.el = el;
@@ -152,16 +161,16 @@ class FilePanel {
     el.querySelector('[data-act="refresh"]').onclick = () => this.refresh();
     el.querySelector('[data-act="close"]').onclick = () => this.toggle();
     el.querySelector('[data-act="mkdir"]').onclick = () => {
-      this._promptName("新建文件夹", "目录名", (name) => {
+      this._promptName(_t("新建文件夹"), _t("目录名"), (name) => {
         const remote = this._join(this.cwd, name);
-        this._post("mkdir", remote, `已创建文件夹 ${name}`)
+        this._post("mkdir", remote, _t("已创建文件夹 {0}", name))
           .then((ok) => { if (ok) this.load(this.cwd); });
       });
     };
     el.querySelector('[data-act="create"]').onclick = () => {
-      this._promptName("新建文件", "文件名（创建后直接进编辑器）", (name) => {
+      this._promptName(_t("新建文件"), _t("文件名（创建后直接进编辑器）"), (name) => {
         const remote = this._join(this.cwd, name);
-        this._post("create", remote, null, {exists: `已存在同名文件 ${name}`})
+        this._post("create", remote, null, {exists: _t("已存在同名文件 {0}", name)})
           .then((ok) => {
             if (!ok) return;
             this.load(this.cwd);
@@ -252,20 +261,20 @@ class FilePanel {
   _noCred() {
     this._setBadge("");
     const d = this._defaults || {};
-    const who = d.host ? `${d.user ? d.user + "@" : ""}${d.host}` : "当前主机";
-    const msg = `未保存 ${who} 的密码。请在终端登录时选择「记住密码」，` +
-      `文件列表会随终端自动连接；也可点 🔗 手动连接。`;
+    const who = d.host ? `${d.user ? d.user + "@" : ""}${d.host}` : _t("当前主机");
+    const msg = _t("未保存 {0} 的密码。请在终端登录时选择「记住密码」，", who) +
+      _t("文件列表会随终端自动连接；也可点 🔗 手动连接。");
     this.el.querySelector(".fp-list").innerHTML =
       `<div class="fp-empty">${esc(msg)}</div>`;
     this.el.querySelector(".fp-path").innerHTML =
-      `<span class="fp-muted">未连接</span>`;
+      `<span class="fp-muted">${_t("未连接")}</span>`;
   }
 
   /** 通道不可用的统一展示 + 自动退避重试（只用于面板自己的连接在重建）。 */
   _pending(reason, retryIn) {
     const list = this.el.querySelector(".fp-list");
-    const why = reason === "need_password" ? "目标主机需要密码"
-      : "等待连接…";
+    const why = reason === "need_password" ? _t("目标主机需要密码")
+      : _t("等待连接…");
     list.innerHTML = `<div class="fp-empty">${esc(why)}</div>`;
     this.el.querySelector(".fp-path").innerHTML =
       `<span class="fp-muted">${esc(why)}</span>`;
@@ -304,14 +313,14 @@ class FilePanel {
   async load(path) {
     const list = this.el.querySelector(".fp-list");
     const seq = ++this._seq;
-    list.innerHTML = `<div class="fp-empty">加载中…</div>`;
+    list.innerHTML = `<div class="fp-empty">${_t("加载中…")}</div>`;
     let r;
     try {
       r = await authFetch(this._url("list", {path: path}));
     } catch (e) {
       if (seq === this._seq) {
         this._err(list, {detail: String(e), code: "io"},
-                  "请求失败", () => this.load(path));
+                  _t("请求失败"), () => this.load(path));
       }
       return;
     }
@@ -325,7 +334,7 @@ class FilePanel {
         return;
       }
       if (j.code === "not_ready") { this._pending("not_ready", 1200); return; }
-      this._err(list, j, "列目录失败", () => this.load(path));
+      this._err(list, j, _t("列目录失败"), () => this.load(path));
       return;
     }
     const data = await r.json();
@@ -343,7 +352,7 @@ class FilePanel {
     if (onRetry) {
       const b = document.createElement("button");
       b.className = "fp-btn fp-retry";
-      b.textContent = "重试";
+      b.textContent = _t("重试");
       b.onclick = onRetry;
       box.appendChild(document.createElement("br"));
       box.appendChild(b);
@@ -355,7 +364,7 @@ class FilePanel {
     const list = this.el.querySelector(".fp-list");
     list.innerHTML = "";
     if (!entries.length) {
-      list.innerHTML = `<div class="fp-empty">（空目录）</div>`;
+      list.innerHTML = `<div class="fp-empty">${_t("（空目录）")}</div>`;
     }
     for (const e of entries) {
       const row = document.createElement("div");
@@ -382,12 +391,12 @@ class FilePanel {
       const acts = document.createElement("span");
       acts.className = "fp-acts";
       if (!e.is_dir) {
-        acts.appendChild(this._actBtn("⬇", "下载", () =>
+        acts.appendChild(this._actBtn("⬇", _t("下载"), () =>
           this.download(e.name, path)));
-        acts.appendChild(this._actBtn("✏️", "编辑", () =>
+        acts.appendChild(this._actBtn("✏️", _t("编辑"), () =>
           this.edit(e.name, path)));
       }
-      acts.appendChild(this._actBtn("🗑", "删除", () =>
+      acts.appendChild(this._actBtn("🗑", _t("删除"), () =>
         this._confirmDelete(e.name, e.is_dir, path)));
       row.appendChild(acts);
       list.appendChild(row);
@@ -511,24 +520,24 @@ class FilePanel {
     const user = cur.user || d.user || "";
     const hint = [];
     if (d.host && d.nested) {
-      hint.push(`终端当前在 <b>${esc(d.host)}</b>` +
-        (d.user ? `（身份 <b>${esc(d.user)}</b>）` : "") +
-        `，已按它预填。面板独立于终端，改这里只影响本次连接。`);
+      hint.push(`${_t("终端当前在")} <b>${esc(d.host)}</b>` +
+        (d.user ? `${_t("（身份")} <b>${esc(d.user)}</b>）` : "") +
+        _t("，已按它预填。面板独立于终端，改这里只影响本次连接。"));
     }
-    if (d.has_password) hint.push("该身份已记住密码，留空密码即可自动登录。");
-    modalShell("连接远程主机",
+    if (d.has_password) hint.push(_t("该身份已记住密码，留空密码即可自动登录。"));
+    modalShell(_t("连接远程主机"),
       `<div class="form-grid">` +
-      `<label>IP 地址</label><input id="fp-host" value="${esc(host)}" autofocus>` +
-      `<label>端口</label><input id="fp-port" value="${esc(port)}">` +
-      `<label>用户名</label><input id="fp-user" value="${esc(user)}">` +
-      `<label>密码</label><input type="password" id="fp-pass" ` +
-        `autocomplete="new-password" placeholder="留空则用已记住的">` +
+      `<label>${_t("IP 地址")}</label><input id="fp-host" value="${esc(host)}" autofocus>` +
+      `<label>${_t("端口")}</label><input id="fp-port" value="${esc(port)}">` +
+      `<label>${_t("用户名")}</label><input id="fp-user" value="${esc(user)}">` +
+      `<label>${_t("密码")}</label><input type="password" id="fp-pass" ` +
+        `autocomplete="new-password" placeholder="${_t("留空则用已记住的")}">` +
       `</div>` +
       `<label class="fp-remember"><input type="checkbox" id="fp-remember"> ` +
-      `记住密码（写入系统凭据库，不落数据库）</label>` +
+      `${_t("记住密码（写入系统凭据库，不落数据库）")}</label>` +
       (hint.length ? `<p class="fp-hint2">${hint.join("<br>")}</p>` : ""),
       [
-        {label: "连接", primary: true, onClick: () => {
+        {label: _t("连接"), primary: true, onClick: () => {
           const h = document.getElementById("fp-host");
           const v = h.value.trim();
           if (!v) { h.classList.add("invalid"); h.focus(); return false; }
@@ -542,8 +551,8 @@ class FilePanel {
           }, false);
         }},
       ].concat(this._conn
-        ? [{label: "断开连接", onClick: () => this._disconnect()}] : [])
-       .concat([{label: "取消"}]));
+        ? [{label: _t("断开连接"), onClick: () => this._disconnect()}] : [])
+       .concat([{label: _t("取消")}]));
     const h = document.getElementById("fp-host");
     if (h) { h.focus(); if (h.select) h.select(); }
   }
@@ -562,7 +571,7 @@ class FilePanel {
           remember: !!remember, confirm_host_key: !!confirmKey}),
       });
     } catch (e) {
-      if (!silent) this._toast(`请求失败：${e}`, true);
+      if (!silent) this._toast(_t("请求失败：{0}", e), true);
       return false;
     }
     if (r.status === 428) {
@@ -570,12 +579,12 @@ class FilePanel {
       // 依赖 modal.js 的模态代际号——否则这里开的确认框会被登录框的
       // close 清掉，表现为「点了连接就没反应」。
       const j = await r.json().catch(() => ({}));
-      modalShell("确认未知主机",
-        `<p>${esc(j.detail || "主机密钥未知")}</p><p>信任并继续连接？</p>`,
+      modalShell(_t("确认未知主机"),
+        `<p>${esc(j.detail || _t("主机密钥未知"))}</p><p>${_t("信任并继续连接？")}</p>`,
         [
-          {label: "信任并连接", primary: true, onClick: () =>
+          {label: _t("信任并连接"), primary: true, onClick: () =>
             this._connect({host, port, user, password, remember}, true, silent)},
-          {label: "取消"},
+          {label: _t("取消")},
         ]);
       return true;                          // 原弹窗关闭，流程转入确认框
     }
@@ -584,7 +593,7 @@ class FilePanel {
       if (!silent) {
         // 密码错/账号无权（403 auth_failed）留在弹框便于改了重试；
         // 绝不弹「访问令牌」框——401 才是它的专属语义
-        this._toast(j.detail || `连接失败（${r.status}）`, true);
+        this._toast(j.detail || _t("连接失败（{0}）", r.status), true);
       }
       return false;
     }
@@ -594,7 +603,7 @@ class FilePanel {
     this._selected = null;
     this._setBadge(this._connLabel());
     this.load(".");
-    if (!silent) this._toast(`已连接 ${j.host}`);
+    if (!silent) this._toast(_t("已连接 {0}", j.host));
     return true;
   }
 
@@ -606,7 +615,7 @@ class FilePanel {
     this.cwd = null;
     this._selected = null;
     this._setBadge("");
-    this._toast("已断开");
+    this._toast(_t("已断开"));
     this._connectDialog();
   }
 
@@ -619,7 +628,7 @@ class FilePanel {
       let r = await authFetch(url);
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
-        this._toast(`下载失败：${j.detail || r.status}`, true);
+        this._toast(_t("下载失败：{0}", j.detail || r.status), true);
         return;
       }
       // 流式读取：按 Content-Length 显示真实进度
@@ -640,9 +649,9 @@ class FilePanel {
       a.download = name;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 30000);
-      this._toast(`已下载 ${name}（${this._fmtSize(got)}）`);
+      this._toast(_t("已下载 {0}（{1}）", name, this._fmtSize(got)));
     } catch (e) {
-      this._toast(`下载失败：${e}`, true);
+      this._toast(_t("下载失败：{0}", e), true);
     } finally {
       this._progress(false);
     }
@@ -650,7 +659,7 @@ class FilePanel {
 
   // 上传队列：最多 UP_MAX 个并发，其余排队；每项独立进度、可取消。
   upload(fileList) {
-    if (!this.cwd) { this._toast("目录未就绪", true); return; }
+    if (!this.cwd) { this._toast(_t("目录未就绪"), true); return; }
     const files = Array.from(fileList || []);
     if (!files.length) return;
     if (!this._ups) { this._ups = []; this._upOk = false; }
@@ -701,12 +710,12 @@ class FilePanel {
     const x = row.querySelector(".fp-up-x");
     row.dataset.state = it.state;
     x.textContent = it.state === "error" ? "✕" : "⏹";
-    x.title = it.state === "error" ? "关闭" : (it.state === "queued" ? "移出队列" : "取消上传");
+    x.title = it.state === "error" ? _t("关闭") : (it.state === "queued" ? _t("移出队列") : _t("取消上传"));
     if (it.state === "queued") {
-      pct.textContent = "排队中";
+      pct.textContent = _t("排队中");
       bar.style.width = "0";
     } else if (it.state === "error") {
-      pct.textContent = it.err || "失败";
+      pct.textContent = it.err || _t("失败");
       bar.style.width = "100%";
     } else {
       const total = it.file.size;
@@ -725,7 +734,7 @@ class FilePanel {
       it.state = "canceled";
       if (it.xhr) it.xhr.abort();           // onabort 里收尾（腾出并发槽位）
       else this._upEnd(it);                 // 令牌弹窗等待期间没有 xhr
-      this._toast(`已取消 ${it.file.name}`);
+      this._toast(_t("已取消 {0}", it.file.name));
     }
   }
 
@@ -821,12 +830,12 @@ class FilePanel {
       };
       xhr.onerror = () => {
         it.xhr = null;
-        reject(new Error("网络错误"));
+        reject(new Error(_t("网络错误")));
       };
       xhr.onabort = () => {
         it.xhr = null;
         if (it.state === "canceled") this._upEnd(it);
-        reject(new Error("上传已取消"));
+        reject(new Error(_t("上传已取消")));
       };
       xhr.send(body);
     });
@@ -844,7 +853,7 @@ class FilePanel {
       } catch (e) { /* 无法解析响应时按令牌问题处理 */ }
       if (!tokenish) return response;
       await promptForToken();
-      if (it.state !== "running") throw new Error("上传已取消");
+      if (it.state !== "running") throw new Error(_t("上传已取消"));
       retriedToken = true;
     }
   }
@@ -860,7 +869,7 @@ class FilePanel {
       it.state = "error";
       it.err = error.message || String(error);
       this._upPaint(it, 0);
-      this._toast(`上传失败 ${file.name}：${it.err}`, true);
+      this._toast(_t("上传失败 {0}：{1}", file.name, it.err), true);
       this._upEnd(it);
     };
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -872,19 +881,19 @@ class FilePanel {
       leaseTimer = setInterval(() => {
         leaseChain = leaseChain.then(() => this._upLease(params, true)).catch((error) => {
           if (it.state === "running")
-            this._toast(`上传保活失败 ${file.name}：${error.message || error}`, true);
+            this._toast(_t("上传保活失败 {0}：{1}", file.name, error.message || error), true);
         });
       }, 30000);
       const refreshOffset = async () => {
         const current = await this._upStatus(it, params);
         if (!Number.isSafeInteger(current) || current < 0 || current > file.size)
-          throw new Error("服务端续传位置无效");
+          throw new Error(_t("服务端续传位置无效"));
         return current;
       };
       let offset = await refreshOffset();
       if (it.state !== "running") return;
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > file.size)
-        throw new Error("服务端续传位置无效");
+        throw new Error(_t("服务端续传位置无效"));
       let attemptsComplete = 0;
       while (it.state === "running") {
         while (offset < file.size && it.state === "running") {
@@ -911,8 +920,8 @@ class FilePanel {
             if (response.status === 409 && result.code === "upload_offset") {
               if (!Number.isSafeInteger(result.offset) || result.offset < 0
                   || result.offset > file.size)
-                throw new Error("服务端返回了无效的续传位置");
-              if (result.offset === offset) throw new Error(result.detail || "上传位置冲突");
+                throw new Error(_t("服务端返回了无效的续传位置"));
+              if (result.offset === offset) throw new Error(result.detail || _t("上传位置冲突"));
               offset = result.offset;
               break;
             }
@@ -928,7 +937,7 @@ class FilePanel {
             }
             if (!Number.isSafeInteger(result.offset) || result.offset <= offset
                 || result.offset > file.size)
-              throw new Error("服务端返回了无效的续传位置");
+              throw new Error(_t("服务端返回了无效的续传位置"));
             offset = result.offset;
             break;
           }
@@ -948,7 +957,7 @@ class FilePanel {
         if (completed.status === 409 && result.code === "upload_incomplete") {
           if (!Number.isSafeInteger(result.offset) || result.offset < 0
               || result.offset >= file.size)
-            throw new Error("服务端返回了无效的续传位置");
+            throw new Error(_t("服务端返回了无效的续传位置"));
           offset = result.offset;
           continue;
         }
@@ -960,9 +969,9 @@ class FilePanel {
         if (it.uploadKey) localStorage.removeItem(it.uploadKey);
         if (it.uploadLegacyKey) localStorage.removeItem(it.uploadLegacyKey);
       }
-      catch (error) { this._toast("上传已完成，但无法清理本地续传记录", true); }
+      catch (error) { this._toast(_t("上传已完成，但无法清理本地续传记录"), true); }
       it.state = "done";
-      this._toast(`已上传 ${file.name}`);
+      this._toast(_t("已上传 {0}", file.name));
       this._upEnd(it);
     } catch (error) {
       if (it.state === "running") fail(error);
@@ -974,7 +983,7 @@ class FilePanel {
           await this._upLease(params, false);
         } catch (error) {
           if (it.state !== "done")
-            this._toast(`释放上传保活失败 ${file.name}：${error.message || error}`, true);
+            this._toast(_t("释放上传保活失败 {0}：{1}", file.name, error.message || error), true);
         }
       }
     }
@@ -998,32 +1007,32 @@ class FilePanel {
       `<input type="text" id="modal-value" class="fp-name-input" ` +
       `placeholder="${esc(placeholder)}" autofocus>`,
       [
-        {label: "确定", primary: true, onClick: () => {
+        {label: _t("确定"), primary: true, onClick: () => {
           const v = document.getElementById("modal-value").value.trim();
           if (!v) return false;               // 空名不关窗
           onOk(v);
         }},
-        {label: "取消"},
+        {label: _t("取消")},
       ]);
     const v = document.getElementById("modal-value");
     if (v) v.focus();
   }
 
   _confirmDelete(name, isDir, path) {
-    modalShell("删除确认",
-      `<p>确定删除${isDir ? "文件夹" : "文件"} <b>${esc(name)}</b>` +
-      (isDir ? "（含其全部内容，<b>递归删除</b>）" : "") + "？不可恢复。</p>",
+    modalShell(_t("删除确认"),
+      `<p>${_t("确定删除{0}", isDir ? _t("文件夹") : _t("文件"))} <b>${esc(name)}</b>` +
+      (isDir ? `${_t("（含其全部内容，")}<b>${_t("递归删除")}</b>）` : "") + `${_t("？不可恢复。")}</p>`,
       [
-        {label: "删除", primary: true, onClick: async () => {
+        {label: _t("删除"), primary: true, onClick: async () => {
           if (await this._post("delete", path)) {
-            this._toast(`已删除 ${name}`);
+            this._toast(_t("已删除 {0}", name));
             this._selected = null;
             this.load(this.cwd);
           } else {
             return false;                     // 删除失败留在确认框便于重试
           }
         }},
-        {label: "取消"},
+        {label: _t("取消")},
       ]);
   }
 
@@ -1046,7 +1055,7 @@ class FilePanel {
       if (okMsg) this._toast(okMsg);
       return true;
     } catch (e) {
-      this._toast(`请求失败：${e}`, true);
+      this._toast(_t("请求失败：{0}", e), true);
       return false;
     }
   }
@@ -1062,22 +1071,22 @@ class FilePanel {
         return;
       }
       const why = j.code === "too_large"
-        ? `${j.detail || "文件过大"}，请用 ⬇ 下载后编辑`
+        ? _t("{0}，请用 ⬇ 下载后编辑", j.detail || _t("文件过大"))
         : `${j.detail || r.status}`;
-      this._toast(`读取失败：${why}`, true);
+      this._toast(_t("读取失败：{0}", why), true);
       return;
     }
     const data = await r.json();
-    modalShell(`编辑文件 — ${name}`,
+    modalShell(_t("编辑文件 — {0}", name),
       `<textarea id="fp-edit" class="fp-edit" spellcheck="false" wrap="off"></textarea>` +
-      `<p class="fp-edit-hint">${esc(data.path)} · ${this._fmtSize(data.size)} · Ctrl+S 保存</p>`,
+      `<p class="fp-edit-hint">${_t("{0} · {1} · Ctrl+S 保存", esc(data.path), this._fmtSize(data.size))}</p>`,
       [
-        {label: "保存", primary: true, onClick: async () => {
+        {label: _t("保存"), primary: true, onClick: async () => {
           const text = document.getElementById("fp-edit").value;
-          if (await this._write(path, text)) { this._toast(`已保存 ${name}`); }
+          if (await this._write(path, text)) { this._toast(_t("已保存 {0}", name)); }
           else return false;
         }},
-        {label: "取消"},
+        {label: _t("取消")},
       ]);
     const ta = document.getElementById("fp-edit");
     ta.value = data.content;
@@ -1097,12 +1106,12 @@ class FilePanel {
         headers: {"Content-Type": "text/plain"}, body: text});
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
-        this._toast(`保存失败：${j.detail || r.status}`, true);
+        this._toast(_t("保存失败：{0}", j.detail || r.status), true);
         return false;
       }
       return true;
     } catch (e) {
-      this._toast(`保存失败：${e}`, true);
+      this._toast(_t("保存失败：{0}", e), true);
       return false;
     }
   }

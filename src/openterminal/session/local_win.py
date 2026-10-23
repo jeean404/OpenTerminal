@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 
 from .base import BasePtySession

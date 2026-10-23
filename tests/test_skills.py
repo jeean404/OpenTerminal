@@ -89,9 +89,11 @@ def test_user_skill_overrides_builtin(monkeypatch, tmp_path):
     assert skills["markdown-tables"]["description"] == "用户覆盖版"
 
 
-def test_user_skills_dir_default_location():
-    """默认用户目录是 ~/.openterminal/skills。"""
-    assert user_skills_dir() == Path.home() / ".openterminal" / "skills"
+def test_user_skills_dir_follows_app_dir():
+    """用户目录跟随 OPENTERMINAL_HOME（与 connections.db 同处），不写死 home。"""
+    from openterminal.config import app_dir
+
+    assert user_skills_dir() == app_dir() / "skills"
 
 
 def test_with_skills_wraps_backend_and_registers_middleware():

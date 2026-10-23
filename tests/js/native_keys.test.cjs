@@ -61,6 +61,7 @@ class FakeTerminal {
   open() {}
   onData(fn) { this._onData = fn; }
   onResize(fn) { this._onResize = fn; }
+  onSelectionChange(fn) { this._onSelectionChange = fn; }
   attachCustomKeyEventHandler(fn) { this._keyHandler = fn; }
   hasSelection() { return false; }
   getSelection() { return ""; }

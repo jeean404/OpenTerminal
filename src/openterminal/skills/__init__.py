@@ -23,8 +23,14 @@ USER_PREFIX = "/skills/user/"
 
 
 def user_skills_dir() -> Path:
-    """用户级 skill 目录：同名 skill 覆盖内置版。"""
-    return Path.home() / ".openterminal" / "skills"
+    """用户级 skill 目录：同名 skill 覆盖内置版。
+
+    跟随 OPENTERMINAL_HOME（与 connections.db 同一个应用目录），而不是
+    写死 Path.home()——否则设了 OPENTERMINAL_HOME 时技能库会跑到另一处。
+    """
+    from ..config import app_dir
+
+    return app_dir() / "skills"
 
 
 def skill_routes() -> dict[str, Path]:
