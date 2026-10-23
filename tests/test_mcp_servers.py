@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from openterminal import mcp_servers
@@ -143,3 +145,72 @@ def test_update_missing_server_raises():
 def test_sanitize_keeps_meaningful_prefix():
     assert mcp_servers.sanitize_tool_token("My Server 2.0") == "My_Server_2_0"
     assert mcp_servers.sanitize_tool_token("") == "srv"
+
+
+# --- JSON 导入（Claude Desktop / .mcp.json 格式） ---
+
+def test_import_accepts_wrapper_and_bare_map():
+    """标准包装与裸映射都要收：用户多半是整段粘，不该逼他多包一层。"""
+    first = mcp_servers.import_config(json.dumps({
+        "mcpServers": {
+            "fs": {"command": "npx", "args": ["-y", "pkg"]},
+            "remote": {"type": "http", "url": "https://example.com/mcp"},
+        },
+    }))
+    assert [s["name"] for s in first["added"]] == ["fs", "remote"]
+    assert first["updated"] == []
+
+    second = mcp_servers.import_config({"fs": {"command": "node", "args": []}})
+    assert second["added"] == []
+    assert [s["name"] for s in second["updated"]] == ["fs"]
+    saved = {s["name"]: s for s in list_servers()}
+    assert saved["fs"]["command"] == "node"
+
+
+def test_import_infers_transport_and_maps_type_alias():
+    r = mcp_servers.import_config({
+        "a": {"command": "npx"},                      # 有 command → stdio
+        "b": {"url": "https://x.test/mcp"},           # 只有 url → streamable_http
+        "c": {"type": "sse", "url": "https://x.test/sse"},
+        "d": {"transport": "streamable-http", "url": "https://x.test/mcp"},
+    })
+    got = {s["name"]: s["transport"] for s in r["added"]}
+    assert got == {"a": "stdio", "b": "streamable_http", "c": "sse",
+                   "d": "streamable_http"}
+
+
+def test_import_keeps_env_and_headers():
+    r = mcp_servers.import_config({
+        "fs": {"command": "npx", "env": {"API_TOKEN": "x"}},
+        "web": {"type": "http", "url": "https://x.test/mcp",
+                "headers": {"Authorization": "Bearer t"}},
+    })
+    got = {s["name"]: s for s in r["added"]}
+    assert got["fs"]["env"] == {"API_TOKEN": "x"}
+    assert got["web"]["headers"] == {"Authorization": "Bearer t"}
+
+
+def test_import_is_atomic_when_any_entry_is_bad():
+    """任一条非法就一条都不写——导入一半比报错更难收拾。"""
+    save_server(_stdio(name="keep"))
+    with pytest.raises(McpError):
+        mcp_servers.import_config({
+            "good": {"command": "node"},
+            "bad": {"transport": "websocket", "url": "https://x.test"},
+        })
+    assert [s["name"] for s in list_servers()] == ["keep"], "good 那条也不该落库"
+
+
+def test_import_rejects_bad_json_and_empty():
+    with pytest.raises(McpError, match="JSON"):
+        mcp_servers.import_config("{not json")
+    with pytest.raises(McpError, match="请粘贴"):
+        mcp_servers.import_config("   ")
+    with pytest.raises(McpError, match="没找到服务器配置"):
+        mcp_servers.import_config({"mcpServers": {}})
+
+
+def test_import_reports_unknown_type():
+    with pytest.raises(McpError, match="无法识别"):
+        mcp_servers.import_config({"x": {"type": "carrier-pigeon",
+                                         "url": "https://x.test"}})

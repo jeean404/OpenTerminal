@@ -472,17 +472,25 @@ body.settings-open #panes { display: none; }
   display: flex; flex-direction: column; gap: 5px; min-width: 0;
   color: var(--muted); font-size: 12px;
 }
-.mp-form input, .mp-form select {
+.mp-form input, .mp-form select, .mp-form textarea {
   width: 100%; padding: 8px 10px; color: var(--text);
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
 }
 .mp-form select { font: inherit; }
-.mp-form input:focus, .mp-form select:focus { outline: none; border-color: var(--accent); }
+/* JSON 粘贴框：等宽 + 足够高度，配置一眼能对上缩进 */
+.mp-form textarea {
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+  resize: vertical; min-height: 280px; white-space: pre;
+}
+.mp-form input:focus, .mp-form select:focus, .mp-form textarea:focus {
+  outline: none; border-color: var(--accent);
+}
 .mp-form .mp-wide { grid-column: 1 / -1; }
 .mp-form .mp-clear { flex-direction: row; align-items: center; }
 .mp-form .mp-clear input { width: auto; }
-.mp-form .mp-error { margin: 0; }
+.mp-form .mp-error { margin: 0; white-space: pre-wrap; }
 .modal:has(.mp-form) { width: min(500px, 94vw); }
+.modal:has(.mp-form-json) { width: min(760px, 94vw); }
 @media (max-width: 700px) {
   .settings-layout { grid-template-columns: 1fr; gap: 16px; }
   .settings-nav { flex-direction: row; border-bottom: 1px solid var(--border); }

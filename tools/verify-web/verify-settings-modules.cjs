@@ -93,7 +93,7 @@ function cleanup() {
     loadSkills: typeof loadSkills,
     loadTools: typeof loadTools,
     openSkillDetail: typeof openSkillDetail,
-    openMcpForm: typeof openMcpForm,
+    openMcpImport: typeof openMcpImport,
     showModelProfiles: typeof showModelProfiles,
     clearGeneralPrefs: typeof clearGeneralPrefs,
     applyStaticI18n: typeof applyStaticI18n,
@@ -168,7 +168,7 @@ function cleanup() {
   await page.evaluate(() => { window.__otNoReloadProbe = "alive"; });
   await page.click('[data-general-lang="en"]');
   await page.waitForFunction(() => document.documentElement.lang === "en", { timeout: 20000 });
-  // 切语言是整页刷新：得重新进设置页才能读到面板内容
+  // 不刷新页面，但设置页可能不在前台：再进一次确保能读到面板内容
   await page.waitForSelector("#btn-settings", { state: "visible", timeout: 20000 });
   await page.click("#btn-settings");
   await page.waitForFunction(() => {
@@ -360,16 +360,22 @@ function cleanup() {
     (document.getElementById("tools-list") || {}).textContent.includes("还没有 MCP"));
   check("工具页空状态文案", emptyShown === true);
 
-  step("添加 MCP 服务器");
+  step("导入 MCP 配置（JSON）");
   await page.click("#btn-add-mcp");
-  await page.waitForSelector("#mcp-name", { timeout: 10000 });
-  await page.fill("#mcp-name", "验证工具集");
-  await page.selectOption("#mcp-transport", "stdio");
-  await page.fill("#mcp-command", PY);
-  await page.fill("#mcp-args", path.join(FIX, "mcp_demo_server.py"));
-  await page.fill("#mcp-env", "MY_FLAG=1");
+  await page.waitForSelector("#mcp-json", { timeout: 10000 });
+  const cfg = {
+    mcpServers: {
+      "验证工具集": {
+        command: PY,
+        args: [path.join(FIX, "mcp_demo_server.py")],
+        env: { MY_FLAG: "1" },
+      },
+    },
+  };
+  await page.fill("#mcp-json", JSON.stringify(cfg, null, 2));
+  await page.screenshot({ path: path.join(lib.OUT, "settings-mcp-json.png") });
   await page.click(".modal-btns button");
-  await sleep(1000);
+  await sleep(1200);
   const serverCard = await page.evaluate(() => {
     const card = document.querySelector(".mcp-card");
     return card ? {
@@ -385,6 +391,27 @@ function cleanup() {
   check("卡片带连接测试/编辑/启停/删除", !!serverCard
     && ["hasProbe", "hasEdit", "hasToggle", "hasDelete"].every(k => serverCard[k]), "");
   await page.screenshot({ path: path.join(lib.OUT, "settings-tools-card.png") });
+
+  step("同名再导入是更新不是新增");
+  await page.click("#btn-add-mcp");
+  await page.waitForSelector("#mcp-json", { timeout: 10000 });
+  cfg.mcpServers["验证工具集"].env = { MY_FLAG: "2" };
+  // 裸映射形态（去掉 mcpServers 包装）也要能收
+  await page.fill("#mcp-json",
+    JSON.stringify({ "验证工具集": cfg.mcpServers["验证工具集"] }, null, 2));
+  await page.click(".modal-btns button");
+  await sleep(1200);
+  const reimport = await page.evaluate(async () => {
+    const r = await authFetch("/api/mcp-servers");
+    const d = await r.json();
+    return {
+      cards: document.querySelectorAll(".mcp-card").length,
+      servers: d.servers.map(s => ({ name: s.name, env: s.env })),
+    };
+  });
+  check("同名再导入是更新不是新增",
+    reimport.cards === 1 && reimport.servers.length === 1
+      && reimport.servers[0].env.MY_FLAG === "2", JSON.stringify(reimport));
 
   step("连接测试（真 MCP）");
   await page.click('[data-mcp-action="probe"]');

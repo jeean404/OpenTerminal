@@ -283,3 +283,96 @@ def enabled_connections() -> dict[str, dict]:
             continue
         out[unique_tool_key(server["name"], used)] = to_connection(server)
     return out
+
+
+# --------------------------------------------------------------------------
+# JSON 导入（Claude Desktop / .mcp.json 风格）
+# --------------------------------------------------------------------------
+
+_TYPE_ALIAS = {
+    "": None,
+    "stdio": "stdio", "local": "stdio",
+    "http": "streamable_http", "https": "streamable_http",
+    "streamable_http": "streamable_http", "streamable-http": "streamable_http",
+    "streamablehttp": "streamable_http",
+    "sse": "sse",
+}
+
+
+def extract_servers_config(data) -> dict:
+    """从 JSON 文本/对象里取出 {名称: 配置}。
+
+    收两种形态：标准的 ``{"mcpServers": {...}}`` 包装，以及裸的 ``{名称: {...}}``
+    ——后者就是把包装层去掉的同一份东西，没必要让用户多包一层。
+    """
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            raise McpError("请粘贴 MCP 配置 JSON")
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            raise McpError(f"JSON 解析失败：{exc}") from exc
+    if not isinstance(data, dict):
+        raise McpError("JSON 顶层必须是对象")
+    # 包装键「存在但为空」要与「没有该键」区分开：空字典是 falsy，用 or 会把
+    # {"mcpServers": {}} 误当裸映射解析，报出「远程模式必须填写 URL」这种
+    # 让人摸不着头脑的错
+    if "mcpServers" in data or "mcp_servers" in data:
+        block = data.get("mcpServers") or data.get("mcp_servers")
+    else:
+        block = data
+    if not isinstance(block, dict) or not block:
+        raise McpError(
+            '没找到服务器配置，应形如 {"mcpServers": {"名称": {...}}} 或 {"名称": {...}}')
+    return {str(name): entry for name, entry in block.items()}
+
+
+def _normalize_entry(name: str, entry: dict) -> dict:
+    """把一条外部配置转成本库字段；传输方式从 command/url 推断，显式给则优先。"""
+    if not isinstance(entry, dict):
+        raise McpError(f"「{name}」的配置必须是对象")
+    raw = str(entry.get("transport") or entry.get("type") or "").strip().lower()
+    if raw == "websocket":
+        raise McpError(f"「{name}」暂不支持 websocket 传输，请用 http 或 sse")
+    transport = _TYPE_ALIAS.get(raw)
+    if raw and transport is None:
+        raise McpError(f"「{name}」的传输方式 {raw!r} 无法识别")
+    if transport is None:
+        transport = "stdio" if entry.get("command") else "streamable_http"
+    return {
+        "name": name,
+        "transport": transport,
+        "command": str(entry.get("command") or "").strip(),
+        "args": entry.get("args") or [],
+        "env": entry.get("env") or {},
+        "url": str(entry.get("url") or "").strip(),
+        "headers": entry.get("headers") or {},
+        "enabled": entry.get("enabled", True),
+    }
+
+
+def import_config(data) -> dict:
+    """导入一份配置：同名更新、新名新增，一次可多条。
+
+    **先全量校验再落库**：任一条非法就一条都不写，否则导入一半比报错更难收拾。
+    """
+    raw = extract_servers_config(data)
+    existing = {s["name"]: s for s in list_servers()}
+
+    planned = []
+    for name, entry in raw.items():
+        payload = _normalize_entry(name, entry)
+        payload["id"] = existing[name]["id"] if name in existing else None
+        planned.append(payload)
+
+    # 只校验不落库；_clean 会做传输方式/字段的交叉校验
+    for payload in planned:
+        _clean(payload, server_id=payload["id"])
+
+    added, updated = [], []
+    for payload in planned:
+        saved = save_server(
+            payload, payload["id"], require_existing=bool(payload["id"]))
+        (updated if payload["id"] else added).append(saved)
+    return {"added": added, "updated": updated}

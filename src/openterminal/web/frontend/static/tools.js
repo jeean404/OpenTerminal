@@ -14,11 +14,6 @@ function _t(key, ...args) {
 // 数据面走 /api/mcp-servers*（见 web/tools_api.py）。
 
 const TOOLS_PANEL = () => document.querySelector('[data-settings-panel="tools"]');
-const MCP_TRANSPORTS = [
-  ["stdio", _t("本地进程"), _t("命令行启动，如 npx -y @modelcontextprotocol/server-filesystem")],
-  ["streamable_http", _t("远程 HTTP"), "https://example.com/mcp"],
-  ["sse", _t("远程 SSE"), "https://example.com/sse"],
-];
 
 async function toolsRequest(url, options = {}) {
   const response = await authFetch(url, options);
@@ -102,7 +97,7 @@ function renderMcpCards(servers) {
     if (el.dataset.mcpAction === "delete") {
       el.onclick = () => confirmDeleteMcp(id);
     } else if (el.dataset.mcpAction === "edit") {
-      el.onclick = () => openMcpForm(servers.find(item => item.id === id));
+      el.onclick = () => openMcpImport(servers.find(item => item.id === id));
     } else if (el.dataset.mcpAction === "probe") {
       el.onclick = () => probeMcp(id, el);
     } else {
@@ -185,103 +180,87 @@ async function probeMcp(id, button) {
   }
 }
 
-function openMcpForm(server = null) {
+// 支持 Claude Desktop / .mcp.json 的标准写法（{"mcpServers": {...}}），也接受
+// 去掉包装层的裸映射。同名更新、新名新增，一次可导入多个。
+const MCP_JSON_TEMPLATE = `{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/data"],
+      "env": { "API_TOKEN": "xxx" }
+    },
+    "remote-tools": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer xxx" }
+    }
+  }
+}`;
+
+function mcpServerToConfig(server) {
+  if (server.transport === "stdio") {
+    return { command: server.command, args: server.args || [], env: server.env || {} };
+  }
+  return {
+    type: server.transport === "sse" ? "sse" : "http",
+    url: server.url,
+    headers: server.headers || {},
+  };
+}
+
+function openMcpImport(server = null) {
   const editing = Boolean(server);
+  const initial = editing
+    ? JSON.stringify({ mcpServers: { [server.name]: mcpServerToConfig(server) } }, null, 2)
+    : MCP_JSON_TEMPLATE;
   const markup = `
-    <div class="mp-form">
-      <label>${_t("名称")}<input id="mcp-name" maxlength="80" placeholder="${_t("例如：文件系统")}"></label>
-      <label>${_t("传输方式")}<select id="mcp-transport">
-        ${MCP_TRANSPORTS.map(([value, label]) =>
-          `<option value="${value}">${label}</option>`).join("")}
-      </select></label>
-      <div data-mcp-field="stdio">
-        <label class="mp-wide">${_t("启动命令")}<input id="mcp-command" placeholder="npx"></label>
-        <label class="mp-wide">${_t("参数（空格分隔）")}
-          <input id="mcp-args" placeholder="-y @modelcontextprotocol/server-filesystem /data"></label>
-        <label class="mp-wide">${_t("环境变量（每行 KEY=VALUE）")}
-          <textarea id="mcp-env" rows="3" placeholder="API_TOKEN=xxx"></textarea></label>
-      </div>
-      <div data-mcp-field="remote" hidden>
-        <label class="mp-wide">URL<input id="mcp-url" type="url" placeholder="https://example.com/mcp"></label>
-        <label class="mp-wide">${_t("请求头（每行 KEY=VALUE）")}
-          <textarea id="mcp-headers" rows="3" placeholder="Authorization=Bearer xxx"></textarea></label>
-      </div>
+    <div class="mp-form mp-form-json">
+      <p class="skill-add-hint">${_t("粘贴 MCP 配置 JSON（Claude Desktop / .mcp.json 格式）。同名服务器会被更新，新名字新增，一次可导入多个。")}</p>
+      <label class="mp-wide">${_t("MCP 配置（JSON）")}
+        <textarea id="mcp-json" rows="16" spellcheck="false"></textarea>
+      </label>
       <p class="mp-error mp-wide" id="mcp-error" hidden></p>
     </div>`;
 
-  const close = modalShell(editing ? _t("编辑 MCP 服务器") : _t("添加 MCP 服务器"), markup, [
-    {label: _t("保存"), primary: true, onClick: async () => {
+  const close = modalShell(
+    editing ? _t("编辑 MCP 服务器") : _t("导入 MCP 服务器"), markup, [
+    {label: _t("导入"), primary: true, onClick: async () => {
       const errorEl = document.getElementById("mcp-error");
       errorEl.hidden = true;
+      const box = document.getElementById("mcp-json");
       try {
-        const transport = document.getElementById("mcp-transport").value;
-        const payload = {
-          name: document.getElementById("mcp-name").value.trim(),
-          transport,
-          command: document.getElementById("mcp-command").value.trim(),
-          args: document.getElementById("mcp-args").value.trim().split(/\s+/).filter(Boolean),
-          env: parseKeyValues(document.getElementById("mcp-env").value),
-          url: document.getElementById("mcp-url").value.trim(),
-          headers: parseKeyValues(document.getElementById("mcp-headers").value),
-        };
-        const url = editing
-          ? `/api/mcp-servers/${encodeURIComponent(server.id)}`
-          : "/api/mcp-servers";
-        await toolsRequest(url, {method: editing ? "PUT" : "POST", body: JSON.stringify(payload)});
-        toolsToast(editing ? _t("已保存") : _t("已添加"));
+        const result = await toolsRequest("/api/mcp-servers/import", {
+          method: "POST",
+          body: JSON.stringify({ config: box.value }),
+        });
+        const added = (result.added || []).length;
+        const updated = (result.updated || []).length;
+        toolsToast(added && updated ? _t("已导入：新增 {0} 个、更新 {1} 个", added, updated)
+          : added ? _t("已导入 {0} 个服务器", added)
+          : _t("已更新 {0} 个服务器", updated));
         await loadTools();
         return true;
       } catch (error) {
         errorEl.textContent = error.message;
         errorEl.hidden = false;
+        box.focus();
         return false;
       }
     }},
     {label: _t("取消")},
   ]);
 
-  const select = document.getElementById("mcp-transport");
-  const syncFields = () => {
-    const stdio = select.value === "stdio";
-    document.querySelectorAll("[data-mcp-field]").forEach(box => {
-      box.hidden = box.dataset.mcpField !== (stdio ? "stdio" : "remote");
-    });
-  };
-  select.onchange = syncFields;
-
-  if (editing) {
-    document.getElementById("mcp-name").value = server.name;
-    select.value = server.transport;
-    document.getElementById("mcp-command").value = server.command || "";
-    document.getElementById("mcp-args").value = (server.args || []).join(" ");
-    document.getElementById("mcp-env").value = formatKeyValues(server.env || {});
-    document.getElementById("mcp-url").value = server.url || "";
-    document.getElementById("mcp-headers").value = formatKeyValues(server.headers || {});
-    syncFields();
+  const box = document.getElementById("mcp-json");
+  if (box) {
+    box.value = initial;
+    box.focus();
   }
-  document.getElementById("mcp-name").focus();
   return close;
-}
-
-function parseKeyValues(text) {
-  const out = {};
-  String(text || "").split(/\r?\n/).forEach(line => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) return;
-    const at = trimmed.indexOf("=");
-    if (at <= 0) return;
-    out[trimmed.slice(0, at).trim()] = trimmed.slice(at + 1).trim();
-  });
-  return out;
-}
-
-function formatKeyValues(map) {
-  return Object.entries(map).map(([key, value]) => `${key}=${value}`).join("\n");
 }
 
 function initToolsPanel() {
   const add = document.getElementById("btn-add-mcp");
-  if (add) add.onclick = () => openMcpForm();
+  if (add) add.onclick = () => openMcpImport();
 }
 
 initToolsPanel();

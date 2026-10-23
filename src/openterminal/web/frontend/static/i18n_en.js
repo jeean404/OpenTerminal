@@ -192,7 +192,6 @@ I18N.en = {
   "还没有 MCP 服务器": "No MCP servers yet",
   "正在加载 MCP 服务器…": "Loading MCP servers…",
   "加载工具配置失败：{0}": "Failed to load tool configuration: {0}",
-  "添加 MCP 服务器": "Add MCP server",
   "编辑 MCP 服务器": "Edit MCP server",
   "删除 MCP 服务器": "Delete MCP server",
   "删除服务器": "Delete server",
@@ -202,17 +201,6 @@ I18N.en = {
   "连接成功，共 {0} 个工具：": "Connected — {0} tools:",
   "连接成功，但服务器没有暴露任何工具。": "Connected, but the server exposes no tools.",
   "连接失败：{0}": "Connection failed: {0}",
-  "传输方式": "Transport",
-  "本地进程": "Local process",
-  "远程 HTTP": "Remote HTTP",
-  "远程 SSE": "Remote SSE",
-  "启动命令": "Command",
-  "参数（空格分隔）": "Arguments (space separated)",
-  "环境变量（每行 KEY=VALUE）": "Environment variables (one KEY=VALUE per line)",
-  "请求头（每行 KEY=VALUE）": "Headers (one KEY=VALUE per line)",
-  "命令行启动，如 npx -y @modelcontextprotocol/server-filesystem":
-    "Launched from the command line, e.g. npx -y @modelcontextprotocol/server-filesystem",
-  "例如：文件系统": "e.g. Filesystem",
   "已启用，新建的终端会加载它的工具":
     "Enabled — new terminals will load its tools",
   "已停用，新建的终端不再加载它的工具":
@@ -517,7 +505,15 @@ I18N.en = {
   "删除失败：{0}": "Delete failed: {0}",
   "接入 MCP 服务器后，智能体会多出它提供的工具。": "Connect an MCP server and the agent gains the tools it exposes.",
   "已删除「{0}」": "Deleted “{0}”",
-  "已保存": "Saved",
-  "已添加": "Added",
+
+
+  // ---- MCP：JSON 导入 ----
+  "粘贴 MCP 配置 JSON（Claude Desktop / .mcp.json 格式）。同名服务器会被更新，新名字新增，一次可导入多个。": "Paste MCP config JSON (Claude Desktop / .mcp.json format). Same-name servers are updated, new names are added — you can import several at once.",
+  "MCP 配置（JSON）": "MCP config (JSON)",
+  "导入 MCP 服务器": "Import MCP servers",
+  "导入": "Import",
+  "已导入：新增 {0} 个、更新 {1} 个": "Imported: {0} added, {1} updated",
+  "已导入 {0} 个服务器": "Imported {0} servers",
+  "已更新 {0} 个服务器": "Updated {0} servers",
 
 };

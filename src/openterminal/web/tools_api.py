@@ -42,6 +42,17 @@ def make_tools_router(check_token) -> APIRouter:
         check_token(request.headers)
         return await _io(mcp_servers.save_server, payload)
 
+    @router.post("/import")
+    async def import_config(request: Request, payload: dict):
+        """粘 JSON 导入（Claude Desktop / .mcp.json 格式）：同名更新、新名新增。
+
+        走单个接口而不是前端逐条 POST：校验要能「任一条非法则整体不写」，
+        逐条写做不到原子性。
+        """
+        check_token(request.headers)
+        config = payload.get("config", payload)
+        return await _io(mcp_servers.import_config, config)
+
     @router.put("/{server_id}")
     async def edit_server(request: Request, server_id: str, payload: dict):
         check_token(request.headers)
