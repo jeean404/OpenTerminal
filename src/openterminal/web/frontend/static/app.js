@@ -67,7 +67,10 @@ function promptForToken() {
 // 会让用户莫名其妙（真机反馈：点 📁 被要求填访问令牌）。判据：响应体带
 // 业务 code（unauthorized 除外）就不是令牌问题，原样交回调用方。
 function authFetch(url, opts = {}) {
-  opts.headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
+  // FormData 自带 boundary，强塞 application/json 会毁掉整次上传
+  const isForm = typeof FormData !== "undefined" && opts.body instanceof FormData;
+  opts.headers = Object.assign(isForm ? {} : {"Content-Type": "application/json"},
+    opts.headers || {});
   const t = getToken();
   if (t) opts.headers["x-ot-token"] = t;
   return fetch(url, opts).then(async r => {

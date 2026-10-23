@@ -90,8 +90,6 @@ I18N.en = {
   "轻量纯色氛围": "Lightweight color washes",
   "渐变背景": "Gradient wallpaper",
   "我的图片 / 视频": "My images / videos",
-  "仅保存在本浏览器，不会上传 · 图片 ≤ 12 MB · 视频 MP4 / WebM ≤ 64 MB，静音循环":
-    "Stored in this browser only, never uploaded · images ≤ 12 MB · MP4 / WebM ≤ 64 MB, muted loop",
   "自定义背景": "Custom wallpaper",
   "上传图片或视频": "Upload an image or video",
   "点击选择或拖拽到此处": "Click to choose, or drop files here",
@@ -416,20 +414,10 @@ I18N.en = {
   "视频解析超时，文件可能已损坏。": "Timed out parsing the video — the file may be corrupt.",
   "最多保存 {0} 个背景，请先删除不需要的。":
     "At most {0} wallpapers are kept — delete some first.",
-  "未命名图片": "Untitled image",
-  "未命名视频": "Untitled video",
   "删除背景": "Delete wallpaper",
   "删除背景：{0}": "Delete wallpaper: {0}",
   "删除图片失败：{0}": "Failed to delete the image: {0}",
-  "此浏览器不支持本地图片存储。": "This browser does not support local image storage.",
-  "无法打开本地图片存储。": "Could not open local image storage.",
-  "本地图片存储失败。": "Local image storage failed.",
-  "本地图片存储已取消。": "Local image storage was cancelled.",
-  "本地图片存储正被其他页面占用，请关闭其他 OpenTerminal 页面后重试。":
-    "Local image storage is held by another page — close other OpenTerminal pages and retry.",
   "读取本地背景图片失败：{0}": "Failed to read local wallpapers: {0}",
-  "背景参数无法读取，已恢复默认显示方式。":
-    "Wallpaper options could not be read; restored the default display mode.",
   "已选择：{0}": "Selected: {0}",
 
   // ---- 背景名称与描述 ----
@@ -515,5 +503,9 @@ I18N.en = {
   "已导入：新增 {0} 个、更新 {1} 个": "Imported: {0} added, {1} updated",
   "已导入 {0} 个服务器": "Imported {0} servers",
   "已更新 {0} 个服务器": "Updated {0} servers",
+
+
+  // ---- 壁纸：存服务端后的新文案 ----
+  "保存在本机 ~/.openterminal/wallpapers，换浏览器仍在 · 图片 ≤ 12 MB · 视频 MP4 / WebM ≤ 64 MB，静音循环": "Saved on this machine in ~/.openterminal/wallpapers — survives switching browsers · images ≤ 12 MB · MP4 / WebM ≤ 64 MB, muted loop",
 
 };

@@ -11,16 +11,12 @@ function _t(key, ...args) {
 }
 
 const UI_THEMES = new Set(["dark", "light", "midnight"]);
-const WALLPAPER_DB = "openterminal-preferences";
-const WALLPAPER_DB_STORE = "wallpapers";
-const WALLPAPER_IMAGE_KEY = "custom-background";
 const WALLPAPER_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
 const WALLPAPER_VIDEO_MAX_BYTES = 64 * 1024 * 1024;
 const WALLPAPER_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 const WALLPAPER_VIDEO_TYPES = ["video/mp4", "video/webm"];
 const WALLPAPER_MAX_PIXELS = 40_000_000;
 const WALLPAPER_VIDEO_MAX_SECONDS = 300;
-const WALLPAPER_VIDEO_PAUSED_KEY = "ot-wallpaper-video-paused";
 const WALLPAPERS = [
   ["aurora", _t("极光"), _t("冰蓝与薄荷绿")],
   ["twilight", _t("暮色"), _t("靛蓝与紫罗兰")],
@@ -54,7 +50,6 @@ const WALLPAPER_ALL = [...WALLPAPERS, ...WALLPAPER_FLOW];
 let wallpaperImages = [];
 let wallpaperImageRevision = 0;
 const WALLPAPER_MAX_IMAGES = 12;
-const WALLPAPER_LEGACY_ID = WALLPAPER_IMAGE_KEY;
 
 function applyUiTheme(theme) {
   const selected = UI_THEMES.has(theme) ? theme : "dark";
@@ -69,15 +64,15 @@ function applyUiTheme(theme) {
 }
 
 function activeWallpaperImageId() {
-  if (localStorage.getItem("ot-wallpaper-custom") !== "true") return null;
-  return localStorage.getItem("ot-wallpaper-image") || WALLPAPER_LEGACY_ID;
+  return wallpaperState.custom ? (wallpaperState.image || null) : null;
 }
 
 function applyUiWallpaper(wallpaper, preserveCustom = false) {
   const selected = WALLPAPER_ALL.some(([id]) => id === wallpaper) ? wallpaper : "aurora";
   document.documentElement.dataset.wallpaper = selected;
-  localStorage.setItem("ot-wallpaper", selected);
-  if (!preserveCustom) localStorage.setItem("ot-wallpaper-custom", "false");
+  saveWallpaperState(preserveCustom
+    ? {wallpaper: selected}
+    : {wallpaper: selected, custom: false});
   refreshWallpaperSelection();
 }
 
@@ -108,7 +103,7 @@ let wallpaperVideoElement = null;
 
 function wallpaperVideoShouldPlay() {
   if (document.hidden) return false;
-  if (localStorage.getItem(WALLPAPER_VIDEO_PAUSED_KEY) === "true") return false;
+  if (wallpaperState.video_paused) return false;
   return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
@@ -140,85 +135,135 @@ function syncWallpaperVideo(video) {
   else element.pause();
 }
 
-function indexedWallpaperRequest(mode, action) {
-  return new Promise((resolve, reject) => {
-    if (!("indexedDB" in window)) {
-      reject(new Error(_t("此浏览器不支持本地图片存储。")));
-      return;
+// 壁纸媒体落服务端 ~/.openterminal/wallpapers，元数据落 SQLite。浏览器**不持久化
+// 任何壁纸数据**——IndexedDB / localStorage 都是浏览器私有的，换个浏览器、换个
+// 配置、清一次站点数据就全没了（真机踩过：上传的 MP4 换浏览器即消失）。
+async function wallpaperRequest(url, options = {}) {
+  const response = await authFetch(url, options);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || _t("请求失败 ({0})", response.status));
+  return body;
+}
+
+// 哪张在用 + 铺放参数：服务端 SQLite 保管，这里只在内存留一份供热更新
+let wallpaperState = {
+  wallpaper: "aurora", custom: false, image: "",
+  options: {fit: "cover", position: "center", opacity: 70, brightness: 100},
+  video_paused: false,
+};
+
+function saveWallpaperState(patch) {
+  Object.assign(wallpaperState, patch);
+  return wallpaperRequest("/api/wallpapers/state", {
+    method: "PUT", body: JSON.stringify(patch),
+  }).catch(error => showWallpaperError(_t("保存失败：{0}", error.message)));
+}
+
+function setWallpaperImages(list) {
+  wallpaperImageRevision += 1;
+  // url/thumbUrl 是服务端静态路由，天然支持 Range：视频拖进度条才流畅
+  wallpaperImages = (list || []).map(item => ({
+    id: item.id,
+    name: item.name,
+    kind: item.kind === "video" ? "video" : "image",
+    duration: Number(item.duration) || 0,
+    addedAt: item.added_at || 0,
+    url: item.url,
+    thumbUrl: item.thumb_url || item.url,
+  }));
+  renderWallpaperGallery();
+}
+
+async function loadWallpapers() {
+  try {
+    const data = await wallpaperRequest("/api/wallpapers");
+    if (data.state) {
+      wallpaperState = {
+        wallpaper: data.state.wallpaper || "aurora",
+        custom: Boolean(data.state.custom),
+        image: data.state.image || "",
+        options: data.state.options || wallpaperState.options,
+        video_paused: Boolean(data.state.video_paused),
+      };
     }
-    const request = indexedDB.open(WALLPAPER_DB, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(WALLPAPER_DB_STORE))
-        request.result.createObjectStore(WALLPAPER_DB_STORE);
-    };
-    request.onerror = () => reject(request.error || new Error(_t("无法打开本地图片存储。")));
-    request.onblocked = () => reject(new Error(_t("本地图片存储正被其他页面占用，请关闭其他 OpenTerminal 页面后重试。")));
+    setWallpaperImages(data.wallpapers);
+  } catch (error) {
+    showWallpaperError(_t("读取本地背景图片失败：{0}", error.message));
+  }
+}
+
+function syncWallpaperVideoToggle() {
+  const play = document.getElementById("wallpaper-video-play");
+  if (play) play.checked = !wallpaperState.video_paused;
+}
+
+// --- 一次性迁移：旧版把媒体放 IndexedDB、状态放 localStorage（都是浏览器
+// 私有的，换个浏览器就没了）。搬到服务端后清掉，免得两份数据打架。 ---
+const LEGACY_STATE_KEYS = ["ot-wallpaper", "ot-wallpaper-custom", "ot-wallpaper-image",
+                           "ot-wallpaper-options", "ot-wallpaper-video-paused"];
+
+function legacyWallpaperRequest(mode, action) {
+  return new Promise(resolve => {
+    if (!("indexedDB" in window)) return resolve([]);
+    const request = indexedDB.open("openterminal-preferences", 1);
+    request.onerror = () => resolve([]);
     request.onsuccess = () => {
       const db = request.result;
-      let transaction;
-      let operation;
+      let tx;
       try {
-        transaction = db.transaction(WALLPAPER_DB_STORE, mode);
-        operation = action(transaction.objectStore(WALLPAPER_DB_STORE));
+        tx = db.transaction("wallpapers", mode);
       } catch (error) {
         db.close();
-        reject(error);
-        return;
+        return resolve([]);
       }
-      transaction.oncomplete = () => {
-        db.close();
-        resolve(operation.result);
-      };
-      transaction.onerror = () => {
-        const error = transaction.error || new Error(_t("本地图片存储失败。"));
-        db.close();
-        reject(error);
-      };
-      transaction.onabort = () => {
-        const error = transaction.error || new Error(_t("本地图片存储已取消。"));
-        db.close();
-        reject(error);
-      };
+      const op = action(tx.objectStore("wallpapers"));
+      tx.oncomplete = () => { db.close(); resolve(op.result); };
+      tx.onerror = () => { db.close(); resolve([]); };
     };
   });
 }
 
-function readWallpaperImages() {
-  return indexedWallpaperRequest("readonly", store => store.getAll());
-}
+async function migrateLegacyWallpapers() {
+  const records = await legacyWallpaperRequest("readonly", store => store.getAll());
+  const hasState = LEGACY_STATE_KEYS.some(key => localStorage.getItem(key) !== null);
+  if (!(records || []).length && !hasState) return;   // 没旧数据就不动服务端状态
 
-function saveWallpaperImage(record) {
-  return indexedWallpaperRequest("readwrite", store => store.put(record, record.id));
-}
+  const moved = new Map();
+  for (const rec of records || []) {
+    if (!rec || !(rec.blob instanceof Blob)) continue;
+    try {
+      const form = new FormData();
+      const name = rec.name || "migrated";
+      form.append("name", name);
+      form.append("file", rec.blob, name);
+      if (rec.thumb instanceof Blob) {
+        const ext = (rec.thumb.type || "").includes("webp") ? "webp" : "jpg";
+        form.append("thumb", rec.thumb, `thumb.${ext}`);
+      }
+      const saved = await wallpaperRequest("/api/wallpapers", {method: "POST", body: form});
+      moved.set(rec.id || "custom-background", saved.id);
+    } catch (error) {
+      // 单条搬不动就跳过：旧数据还在，别让整次迁移卡死
+    }
+  }
 
-function deleteWallpaperImage(id) {
-  return indexedWallpaperRequest("readwrite", store => store.delete(id));
-}
+  let options = {};
+  try {
+    options = JSON.parse(localStorage.getItem("ot-wallpaper-options") || "{}");
+  } catch (error) { options = {}; }
+  const custom = localStorage.getItem("ot-wallpaper-custom") === "true";
+  const oldImage = localStorage.getItem("ot-wallpaper-image") || "custom-background";
+  const patch = {
+    wallpaper: localStorage.getItem("ot-wallpaper") || "aurora",
+    custom,
+    image: custom ? (moved.get(oldImage) || "") : "",
+    options: options && typeof options === "object" ? options : {},
+    video_paused: localStorage.getItem("ot-wallpaper-video-paused") === "true",
+  };
+  await saveWallpaperState(patch);
 
-function newWallpaperImageId() {
-  return `img-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function setWallpaperImages(records) {
-  wallpaperImages.forEach(image => {
-    URL.revokeObjectURL(image.url);
-    if (image.thumbUrl !== image.url) URL.revokeObjectURL(image.thumbUrl);
-  });
-  wallpaperImageRevision += 1;
-  wallpaperImages = records
-    .filter(record => record && record.blob instanceof Blob)
-    .map(record => {
-      const url = URL.createObjectURL(record.blob);
-      const thumbUrl = record.thumb instanceof Blob ? URL.createObjectURL(record.thumb) : url;
-      const kind = record.kind === "video" ? "video" : "image";
-      // 旧版本只存了一张图，且没有 id，沿用原来的存储键
-      return {id: record.id || WALLPAPER_LEGACY_ID,
-              name: record.name || (kind === "video" ? _t("未命名视频") : _t("未命名图片")),
-              kind, duration: Number(record.duration) || 0,
-              addedAt: record.addedAt || 0, url, thumbUrl};
-    })
-    .sort((a, b) => b.addedAt - a.addedAt);
-  renderWallpaperGallery();
+  await legacyWallpaperRequest("readwrite", store => store.clear());
+  LEGACY_STATE_KEYS.forEach(key => localStorage.removeItem(key));
 }
 
 function renderWallpaperGallery() {
@@ -287,8 +332,7 @@ function renderWallpaperTiles(gallery, images) {
 
 function activateWallpaperImage(id) {
   if (![...wallpaperImages, ...WALLPAPER_PHOTOS].some(image => image.id === id)) return;
-  localStorage.setItem("ot-wallpaper-custom", "true");
-  localStorage.setItem("ot-wallpaper-image", id);
+  saveWallpaperState({custom: true, image: id});
   refreshWallpaperSelection();
 }
 
@@ -306,21 +350,16 @@ function confirmRemoveWallpaperImage(image) {
 async function removeWallpaperImage(id) {
   showWallpaperError("");
   try {
-    await deleteWallpaperImage(id);
+    await wallpaperRequest(`/api/wallpapers/${encodeURIComponent(id)}`, {method: "DELETE"});
   } catch (error) {
     showWallpaperError(_t("删除图片失败：{0}", error.message));
     return;
   }
   if (activeWallpaperImageId() === id) {
-    localStorage.setItem("ot-wallpaper-custom", "false");
-    localStorage.removeItem("ot-wallpaper-image");
+    saveWallpaperState({custom: false, image: ""});
+    refreshWallpaperSelection();
   }
-  const removed = wallpaperImages.find(image => image.id === id);
   wallpaperImages = wallpaperImages.filter(image => image.id !== id);
-  if (removed) {
-    URL.revokeObjectURL(removed.url);
-    if (removed.thumbUrl !== removed.url) URL.revokeObjectURL(removed.thumbUrl);
-  }
   wallpaperImageRevision += 1;
   renderWallpaperGallery();
 }
@@ -352,19 +391,12 @@ function applyWallpaperOptions() {
   document.getElementById("wallpaper-opacity-value").textContent = `${opacity}%`;
   document.getElementById("wallpaper-brightness-value").value = `${brightness}%`;
   document.getElementById("wallpaper-brightness-value").textContent = `${brightness}%`;
-  localStorage.setItem("ot-wallpaper-options", JSON.stringify({
-    fit, position, opacity, brightness,
-  }));
+  saveWallpaperState({options: {fit, position, opacity, brightness}});
 }
 
 function loadWallpaperOptions() {
-  let options;
-  try {
-    options = JSON.parse(localStorage.getItem("ot-wallpaper-options") || "{}");
-  } catch (error) {
-    options = {};
-    showWallpaperError(_t("背景参数无法读取，已恢复默认显示方式。"));
-  }
+  // 参数由服务端保管（loadWallpapers 时读进内存），这里只负责回填控件
+  const options = wallpaperState.options || {};
   const validFits = new Set(["cover", "contain", "repeat", "stretch"]);
   const validPositions = new Set(["center", "top", "bottom", "left", "right"]);
   document.getElementById("wallpaper-fit").value =
@@ -523,11 +555,17 @@ async function handleWallpaperUpload(files) {
       continue;
     }
     try {
-      const record = {id: newWallpaperImageId(), blob: file, thumb: probe.thumb, name: file.name,
-                      kind, duration: probe.duration || 0, addedAt: Date.now()};
-      await saveWallpaperImage(record);
-      setWallpaperImages([...await readWallpaperImages()]);
-      lastId = record.id;
+      const form = new FormData();
+      form.append("name", file.name);
+      form.append("file", file, file.name);
+      if (probe.thumb) {
+        // 缩略图在浏览器里顺手生成一次，随媒体一起上传——不留本地持久化
+        const ext = (probe.thumb.type || "").includes("webp") ? "webp" : "jpg";
+        form.append("thumb", probe.thumb, `thumb.${ext}`);
+      }
+      const saved = await wallpaperRequest("/api/wallpapers", {method: "POST", body: form});
+      await loadWallpapers();
+      lastId = saved.id;
     } catch (error) {
       errors.push(_t("{0}：{1}保存失败：{2}", file.name, kindLabel, error.message));
     }
@@ -586,14 +624,22 @@ function setSettingsSection(section) {
 
 applyUiTheme(localStorage.getItem("ot-theme") || "dark");
 renderWallpaperOptions();
-applyUiWallpaper(localStorage.getItem("ot-wallpaper") || "aurora", true);
-loadWallpaperOptions();
-const initialWallpaperImageRevision = wallpaperImageRevision;
-readWallpaperImages().then(records => {
-  if (wallpaperImageRevision === initialWallpaperImageRevision) setWallpaperImages(records);
-}).catch(error => {
-  showWallpaperError(_t("读取本地背景图片失败：{0}", error.message));
-});
+// 必须等所有脚本就位再拉：本文件在 app.js 之前加载，此刻 authFetch 还没定义，
+// 立刻调会静默失败——画廊空着，只有用户手动上传（脚本已加载完）才碰巧成功。
+function initWallpaperStore() {
+  (async () => {
+    await migrateLegacyWallpapers();
+    await loadWallpapers();
+    applyUiWallpaper(wallpaperState.wallpaper, true);
+    loadWallpaperOptions();
+    syncWallpaperVideoToggle();
+  })();
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initWallpaperStore);
+} else {
+  initWallpaperStore();
+}
 document.getElementById("btn-settings").onclick = () => showSettings();
 document.getElementById("btn-close-settings").onclick = closeSettings;
 document.querySelectorAll("[data-settings-section]").forEach(button => {
@@ -625,9 +671,9 @@ document.getElementById("wallpaper-image-input").addEventListener("change", even
   });
 {
   const play = document.getElementById("wallpaper-video-play");
-  play.checked = localStorage.getItem(WALLPAPER_VIDEO_PAUSED_KEY) !== "true";
+  syncWallpaperVideoToggle();
   play.addEventListener("change", () => {
-    localStorage.setItem(WALLPAPER_VIDEO_PAUSED_KEY, String(!play.checked));
+    saveWallpaperState({video_paused: !play.checked});
     refreshWallpaperSelection();
   });
 }
