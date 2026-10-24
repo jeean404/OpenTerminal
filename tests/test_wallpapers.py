@@ -12,8 +12,9 @@ from fastapi.testclient import TestClient
 
 from openterminal.config import Config
 from openterminal.wallpapers import (
-    WallpaperError, WallpaperNotFound, add_wallpaper, delete_wallpaper,
-    get_state, list_wallpapers, media_path, set_state, wallpapers_dir,
+    MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, WallpaperError, WallpaperNotFound,
+    add_wallpaper, delete_wallpaper, get_state, list_wallpapers, media_path,
+    set_state, wallpapers_dir,
 )
 from openterminal.web.server import create_app
 
@@ -85,6 +86,37 @@ def test_size_limit_differs_for_image_and_video():
     with pytest.raises(WallpaperError, match="图片不能超过"):
         add_wallpaper("big.png", b"\x00" * (13 * 1024 * 1024), filename="big.png")
     assert add_wallpaper("big.mp4", MP4, filename="big.mp4")["kind"] == "video"
+
+
+def test_video_size_limit_is_100mb():
+    """视频上限 100 MB（含 MP4）——明确的契约值，别被无意改回 64。
+
+    超限要在落盘**之前**就拒掉，否则删不掉的半截文件会留在 wallpapers 目录。
+    """
+    assert MAX_VIDEO_BYTES == 100 * 1024 * 1024
+    with pytest.raises(WallpaperError, match="视频不能超过 100 MB"):
+        add_wallpaper("big.mp4", bytes(MAX_VIDEO_BYTES + 1), filename="big.mp4")
+    # 正文很小的 MP4 照旧放行：上限不是「必须够大」而是「不许更大」
+    assert add_wallpaper("edge.mp4", MP4, filename="edge.mp4")["kind"] == "video"
+
+
+def test_frontend_wallpaper_limits_match_backend():
+    """前后端各写了一份上限常量（settings.js / wallpapers.py）。
+
+    只改一边就会出现「前端拦下的后端本来收」或反过来的状态，用户看到的
+    报错数字也和真实上限对不上。这里钉住两边一致。
+    """
+    import re
+    from pathlib import Path
+
+    import openterminal
+
+    js = (Path(openterminal.__file__).parent / "web" / "frontend" / "static"
+          / "settings.js").read_text(encoding="utf-8")
+    pattern = "const (WALLPAPER_(?:IMAGE|VIDEO)_MAX_BYTES) = ([0-9]+) [*] 1024 [*] 1024;"
+    got = {name: int(mb) * 1024 * 1024 for name, mb in re.findall(pattern, js)}
+    assert got == {"WALLPAPER_IMAGE_MAX_BYTES": MAX_IMAGE_BYTES,
+                   "WALLPAPER_VIDEO_MAX_BYTES": MAX_VIDEO_BYTES}
 
 
 def test_empty_upload_rejected():

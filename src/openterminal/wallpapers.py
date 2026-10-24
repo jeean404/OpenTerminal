@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -22,7 +24,7 @@ from pathlib import Path
 from .config import app_dir
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
-MAX_VIDEO_BYTES = 64 * 1024 * 1024
+MAX_VIDEO_BYTES = 100 * 1024 * 1024
 IMAGE_KINDS = {"png": "image", "jpg": "image", "jpeg": "image", "webp": "image"}
 VIDEO_KINDS = {"mp4": "video", "webm": "video"}
 
@@ -45,6 +47,8 @@ CREATE TABLE IF NOT EXISTS wallpaper_state(
 # 结构化状态的键（与前端原有 ot-wallpaper-* 一一对应，去掉前缀）
 STATE_KEYS = ("wallpaper", "wallpaper-custom", "wallpaper-image",
               "wallpaper-options", "wallpaper-video-paused")
+# 保存位置不在上面那串里：它不是「哪张背景」的状态，而是存储配置
+DIR_KEY = "wallpapers-dir"
 
 
 class WallpaperError(ValueError):
@@ -55,10 +59,41 @@ class WallpaperNotFound(LookupError):
     """壁纸不存在（HTTP 404）。"""
 
 
+def default_wallpapers_dir() -> Path:
+    """默认保存位置：``~/.openterminal/wallpapers``。"""
+    return app_dir() / "wallpapers"
+
+
+def _norm(path: Path) -> str:
+    """比较用的归一化形式（Windows 下盘符大小写不该被当成两个目录）。"""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _configured_dir() -> Path:
+    """用户设置的保存位置；没设就用默认目录。"""
+    conn = _connection()
+    try:
+        row = conn.execute(
+            "SELECT value FROM wallpaper_state WHERE key=?", (DIR_KEY,)).fetchone()
+    finally:
+        conn.close()
+    value = (row["value"] if row else "").strip()
+    return Path(value) if value else default_wallpapers_dir()
+
+
 def wallpapers_dir() -> Path:
-    d = app_dir() / "wallpapers"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """媒体根目录：跟着设置里的保存位置走。
+
+    拿不到配置的目录就退回默认目录，而不是抛错——盘符被拔掉时不该连设置页
+    都打不开，媒体 404 就够了。
+    """
+    for candidate in (_configured_dir(), default_wallpapers_dir()):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError:
+            continue
+    return default_wallpapers_dir()
 
 
 def _connection():
@@ -245,3 +280,89 @@ def set_state(patch: dict) -> dict:
     finally:
         conn.close()
     return get_state()
+
+
+# --------------------------------------------------------------------------
+# 保存位置：默认 ~/.openterminal/wallpapers，用户可自定义
+# --------------------------------------------------------------------------
+
+def dir_info() -> dict:
+    configured = _configured_dir()
+    default = default_wallpapers_dir()
+    return {
+        "dir": str(configured),
+        "dir_default": str(default),
+        "dir_custom": _norm(configured) != _norm(default),
+    }
+
+
+def set_wallpapers_dir(raw: str) -> dict:
+    """改保存位置。
+
+    先把已有媒体搬到新目录再落库：元数据里只存文件名，根目录一换不搬文件，
+    已有的背景就全成孤儿。搬不动就整体回滚，路径保持原样。
+    """
+    if not isinstance(raw, str):
+        raise WallpaperError("保存位置必须是文本")
+    target = _resolve_dir(raw)
+    current = _configured_dir()
+    if _norm(target) != _norm(current):
+        _migrate_media(current, target)
+        conn = _connection()
+        try:
+            conn.execute(
+                "INSERT INTO wallpaper_state(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (DIR_KEY, str(target)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return dir_info()
+
+
+def _resolve_dir(raw: str) -> Path:
+    text = raw.strip()
+    if not text:
+        return default_wallpapers_dir()   # 空串 = 恢复默认
+    path = Path(os.path.expandvars(os.path.expanduser(text)))
+    if not path.is_absolute():
+        raise WallpaperError("保存位置必须是绝对路径，例如 D:/media/wallpapers")
+    if path.exists() and not path.is_dir():
+        raise WallpaperError("保存位置必须是目录")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WallpaperError(f"无法使用该目录：{exc}") from exc
+    return path
+
+
+def _migrate_media(old: Path, target: Path) -> int:
+    conn = _connection()
+    try:
+        rows = conn.execute("SELECT file, thumb FROM wallpapers").fetchall()
+    finally:
+        conn.close()
+    names = dict.fromkeys(
+        name for row in rows for name in (row["file"], row["thumb"]) if name)
+
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for name in names:
+            src, dst = old / name, target / name
+            if not src.is_file() or dst.is_file():
+                continue   # 源不在（本来就丢了）或目标已有：都不动
+            shutil.move(str(src), str(dst))
+            moved.append((src, dst))
+    except OSError as exc:
+        for src, dst in reversed(moved):
+            try:
+                shutil.move(str(dst), str(src))
+            except OSError:
+                pass
+        raise WallpaperError(f"已有背景迁移失败：{exc}") from exc
+    try:
+        old.rmdir()   # 搬空了顺手收掉；非空目录不动
+    except OSError:
+        pass
+    return len(moved)
