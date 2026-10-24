@@ -23,7 +23,9 @@ from ..connections import (
     find_saved_target, load_saved_targets, parse_user_at_host,
     rename_saved_target, upsert_saved_target,
 )
-from ..connections.secrets import delete_password, store_password
+from ..connections.secrets import (
+    delete_password, load_password_alias, store_password,
+)
 from ..model_profiles import (
     activate_profile, active_model_config, check_connection, delete_profile,
     list_profiles, save_profile, update_profile,
@@ -242,6 +244,19 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if worker is not None:
             await worker.close()   # 释放钩子（文件面板连接）在 close() 内统一跑
         return {"ok": True}
+
+    @app.get("/api/saved/{name}/password")
+    async def saved_password(request: Request, name: str):
+        """编辑/复制连接弹框回填密码：读该连接凭据键下记住的密码。
+
+        不进 /api/targets 载荷——那个列表每次刷新整包拉回，密码没必要跟着跑；
+        弹框打开时按名字点读一次就够。
+        """
+        _check_token(request.headers)
+        t = find_saved_target(name)
+        if t is None:
+            raise HTTPException(404, "unknown target")
+        return {"password": load_password_alias(t.host, t.user, t.port) or ""}
 
     @app.post("/api/saved")
     async def add_saved(request: Request, payload: dict):

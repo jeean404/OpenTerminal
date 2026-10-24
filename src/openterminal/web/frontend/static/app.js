@@ -3727,6 +3727,17 @@ function connForm(opts = {}) {
     }},
     {label: _t("取消"), onClick: () => {}},
   ]);
+  // 密码栏回填凭据库里的密码（type="password" 恒以密文显示），不再留空让人
+  // 重敲一遍；取不到才空着，语义仍是「留空则不修改」。弹框已换代就丢弃结果。
+  const passEl = document.getElementById("f-pass");
+  if (src && src.name && passEl) {
+    authFetch("/api/saved/" + encodeURIComponent(src.name) + "/password")
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => {
+        if (passEl.isConnected && j && j.password) passEl.value = j.password;
+      })
+      .catch(() => {});
+  }
   // 复制/编辑聚焦 IP 地址（最可能改动）；新增聚焦主机名
   const first = document.getElementById(copy || edit ? "f-host" : "f-name");
   if (first) first.focus();
