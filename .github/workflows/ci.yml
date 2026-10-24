@@ -42,7 +42,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 20 起不了全局 navigator（Node 21+ 才有），tests/js 会成片 ReferenceError
+          node-version: 22
       - name: Static frontend tests
         run: node --test tests/js/*.test.cjs
       - name: React island tests
