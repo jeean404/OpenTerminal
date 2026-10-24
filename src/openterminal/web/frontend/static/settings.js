@@ -176,31 +176,50 @@ function syncWallpaperDirInput(info, force = false) {
   // 正在改的路径冲掉
   if (!input || (!force && wallpaperDirLoaded)) return;
   wallpaperDirLoaded = true;
-  input.value = (info && info.dir) || "";
+  // 回显**真实绝对路径**：没自定义就直接把默认目录写进值里，别让输入框只剩
+  // 一个 `~/.openterminal/wallpapers` 的占位符——那是写法不是路径
+  const dir = (info && info.dir) || (info && info.dir_default) || "";
+  input.value = dir;
+  // 占位符给**平台对的**示例（服务端算好）：Windows 是 D:/…，macOS 是 /Users/…
+  input.placeholder = (info && info.dir_example) || (info && info.dir_default) || "";
 }
 
-function showWallpaperDirStatus(message) {
-  const status = document.getElementById("wallpaper-dir-status");
-  if (!status) return;
-  status.textContent = message;
-  status.hidden = !message;
-}
-
+// 保存**静默**：选完就地落库，不弹确认框也不弹文字。存不下去才报错——无声
+// 失败比多一行字糟得多。
 async function saveWallpapersDir(path) {
   showWallpaperError("");
-  showWallpaperDirStatus("");
   try {
     const info = await wallpaperRequest("/api/wallpapers/dir", {
       method: "PUT", body: JSON.stringify({path: path || ""}),
     });
     syncWallpaperDirInput(info, true);
-    showWallpaperDirStatus(info.dir_custom
-      ? _t("保存位置已更改，已有背景一并搬了过去。")
-      : _t("已恢复默认保存位置。"));
     await loadWallpapers();
   } catch (error) {
     showWallpaperError(_t("保存位置更改失败：{0}", error.message));
   }
+}
+
+// 「浏览…」直接弹**系统**的文件夹对话框：路径只有服务端拿得到（浏览器对网页
+// 一律不给磁盘路径），由跑在本机的服务端代开。选完就地保存，不弹确认框、不弹
+// 文字；用户取消就什么都不做。弹不出来（SSH、容器、会话隔离）只把光标交给输入
+// 框让他手填——不再叠任何弹框。
+async function chooseWallpaperDir() {
+  showWallpaperError("");
+  let res = null;
+  try {
+    res = await wallpaperRequest(`/api/wallpapers/dir/pick?lang=${currentLang()}`, {
+      method: "POST",
+    });
+  } catch (error) {
+    res = null;                       // 接口都不通：当弹不出来处理
+  }
+  if (res && res.result === "picked" && res.path) {
+    await saveWallpapersDir(res.path);
+    return;
+  }
+  if (res && res.result === "cancelled") return;   // 用户自己取消的，别再折腾
+  const input = document.getElementById("wallpaper-dir-input");
+  if (input) input.focus();
 }
 
 function setWallpaperImages(list) {
@@ -230,8 +249,9 @@ async function loadWallpapers() {
         video_paused: Boolean(data.state.video_paused),
       };
     }
-    setWallpaperImages(data.wallpapers);
+    // 先回填保存位置再画图库：图库渲染抛异常不该把路径一起带没
     syncWallpaperDirInput(data);
+    setWallpaperImages(data.wallpapers);
   } catch (error) {
     showWallpaperError(_t("读取本地背景图片失败：{0}", error.message));
   }
@@ -726,13 +746,14 @@ document.getElementById("wallpaper-image-input").addEventListener("change", even
 {
   const input = document.getElementById("wallpaper-dir-input");
   const save = () => saveWallpapersDir((input.value || "").trim());
-  document.getElementById("btn-wallpaper-dir-save").onclick = save;
-  document.getElementById("btn-wallpaper-dir-reset").onclick = () => saveWallpapersDir("");
+  document.getElementById("btn-wallpaper-dir-browse").onclick = chooseWallpaperDir;
+  // 没有「保存」按钮：系统框选完自动存；手填的路径回车/改完失焦即存
   input.addEventListener("keydown", event => {
     if (event.key !== "Enter") return;
     event.preventDefault();
     save();
   });
+  input.addEventListener("change", save);
 }
 ["wallpaper-fit", "wallpaper-position", "wallpaper-opacity", "wallpaper-brightness"]
   .forEach(id => {

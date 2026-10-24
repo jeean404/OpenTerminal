@@ -435,6 +435,9 @@ I18N.en = {
   "删除背景：{0}": "Delete wallpaper: {0}",
   "删除图片失败：{0}": "Failed to delete the image: {0}",
   "读取本地背景图片失败：{0}": "Failed to read local wallpapers: {0}",
+  "保存位置": "Save location",
+  "保存位置更改失败：{0}": "Failed to change the save location: {0}",
+  "浏览…": "Browse…",
   "已选择：{0}": "Selected: {0}",
 
   // ---- 背景名称与描述 ----

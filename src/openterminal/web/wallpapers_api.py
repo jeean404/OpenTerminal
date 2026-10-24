@@ -97,6 +97,18 @@ def make_wallpapers_router(check_token) -> APIRouter:
         check_token(request.headers)
         return await _io(wallpapers.set_state, payload)
 
+    @router.post("/dir/pick")
+    async def pick_walls_dir(request: Request, lang: str = "zh"):
+        """弹**系统**的文件夹选择框，把选中的真实路径交回前端。
+
+        浏览器拿不到磁盘路径，这一步只能由服务端代劳（它跑在用户这台机器上）。
+        桌面不在时返回 ``unavailable``，前端退回自带的目录选择器，不硬卡。
+        """
+        check_token(request.headers)
+        result, chosen = await asyncio.to_thread(
+            wallpapers.pick_dir_native, wallpapers.wallpapers_dir(), lang)
+        return {"ok": result == "picked", "result": result, "path": chosen}
+
     @router.put("/dir")
     async def set_dir(request: Request, payload: dict):
         """改保存位置。path 给空串就是恢复默认目录。"""

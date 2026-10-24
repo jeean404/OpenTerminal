@@ -17,6 +17,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import string
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -59,9 +62,47 @@ class WallpaperNotFound(LookupError):
     """壁纸不存在（HTTP 404）。"""
 
 
+def _example_dir() -> str:
+    """校验提示里的示例路径，跟着平台走——别在 macOS 上举 D: 的例子。"""
+    if os.name == "nt":
+        return "D:/media/wallpapers"
+    return os.path.join(os.path.expanduser("~"), "Media", "wallpapers")
+
+
+def _fs_roots() -> list[str]:
+    """选择器的根位置：POSIX 只有一个 ``/``，Windows 要把盘符都列出来。"""
+    if os.name != "nt":
+        return [str(Path(os.sep))]
+    return [f"{d}:{os.sep}" for d in string.ascii_uppercase if os.path.exists(f"{d}:{os.sep}")]
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    """两个路径是不是同一个目录。
+
+    ``normcase`` 只在 Windows 折叠大小写，macOS 的 APFS 默认是大小写**不**敏感
+    的——同一目录两种拼法会被当成两个，白触发一次迁移。``samefile`` 让操作系统
+    自己判（认大小写敏感性、符号链接、8.3 短名），两个平台都对。
+    """
+    if _norm(a) == _norm(b):
+        return True
+    try:
+        return a.is_dir() and b.is_dir() and os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _absolute(path: Path) -> Path:
+    """回显/落库用的绝对路径：``~`` 与环境变量先展开，再补成绝对路径。
+
+    设置里存过 ``~/.openterminal/wallpapers`` 这类写法时，``dir_info`` 也得
+    回显真实路径——前端拿它当输入框的值，透传 ``~`` 出去就等于显示假路径。
+    """
+    return Path(os.path.abspath(os.path.expandvars(os.path.expanduser(str(path)))))
+
+
 def default_wallpapers_dir() -> Path:
     """默认保存位置：``~/.openterminal/wallpapers``。"""
-    return app_dir() / "wallpapers"
+    return _absolute(app_dir() / "wallpapers")
 
 
 def _norm(path: Path) -> str:
@@ -78,7 +119,7 @@ def _configured_dir() -> Path:
     finally:
         conn.close()
     value = (row["value"] if row else "").strip()
-    return Path(value) if value else default_wallpapers_dir()
+    return _absolute(Path(value)) if value else default_wallpapers_dir()
 
 
 def wallpapers_dir() -> Path:
@@ -290,9 +331,10 @@ def dir_info() -> dict:
     configured = _configured_dir()
     default = default_wallpapers_dir()
     return {
-        "dir": str(configured),
+        "dir": str(_absolute(configured)),
         "dir_default": str(default),
-        "dir_custom": _norm(configured) != _norm(default),
+        "dir_custom": not _same_dir(configured, default),
+        "dir_example": _example_dir(),
     }
 
 
@@ -306,7 +348,7 @@ def set_wallpapers_dir(raw: str) -> dict:
         raise WallpaperError("保存位置必须是文本")
     target = _resolve_dir(raw)
     current = _configured_dir()
-    if _norm(target) != _norm(current):
+    if not _same_dir(target, current):
         _migrate_media(current, target)
         conn = _connection()
         try:
@@ -325,9 +367,10 @@ def _resolve_dir(raw: str) -> Path:
     text = raw.strip()
     if not text:
         return default_wallpapers_dir()   # 空串 = 恢复默认
-    path = Path(os.path.expandvars(os.path.expanduser(text)))
-    if not path.is_absolute():
-        raise WallpaperError("保存位置必须是绝对路径，例如 D:/media/wallpapers")
+    expanded = Path(os.path.expandvars(os.path.expanduser(text)))
+    if not expanded.is_absolute():
+        raise WallpaperError(f"保存位置必须是绝对路径，例如 {_example_dir()}")
+    path = _absolute(expanded)
     if path.exists() and not path.is_dir():
         raise WallpaperError("保存位置必须是目录")
     try:
@@ -335,6 +378,263 @@ def _resolve_dir(raw: str) -> Path:
     except OSError as exc:
         raise WallpaperError(f"无法使用该目录：{exc}") from exc
     return path
+
+
+# 选文件夹要弹**资源管理器那个样子**的现代框：IFileDialog + FOS_PICKFOLDERS
+# （左侧导航树 + 地址栏面包屑 + 名称/修改日期/类型/大小），不是老式纯树形框。
+# C# 经 Add-Type 编译调 COM；实测编译约 120ms、PowerShell 启动约 230ms，可接受。
+# 加载不了就退回 WinForms 的经典框，至少还能选目录。
+_PS_CSHARP = r"""
+using System;
+using System.Runtime.InteropServices;
+
+namespace OtDirPick
+{
+    public static class Picker
+    {
+        [ComImport, Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
+        private class DialogRCW { }
+
+        [ComImport, Guid("43826D1E-E718-42EE-BC55-A1E261C37BFE")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IShellItem
+        {
+            void BindToHandler(IntPtr pbc, [MarshalAs(UnmanagedType.LPStruct)] Guid bhid,
+                [MarshalAs(UnmanagedType.LPStruct)] Guid riid, out IntPtr ppv);
+            void GetParent(out IShellItem ppsi);
+            void GetDisplayName(uint sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+            void GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+            void Compare(IShellItem psi, uint hint, out int piOrder);
+        }
+
+        [ComImport, Guid("D57C7288-D4AD-4768-BE02-9D969532D960")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IFileOpenDialog
+        {
+            [PreserveSig] int Show(IntPtr hwndParent);
+            void SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+            void SetFileTypeIndex(uint iFileType);
+            void GetFileTypeIndex(out uint piFileType);
+            void Advise(IntPtr pfde, out uint pdwCookie);
+            void Unadvise(uint dwCookie);
+            void SetOptions(uint fos);
+            void GetOptions(out uint pfos);
+            void SetDefaultFolder(IShellItem psi);
+            void SetFolder(IShellItem psi);
+            void GetFolder(out IShellItem ppsi);
+            void GetCurrentSelection(out IShellItem ppsi);
+            void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            void GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+            void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+            void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+            void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+            void GetResult(out IShellItem ppsi);
+            void AddPlace(IShellItem psi, int fdap);
+            void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+            void Close(int hr);
+            void SetClientGuid([MarshalAs(UnmanagedType.LPStruct)] Guid guid);
+            void ClearClientData();
+            void SetFilter(IntPtr pFilter);
+            void GetResults(out IntPtr ppenum);
+            void GetSelectedItems(out IntPtr ppsai);
+        }
+
+        [DllImport("kernel32.dll")] private static extern ushort GetUserDefaultUILanguage();
+        [DllImport("kernel32.dll")] private static extern ushort SetThreadUILanguage(ushort langid);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        private static extern int SHCreateItemFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr pbc,
+            ref Guid riid, out IShellItem item);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindowW(string cls, string title);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool SetWindowTextW(IntPtr hWnd, string text);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDlgItem(IntPtr hDlg, int id);
+
+        // FOS_NOVALIDATE | FOS_PATHMUSTEXIST | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
+        private const uint Options = 0x100 | 0x800 | 0x20 | 0x40000;
+        private const uint FileSysPath = 0x80058000;
+
+        public static string OkLabel = "Select Folder";
+        public static string NameLabel = "Folder:";
+        public static string CancelLabel = "Cancel";
+
+        public static void SetLabels(string ok, string name, string cancel)
+        {
+            if (!String.IsNullOrEmpty(ok)) OkLabel = ok;
+            if (!String.IsNullOrEmpty(name)) NameLabel = name;
+            if (!String.IsNullOrEmpty(cancel)) CancelLabel = cancel;
+        }
+
+        // IFileDialog 只给了 OK 按钮与「文件夹」标签的 setter，取消按钮没有；而这
+        // 个进程里底部那条会退回英文资源（实测线程 UI 语言明明是 0x0804）。起个
+        // 后台线程按**自己设的标题**认出窗口，把取消按钮文案改掉。
+        private static void RelabelCancel(string title, string text)
+        {
+            for (int i = 0; i < 400; i++)
+            {
+                IntPtr hwnd = FindWindowW(null, title);
+                if (hwnd != IntPtr.Zero)
+                {
+                    IntPtr btn = GetDlgItem(hwnd, 2);   // IDCANCEL
+                    if (btn != IntPtr.Zero) { SetWindowTextW(btn, text); return; }
+                }
+                System.Threading.Thread.Sleep(50);
+            }
+        }
+
+        public static string Pick(string start, string title)
+        {
+            SetThreadUILanguage(GetUserDefaultUILanguage());
+            var dlg = (IFileOpenDialog)new DialogRCW();
+            try
+            {
+                dlg.SetOptions(Options);
+                if (!String.IsNullOrEmpty(title)) dlg.SetTitle(title);
+                dlg.SetOkButtonLabel(OkLabel);
+                dlg.SetFileNameLabel(NameLabel);
+                if (!String.IsNullOrEmpty(title))
+                {
+                    var t = new System.Threading.Thread(() => RelabelCancel(title, CancelLabel));
+                    t.IsBackground = true;
+                    t.Start();
+                }
+                if (!String.IsNullOrEmpty(start))
+                {
+                    Guid iid = typeof(IShellItem).GUID;
+                    IShellItem item;
+                    if (SHCreateItemFromParsingName(start, IntPtr.Zero, ref iid, out item) == 0)
+                        dlg.SetFolder(item);
+                }
+                if (dlg.Show(IntPtr.Zero) != 0) return null;
+                IShellItem picked;
+                dlg.GetResult(out picked);
+                string p;
+                picked.GetDisplayName(FileSysPath, out p);
+                return p;
+            }
+            finally { Marshal.ReleaseComObject(dlg); }
+        }
+    }
+}
+"""
+
+# 退出码：0 选中 / 3 用户取消 / 1 弹不出来。三者必须分开——取消不该再折腾界面，
+# 弹不出来才是前端该接手的时候。
+_PS_PICK = r"""
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$state = ""
+$out = ""
+
+try {
+  if (-not ("OtDirPick.Picker" -as [type])) {
+    Add-Type -TypeDefinition @'
+{CSCODE}
+'@
+  }
+  [OtDirPick.Picker]::SetLabels($env:OT_PICK_OK, $env:OT_PICK_NAME, $env:OT_PICK_CANCEL)
+  $r = [OtDirPick.Picker]::Pick($env:OT_PICK_DIR_START, $env:OT_PICK_DIR_PROMPT)
+  if ($null -eq $r) { $state = "cancelled" } else { $state = "picked"; $out = $r }
+} catch {
+  $state = ""
+}
+
+if ($state -eq "") {
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    $d = New-Object System.Windows.Forms.FolderBrowserDialog
+    $d.Description = $env:OT_PICK_DIR_PROMPT
+    $d.ShowNewFolderButton = $true
+    if ($env:OT_PICK_DIR_START) { $d.SelectedPath = $env:OT_PICK_DIR_START }
+    if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+      $state = "picked"; $out = $d.SelectedPath
+    } else {
+      $state = "cancelled"
+    }
+  } catch {
+    $state = "unavailable"
+  }
+}
+
+if ($state -eq "picked") { [Console]::Out.Write($out); exit 0 }
+if ($state -eq "cancelled") { exit 3 }
+exit 1
+"""
+_PS_PICK = _PS_PICK.replace("{CSCODE}", _PS_CSHARP.strip())
+
+_OSASCRIPT_PICK = 'POSIX path of (choose folder with prompt (system attribute "OT_PICK_DIR_PROMPT"))'
+
+_PICK_PROMPTS = {
+    "zh": "选择壁纸的保存位置",
+    "en": "Choose where to save wallpapers",
+}
+
+# 底部按钮/标签：这个进程里资源会退回英文，一律显式钉成界面语言
+_PICK_LABELS = {
+    "zh": ("选择文件夹", "文件夹:", "取消"),
+    "en": ("Select Folder", "Folder:", "Cancel"),
+}
+
+_PICK_CANCELLED = 3
+
+
+def pick_dir_native(start: Path | None = None, lang: str = "zh",
+                    timeout: float = 180.0) -> tuple[str, str]:
+    """弹**系统**的文件夹选择框，返回 ``(结果, 路径)``。
+
+    结果是 ``"picked"`` / ``"cancelled"`` / ``"unavailable"``。
+
+    浏览器给不了真实路径（``webkitdirectory`` / File System Access 都只交句柄），
+    所以只能由**服务端**——它就跑在用户这台机器上——去开原生对话框。桌面不在
+    （SSH、容器、会话隔离、没装 zenity）时进程会立刻失败或一直挂着，一律超时
+    兜回 ``unavailable``。
+
+    三条都不能少：超时杀进程、区分「用户取消」与「弹不出来」、路径按 UTF-8 解。
+    """
+    prompt = _PICK_PROMPTS.get(lang, _PICK_PROMPTS["zh"])
+    ok_label, name_label, cancel_label = _PICK_LABELS.get(lang, _PICK_LABELS["zh"])
+    env = os.environ.copy()
+    env["OT_PICK_DIR_PROMPT"] = prompt
+    env["OT_PICK_OK"] = ok_label
+    env["OT_PICK_NAME"] = name_label
+    env["OT_PICK_CANCEL"] = cancel_label
+    if start is not None:
+        env["OT_PICK_DIR_START"] = str(start)
+
+    if os.name == "nt":
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_PICK]
+    elif sys.platform == "darwin":
+        cmd = ["osascript", "-e", _OSASCRIPT_PICK]
+    else:
+        picker = next((p for p in ("zenity", "kdialog", "yad") if shutil.which(p)), None)
+        if not picker:
+            return "unavailable", ""
+        cmd = ([picker, "--file-selection", "--directory",
+                "--title", prompt] if picker == "zenity"
+               else [picker, "--getexistingdirectory", str(start or Path.home())])
+
+    flags = 0
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)   # 别闪一个控制台
+    try:
+        proc = subprocess.run(
+            cmd, env=env, capture_output=True, timeout=timeout,
+            creationflags=flags, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable", ""        # 弹不出来 / 用户晾着对话框不管
+    except Exception:
+        return "unavailable", ""
+
+    if proc.returncode == _PICK_CANCELLED:
+        return "cancelled", ""
+    if proc.returncode != 0:
+        return "unavailable", ""
+    text = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+    if not text:
+        return "cancelled", ""          # macOS 取消也是非零，这里兜住空输出
+    chosen = _absolute(Path(text))
+    return "picked", str(chosen)
 
 
 def _migrate_media(old: Path, target: Path) -> int:
