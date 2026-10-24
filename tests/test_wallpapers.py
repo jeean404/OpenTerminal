@@ -268,9 +268,14 @@ def test_same_dir_ignores_purely_case_differences(isolated_home):
     set_wallpapers_dir(str(default))          # 先落到默认
     assert not dir_info()["dir_custom"]
 
-    set_wallpapers_dir(str(default).swapcase())
+    swap = str(default).swapcase()
+    # 只有大小写不敏感的文件系统（APFS / NTFS）上，大小写变体才是同一目录。
+    # ext4 上 swapcase 是另一条路径，甚至建不出来——那不是本测试要管的事。
+    if not (Path(swap).exists() and os.path.samefile(default, swap)):
+        pytest.skip("本文件系统大小写敏感，大小写变体本就是另一个目录")
+
+    set_wallpapers_dir(swap)
     assert not dir_info()["dir_custom"], "同一目录的不同大小写拼法不是自定义"
-    assert not dir_info()["dir_custom"]
 
 
 def test_same_dir_treats_one_dir_by_two_routes_as_one(isolated_home):
@@ -292,7 +297,14 @@ def test_same_dir_treats_one_dir_by_two_routes_as_one(isolated_home):
 
 
 def _fake_run(monkeypatch, *, returncode=0, stdout=b"", side_effect=None):
-    """把 subprocess.run 换成假的：真弹框会卡住 CI，也会打扰用户桌面。"""
+    """把 subprocess.run 换成假的：真弹框会卡住 CI，也会打扰用户桌面。
+
+    连 shutil.which 一起喂成「装了 zenity」：Linux 分支先探 picker，探不到就
+    在起进程**之前**直接回 unavailable，上面那个假 run 根本轮不到被调用（CI
+    就是这么红的）。装没装桌面选择器是环境事实、不是被测逻辑，所以一并喂真；
+    which 的返回值这里只当真假用，命令行用的是名字本身。
+    """
+    import shutil
     import subprocess
     seen = {}
 
@@ -304,6 +316,7 @@ def _fake_run(monkeypatch, *, returncode=0, stdout=b"", side_effect=None):
         return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     return seen
 
 
@@ -330,6 +343,24 @@ def test_pick_dir_native_tells_cancel_from_unavailable(isolated_home, monkeypatc
 
     _fake_run(monkeypatch, side_effect=OSError("no gui"))
     assert w.pick_dir_native()[0] == "unavailable"
+
+
+@pytest.mark.skipif(os.name == "nt" or sys.platform == "darwin",
+                    reason="Windows / macOS 自带选择器，不走 which 探测")
+def test_pick_dir_native_without_a_desktop_picker_is_unavailable(
+        isolated_home, monkeypatch):
+    """没装 zenity/kdialog/yad（服务器、容器）是「弹不出来」，不是「用户取消」。
+
+    这条钉住为什么上面那些用例要替 shutil.which 说谎：探测在起进程之前，
+    探不到就压根不 fork——必须回 unavailable 让前端走手填退路，且不留下命令行。
+    """
+    import shutil
+    from openterminal import wallpapers as w
+
+    seen = _fake_run(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda name: None)   # 覆盖：什么都没装
+    assert w.pick_dir_native() == ("unavailable", "")
+    assert "cmd" not in seen, "没起进程就更不该拼出命令行"
 
 
 def test_pick_dir_native_survives_a_hung_dialog(isolated_home, monkeypatch):
