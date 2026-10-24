@@ -525,6 +525,12 @@ class FilePanel {
         _t("，已按它预填。面板独立于终端，改这里只影响本次连接。"));
     }
     if (d.has_password) hint.push(_t("该身份已记住密码，留空密码即可自动登录。"));
+    else if (d.fallback_user) {
+      // 没有目标用户的密码（典型：终端里 sudo su - 到了 root）：面板会用有
+      // 密码的那个身份登录，再提权到目标用户——SFTP 换不了用户
+      hint.push(_t("没有 {0} 的密码，会改用 {1} 登录并提权到 {0} 浏览文件。",
+                   user || d.user || "", d.fallback_user));
+    }
     modalShell(_t("连接远程主机"),
       `<div class="form-grid">` +
       `<label>${_t("IP 地址")}</label><input id="fp-host" value="${esc(host)}" autofocus>` +

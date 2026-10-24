@@ -97,7 +97,8 @@ class HostKeyUnknown(ConnError):
 
 async def connect_panel(*, host: str, port: int | None,
                         user: str | None, password: str | None,
-                        confirm_host_key: bool = False):
+                        confirm_host_key: bool = False,
+                        elevate_to: str | None = None):
     """直连目标主机并打开 SFTP 客户端，返回 (conn, sftp)。
 
     **不走隧道、不碰终端**：面板自带一条 SSH 连接，与终端会话无关——
@@ -156,7 +157,19 @@ async def connect_panel(*, host: str, port: int | None,
         conn = pconn                    # 确认后的连接直接复用
     except asyncssh.PermissionDenied:
         raise AuthFailed("认证失败：用户名或密码错误（或密钥不可用）") from None
-    sftp = await conn.start_sftp_client()
+    if not elevate_to:
+        sftp = await conn.start_sftp_client()
+        return conn, sftp
+    # 以另一个用户的身份浏览：SFTP 子系统换不了用户，只能把 sftp-server 用
+    # sudo 拉起来（见 panel_elevate）。协议仍是 SFTP，下面的文件操作不受影响。
+    from .panel_elevate import ElevateError, open_elevated_sftp
+
+    try:
+        sftp = await open_elevated_sftp(conn, elevate_to, password)
+    except ElevateError:
+        with suppress(Exception):
+            conn.close()
+        raise
     return conn, sftp
 
 
@@ -174,7 +187,9 @@ class _PanelConn:
     def __init__(self) -> None:
         self.host = ""
         self.port: int | None = None
-        self.user: str | None = None
+        self.user: str | None = None        # SSH 登录身份（重连用）
+        self.view_user: str | None = None   # 实际浏览的是谁的文件
+        self.elevate_to: str | None = None  # 非空 = 用 sudo 提权到该用户
         self.password: str | None = None
         self.conn = None            # asyncssh SSHClientConnection
         self.sftp_client = None     # asyncssh SFTPClient
@@ -220,7 +235,7 @@ class _PanelConn:
             try:
                 self.conn, self.sftp_client = await connect_panel(
                     host=self.host, port=self.port, user=self.user,
-                    password=self.password)
+                    password=self.password, elevate_to=self.elevate_to)
             except AuthFailed:
                 self.forget_password()
                 self.need_password = True
@@ -371,6 +386,20 @@ def _has_password(host: str, user: str | None, port: int | None) -> bool:
     from ..connections.secrets import load_password_alias
 
     return bool(load_password_alias(host, user, _cred_port(port)))
+
+
+def _fallback_users(ident: dict, user: str | None) -> list[str]:
+    """目标身份没密码时可以顶上的登录候选（保持 files_identity 的优先级）。
+
+    ``users`` 本来就是「连不上逐个退」的候选链（pipeline.files_identity）：
+    提示符里的用户（`sudo su -` 后是 root）排第一，随后是 ssh 帧登录名、会话
+    登录名。这里把目标用户自己摘掉，剩下的就是「能拿去登录的身份」。
+    """
+    out: list[str] = []
+    for u in ident.get("users") or []:
+        if u and u != user and u not in out:
+            out.append(u)
+    return out
 
 
 def _conn_fields(payload: dict) -> tuple[str, str | None, int | None]:
@@ -542,6 +571,12 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
             "supported": supported,
             "has_password": (_has_password(host, user, port)
                              if supported else False),
+            # 目标身份没密码时能顶上的登录候选：面板会以它登录再 sudo 提权
+            # 到目标用户（panel_elevate），弹框据此先说清楚要发生什么
+            "fallback_user": (
+                next((u for u in (ident.get("users") or [])
+                      if u and u != user and _has_password(host, u, port)), "")
+                if supported else ""),
         }
 
     @router.get("/state")
@@ -564,10 +599,13 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
             return {"connected": True, "supported": defaults["supported"],
                     "reason": None,
                     "home": ".", "host": c.host, "port": c.port,
-                    "user": c.user or "", "defaults": defaults}
+                    "user": c.user or "",
+                    "view_user": c.view_user or c.user or "",
+                    "elevated": bool(c.elevate_to), "defaults": defaults}
         return {"connected": False, "supported": defaults["supported"],
                 "reason": "not_connected", "home": ".",
-                "host": "", "port": None, "user": "", "defaults": defaults}
+                "host": "", "port": None, "user": "", "view_user": "",
+                "elevated": False, "defaults": defaults}
 
     # --- 连接管理 --------------------------------------------------------
 
@@ -588,11 +626,25 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
         if not host:
             raise PanelError(400, "bad_target", "请填写 IP 地址")
         password = payload.get("password") or None
+        auth_user = user
         if not password:
             from ..connections.secrets import load_password_alias
 
             password = load_password_alias(host, user, _cred_port(port))
+        if not password:
+            # 目标身份没记住密码（典型：终端里 `sudo su -` 到了 root，可只存了
+            # xiaojian 的）：退到候选链上有密码的身份去登录。落到的身份与要看的
+            # 不同，就用 sudo 提权过去——否则只能看到 xiaojian 自己的家目录。
+            for cand in _fallback_users(files_identity(worker), user):
+                pw = load_password_alias(host, cand, _cred_port(port))
+                if pw:
+                    auth_user, password = cand, pw
+                    break
+        elevate_to = (user if user and auth_user and auth_user != user
+                      else None)
         import asyncssh
+
+        from .panel_elevate import ElevateError
 
         c = getattr(worker, "_panel_files", None)
         if c is None:
@@ -603,8 +655,9 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
             c.need_password = False     # 新一轮凭据，解闩
             try:
                 conn, sftp = await connect_panel(
-                    host=host, port=port, user=user, password=password,
-                    confirm_host_key=bool(payload.get("confirm_host_key")))
+                    host=host, port=port, user=auth_user, password=password,
+                    confirm_host_key=bool(payload.get("confirm_host_key")),
+                    elevate_to=elevate_to)
             except HostKeyUnknown as exc:
                 return JSONResponse(
                     status_code=428,
@@ -619,14 +672,23 @@ def make_files_router(tabs: dict, check_token) -> APIRouter:
             except (OSError, asyncssh.Error) as exc:
                 raise PanelError(502, "connect_failed",
                                  f"连接失败: {exc}") from None
-            c.host, c.port, c.user, c.password = host, port, user, password
+            except ElevateError as exc:
+                # 提权失败不是认证失败：别上 need_password 闩，用户还可能
+                # 直接填目标用户的密码连进来
+                c.forget_password()
+                raise PanelError(502, exc.code, str(exc)) from None
+            (c.host, c.port, c.user, c.password) = host, port, auth_user, password
+            c.view_user = user or auth_user
+            c.elevate_to = elevate_to
             c.conn, c.sftp_client = conn, sftp
             if payload.get("remember") and password:
                 from ..connections.secrets import store_password
 
                 store_password(host, user, _cred_port(port), password)
             _register_disposal(worker)
-        return {"ok": True, "host": host, "port": port, "user": user or ""}
+        return {"ok": True, "host": host, "port": port,
+                "user": auth_user or "", "view_user": user or auth_user or "",
+                "elevated": bool(elevate_to)}
 
     @router.post("/disconnect")
     async def panel_disconnect(request: Request, tab_id: str):

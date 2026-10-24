@@ -1045,3 +1045,87 @@ def test_rebuild_auth_failed_latches_need_password(monkeypatch):
                        headers={"x-ot-token": "secret"})
         assert r.status_code == 403
         assert len(calls) == n                # 闩锁生效：没有再次尝试连接
+
+
+# --- 身份回退：没目标用户的密码就换候选身份登录并提权 ----------------------
+# 终端里 `sudo su -` 到 root 之后，面板默认以 root 连，可凭据库往往只有
+# xiaojian 的密码。SFTP 换不了用户，所以落到 xiaojian 后必须用 sudo 提权到
+# root，否则只能看到 xiaojian 自己的家目录（panel_elevate）。
+
+def test_fallback_users_keeps_priority_order():
+    from openterminal.web.files_api import _fallback_users
+
+    ident = {"users": ["root", "xiaojian", "ubuntu"]}
+    assert _fallback_users(ident, "root") == ["xiaojian", "ubuntu"]
+    assert _fallback_users(ident, None) == ["root", "xiaojian", "ubuntu"]
+    assert _fallback_users({}, "root") == []
+
+
+def _root_identity():
+    return {"host": "test-host", "port": None, "users": ["root", "xiaojian"],
+            "effective_user": "root", "nested": False, "mode": "ssh"}
+
+
+def test_connect_falls_back_and_elevates_when_target_password_missing(monkeypatch):
+    tabs, _ = ssh_tabs(connected=False)
+    tabs["t1"].files_identity = _root_identity()
+    monkeypatch.setattr(
+        "openterminal.connections.secrets.load_password_alias",
+        lambda host, user, port: None if user == "root" else "pw-x")
+    calls, _holder = patch_connect(monkeypatch)
+
+    with make_client(tabs) as client:
+        r = connect(client, host="test-host", user="root")     # 密码留空
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+    assert calls[0]["user"] == "xiaojian", "没 root 的密码就退到有密码的身份"
+    assert calls[0]["password"] == "pw-x"
+    assert calls[0]["elevate_to"] == "root", "身份不同必须提权到目标用户"
+    assert body["view_user"] == "root" and body["elevated"] is True
+    assert body["user"] == "xiaojian", "登录身份要如实回报"
+
+
+def test_connect_with_target_password_does_not_elevate(monkeypatch):
+    tabs, _ = ssh_tabs(connected=False)
+    tabs["t1"].files_identity = _root_identity()
+    monkeypatch.setattr(
+        "openterminal.connections.secrets.load_password_alias",
+        lambda host, user, port: "pw-root" if user == "root" else "pw-x")
+    calls, _holder = patch_connect(monkeypatch)
+
+    with make_client(tabs) as client:
+        assert connect(client, host="test-host", user="root").status_code == 200
+
+    assert calls[0]["user"] == "root"
+    assert calls[0]["elevate_to"] is None, "目标身份自己有密码就不必惊动 sudo"
+
+
+def test_connect_with_explicit_password_skips_fallback(monkeypatch):
+    tabs, _ = ssh_tabs(connected=False)
+    tabs["t1"].files_identity = _root_identity()
+    monkeypatch.setattr(
+        "openterminal.connections.secrets.load_password_alias",
+        lambda host, user, port: "pw-x")
+    calls, _holder = patch_connect(monkeypatch)
+
+    with make_client(tabs) as client:
+        r = connect(client, host="test-host", user="root", password="typed")
+        assert r.status_code == 200
+
+    assert calls[0]["user"] == "root"
+    assert calls[0]["password"] == "typed"
+    assert calls[0]["elevate_to"] is None, "用户手填的密码就是目标身份的"
+
+
+def test_state_reports_elevation(monkeypatch):
+    tabs, _ = ssh_tabs(connected=False)
+    tabs["t1"].files_identity = _root_identity()
+    patch_connect(monkeypatch)
+    with make_client(tabs) as client:
+        assert connect(client, host="test-host", user="root",
+                       password="typed").status_code == 200
+        st = client.get("/api/tabs/t1/files/state",
+                        headers={"x-ot-token": "secret"}).json()
+    assert st["connected"] is True and st["elevated"] is False
+    assert st["view_user"] == "root"
