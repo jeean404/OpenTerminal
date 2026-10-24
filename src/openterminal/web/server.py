@@ -25,15 +25,14 @@ from ..connections import (
 )
 from ..connections.secrets import delete_password, store_password
 from ..model_profiles import (
-    activate_profile, active_model_config, delete_profile, list_profiles,
-    save_profile, update_profile,
+    activate_profile, active_model_config, check_connection, delete_profile,
+    list_profiles, save_profile, update_profile,
 )
 from ..frontend.render import console
 from .files_api import install_files_errors, make_files_router
 from .skills_api import make_skills_router
 from .tools_api import make_tools_router
-from .wallpapers_api import make_wallpapers_router
-from ..wallpapers import wallpapers_dir
+from .wallpapers_api import make_wallpapers_router, make_wallpapers_static
 from .protocol import parse_client
 from .worker import TabWorker
 
@@ -155,8 +154,9 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR / "static"), name="static")
     app.mount("/vendor", StaticFiles(directory=FRONTEND_DIR / "vendor"), name="vendor")
-    # 自定义背景的媒体文件：挂成静态路由，Range 请求免费拿到，视频拖进度条才流畅
-    app.mount("/wallpapers", StaticFiles(directory=wallpapers_dir()), name="wallpapers")
+    # 自定义背景的媒体文件：挂成静态路由，Range 请求免费拿到，视频拖进度条才流畅。
+    # 目录会跟着设置里的保存位置变，所以由 make_wallpapers_static 动态解析。
+    app.mount("/wallpapers", make_wallpapers_static(), name="wallpapers")
 
     @app.get("/")
     async def index():
@@ -172,6 +172,18 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         _check_token(request.headers)
         profiles, active_id = list_profiles()
         return {"profiles": profiles, "active_id": active_id}
+
+    @app.post("/api/model-profiles/test")
+    async def test_model_profile(request: Request, payload: dict):
+        """测试连接：URL + API Key 是否有效、能不能连通。
+
+        结果走 200 + ``{ok, detail}``：连不通是**测试结论**，不是请求出错。
+        """
+        _check_token(request.headers)
+        try:
+            return await asyncio.to_thread(check_connection, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.post("/api/model-profiles")
     async def add_model_profile(request: Request, payload: dict):
