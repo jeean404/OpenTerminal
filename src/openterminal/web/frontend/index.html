@@ -79,17 +79,16 @@
                     <button type="button" data-general-lang="en">English</button>
                   </div>
                 </div>
-                <div class="settings-row">
+                <label class="settings-row">
                   <span class="settings-row-text">
                     <strong>界面字号</strong>
                     <small>影响侧栏与设置页的文字大小</small>
                   </span>
-                  <div class="seg" role="radiogroup" aria-label="界面字号">
-                    <button type="button" data-general-scale="0.9">小</button>
-                    <button type="button" data-general-scale="1">标准</button>
-                    <button type="button" data-general-scale="1.15">大</button>
-                  </div>
-                </div>
+                  <span class="settings-row-control">
+                    <input id="general-ui-scale" type="range" min="70" max="150" step="5" value="100">
+                    <output id="general-ui-scale-value" aria-live="polite">100%</output>
+                  </span>
+                </label>
               </div>
             </div>
             <div class="settings-subsection">

@@ -27,6 +27,22 @@ const GENERAL_DEFAULTS = {
 
 const GENERAL_KEYS = Object.keys(GENERAL_DEFAULTS);
 
+// 界面字号的可用区间（倍率）
+const UI_SCALE_MIN = 0.7;
+const UI_SCALE_MAX = 1.5;
+
+// ot-ui-scale 存的是倍率（0.9 / 1 / 1.15），设置页数字框显示的是百分比（90/100/115）。
+// 存倍率是为了兼容旧值——老版本按倍率存过，改存百分比会让老用户字号突然跳走
+function uiScale() {
+  const n = Number(generalGet("ot-ui-scale"));
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(UI_SCALE_MAX, Math.max(UI_SCALE_MIN, n));
+}
+
+function uiScalePct() {
+  return Math.round(uiScale() * 100);
+}
+
 function generalGet(key) {
   const value = localStorage.getItem(key);
   return value === null || value === undefined ? GENERAL_DEFAULTS[key] : value;
@@ -35,11 +51,16 @@ function generalGet(key) {
 function generalSet(key, value) {
   localStorage.setItem(key, value);
   applyGeneralSettings();
+  // 落库后把控件回读一遍：选中态 / 数字框都要跟着值走，否则改完界面生效了、
+  // 控件还停在旧值，看着像没生效
+  syncGeneralControls();
 }
 
 function applyGeneralSettings() {
   const root = document.documentElement;
-  root.style.fontSize = `${Number(generalGet("ot-ui-scale")) * 100}%`;
+  // 界面字号交给 style.css 的 zoom（#sidebar / #settings-view）。
+  // 早先写 root.style.fontSize 是空转：全站字号都是 px，实测元素字号纹丝不动
+  root.style.setProperty("--ui-scale", String(uiScale()));
   const detail = {
     fontSize: Number(generalGet("ot-term-font-size")),
     scrollback: Number(generalGet("ot-term-scrollback")),
@@ -63,7 +84,13 @@ function syncGeneralControls() {
     const el = document.getElementById(id);
     if (el) el.checked = value;
   };
-  set("general-scale", generalGet("ot-ui-scale"));
+  const scaleRange = document.getElementById("general-ui-scale");
+  const scaleOut = document.getElementById("general-ui-scale-value");
+  if (scaleRange) {
+    // 拖动中不回写滑块，免得和手指抢值；数字跟着滑块走
+    if (document.activeElement !== scaleRange) scaleRange.value = String(uiScalePct());
+    if (scaleOut) scaleOut.textContent = scaleRange.value + "%";
+  }
   set("general-font-size", generalGet("ot-term-font-size"));
   set("general-scrollback", generalGet("ot-term-scrollback"));
   set("general-cursor", generalGet("ot-term-cursor"));
@@ -73,14 +100,11 @@ function syncGeneralControls() {
   check("general-debug", Boolean(generalGet("otdbg")));
   const output = document.getElementById("general-font-size-value");
   if (output) output.textContent = generalGet("ot-term-font-size");
-  document.querySelectorAll("[data-general-scale]").forEach(button => {
-    button.classList.toggle("selected", button.dataset.generalScale === generalGet("ot-ui-scale"));
-    button.setAttribute(
-      "aria-checked", String(button.dataset.generalScale === generalGet("ot-ui-scale")));
-  });
+  // seg 的选中样式只认 .on（见 style.css 的 .seg button.on），别再写 selected——
+  // 那个类没有任何样式，选中项会跟未选中一模一样
   document.querySelectorAll("[data-general-lang]").forEach(button => {
     const on = button.dataset.generalLang === currentLang();
-    button.classList.toggle("selected", on);
+    button.classList.toggle("on", on);
     button.setAttribute("aria-checked", String(on));
   });
 }
@@ -113,7 +137,6 @@ function initGeneralPanel() {
   bindSwitch("general-cursor-blink", "ot-term-cursor-blink");
   bindSwitch("general-copy-on-select", "ot-term-copy-on-select");
   bindSwitch("general-debug", "otdbg");
-  bindSelect("general-scale", "ot-ui-scale");
   bindSelect("general-scrollback", "ot-term-scrollback");
   bindSelect("general-cursor", "ot-term-cursor");
 
@@ -128,9 +151,19 @@ function initGeneralPanel() {
     font.addEventListener("change", commit);
   }
 
-  document.querySelectorAll("[data-general-scale]").forEach(button => {
-    button.onclick = () => generalSet("ot-ui-scale", button.dataset.generalScale);
-  });
+  // 界面字号：拖到哪缩到哪（input 事件实时生效，不用等松手），右侧数字跟着走。
+  // range 自带 min/max，不用再夹
+  const scaleRange = document.getElementById("general-ui-scale");
+  if (scaleRange) {
+    const scaleOut = document.getElementById("general-ui-scale-value");
+    const commit = () => {
+      const pct = Number(scaleRange.value);
+      if (scaleOut) scaleOut.textContent = String(pct) + "%";
+      generalSet("ot-ui-scale", String(pct / 100));
+    };
+    scaleRange.addEventListener("input", commit);
+    scaleRange.addEventListener("change", commit);
+  }
   // 语言切换走「落盘 + 刷新」（见 i18n.js）：文案散在十几个渲染函数里，
   // 逐个挂重绘必然漏，刷新一次才真的全站换语言
   document.querySelectorAll("[data-general-lang]").forEach(button => {
