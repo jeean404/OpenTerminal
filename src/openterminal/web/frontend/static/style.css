@@ -147,38 +147,44 @@ body.sidebar-collapsed #sidebar { display: none; }
 
 /* 操作区：主按钮（添加远程）+ 方形图标按钮（设置），与搜索框同宽对齐 */
 #sidebar-actions { display: flex; gap: 8px; padding: 12px 10px 0; }
+#sidebar-foot {
+  display: flex; justify-content: flex-end; gap: 8px;
+  padding: 10px; border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel2) 50%, transparent);
+}
+/* 日夜切换：月亮=当前是暗色（点它去白天），太阳=当前是浅色 */
+#btn-theme-toggle .ico-sun { display: none; }
+#btn-theme-toggle.is-light .ico-moon { display: none; }
+#btn-theme-toggle.is-light .ico-sun { display: block; }
+/* 侧栏按钮一套底：安静的半透明片，不再用整块橙渐变抢视线。
+   悬停才上色（accent 淡染 + 描边），配一点抬起/图标动效当反馈。 */
 .side-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   height: 40px; border-radius: 11px; white-space: nowrap; flex: none;
   font-size: 13.5px; font-weight: 600;
-}
-.side-btn svg { flex: none; }
-.side-btn-primary {
-  flex: 1; min-width: 0; padding: 0 14px; color: #fff;
-  background: linear-gradient(135deg, var(--accent),
-    color-mix(in srgb, var(--accent) 66%, #1b1030));
-  border: 1px solid color-mix(in srgb, var(--accent) 70%, #fff);
-  box-shadow: 0 4px 14px var(--accent-soft), inset 0 1px 0 rgba(255, 255, 255, .22);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .3);
-}
-.side-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.1);
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 38%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, .28);
-  transform: translateY(-1px);
-}
-.side-btn-icon {
-  width: 40px; color: var(--muted);
+  color: var(--muted);
   background: color-mix(in srgb, var(--panel2) 70%, transparent);
   border: 1px solid var(--border);
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease,
+    transform .18s ease, box-shadow .18s ease;
 }
-.side-btn-icon:hover {
+.side-btn svg { flex: none; transition: transform .3s ease; }
+.side-btn:hover:not(:disabled) {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
   background: color-mix(in srgb, var(--accent) 14%, var(--panel2));
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px var(--accent-soft);
 }
-.side-btn-icon:hover svg { transform: rotate(45deg); }
-.side-btn-icon svg { transition: transform .3s ease; }
+.side-btn:active:not(:disabled) {
+  transform: translateY(0) scale(.98);
+  transition-duration: .08s;
+}
+.side-btn-wide { flex: 1; min-width: 0; padding: 0 14px; }
+/* 「+」转 45° 会变成「×」，只做缩放；齿轮才转得动 */
+.side-btn-wide:hover:not(:disabled) svg { transform: scale(1.14); }
+.side-btn-icon { width: 40px; padding: 0; }
+.side-btn-icon:hover:not(:disabled) svg { transform: rotate(45deg); }
 
 .mp-active { color: var(--ok); white-space: nowrap; }
 .mp-error { color: var(--danger); }
@@ -192,7 +198,9 @@ body.sidebar-collapsed #sidebar { display: none; }
 body.settings-open #tabbar,
 body.settings-open #panes { display: none; }
 .settings-header {
-  display: flex; justify-content: space-between; align-items: center;
+  /* 返回终端钉在左上角（首行），标题块在其下——与 settings-layout 同一条
+     左对齐线。做成同行左置会把 h1 挤右，标题就跟下方导航错位了 */
+  display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
   padding: 30px clamp(20px, 5vw, 64px) 20px;
   border-bottom: 1px solid var(--border);
 }
@@ -486,6 +494,26 @@ body.settings-open #panes { display: none; }
   outline: none; border-color: var(--accent);
 }
 .mp-form .mp-wide { grid-column: 1 / -1; }
+/* API Key：密文显示，小眼睛悬停/聚焦才亮起，点一下明文 */
+.mp-secret { position: relative; display: block; }
+/* 块级化：.mp-secret 的高度就等于输入框高度，top:50% 才是输入框的正中 */
+.mp-secret input { display: block; width: 100%; padding-right: 34px; }
+.mp-eye {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; padding: 0; border: none; background: none;
+  cursor: pointer; color: var(--muted); font-size: 13px; line-height: 1;
+  opacity: .45; transition: opacity .15s ease, color .15s ease;
+}
+/* 全局 button:active 的 transform: scale(.97) 是整条属性，会盖掉上面的
+   translateY(-50%)：按住时眼睛下沉，绝对定位的溢出还会把 .modal-body 撑出
+   一条滚动条。合成同一条 transform 保住垂直居中。 */
+.mp-eye:active:not(:disabled) { transform: translateY(-50%) scale(.97); }
+.mp-secret:hover .mp-eye,
+.mp-eye:focus-visible, .mp-eye.on { opacity: 1; color: var(--text); }
+/* 连接测试结论：就地显示，不关弹框 */
+.mp-test { margin: 0; font-size: 12px; }
+.mp-test.ok { color: var(--ok); }
+.mp-test.bad { color: var(--danger); }
 .mp-form .mp-clear { flex-direction: row; align-items: center; }
 .mp-form .mp-clear input { width: auto; }
 .mp-form .mp-error { margin: 0; white-space: pre-wrap; }
@@ -529,7 +557,11 @@ body.settings-open #panes { display: none; }
   width: 100%; text-align: left;
   padding: 6px 12px 6px 16px; color: var(--text);
 }
-.target:hover { background: var(--panel2); }
+.target:hover {
+  /* 与 .fp-row:hover 同一套：hover 用 accent-soft 淡染，别再用 panel2——
+     #1c2128 压在半透明侧栏上只差一点点，贴壁纸时几乎看不出掠过 */
+  background: var(--accent-soft);
+}
 .target .t-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .target .t-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .target .t-sub {
@@ -605,6 +637,14 @@ body.sidebar-collapsed #btn-show-sidebar { display: block; }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .pane-host { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.run-text-hint { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+#run-text-input {
+  width: 100%; min-height: 150px; resize: vertical; box-sizing: border-box;
+  font: 12px/1.6 var(--mono); color: var(--text);
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px;
+}
 
 /* --- 唯一渲染管线：全屏连续 xterm（SSH/Agent 共用，不再切换显示） --- */
 .term {
@@ -969,13 +1009,15 @@ body.sidebar-collapsed #btn-show-sidebar { display: block; }
 .apreceipt.edit { color: var(--warn); }
 .apreceipt.fail { color: var(--danger); }
 
-/* --- 开启新会话（唯一入口，状态栏；此前内嵌每张审批卡已删） --- */
-.statusbar .status-newtask {
+/* --- 状态栏文字按钮：新会话 / 执行长文本 同款同尺寸 --- */
+.statusbar .status-newtask,
+.statusbar .run-text-btn {
   padding: 2px 9px; font-size: 12px; font-family: var(--sans);
   color: var(--muted); border: 1px solid var(--border); border-radius: 5px;
   background: var(--panel2);
 }
-.statusbar .status-newtask:hover { color: var(--text); border-color: var(--muted); }
+.statusbar .status-newtask:hover,
+.statusbar .run-text-btn:hover { color: var(--text); border-color: var(--muted); }
 
 /* --- 状态栏 --- */
 .statusbar {
@@ -1598,6 +1640,8 @@ input, select { transition: border-color .15s, box-shadow .15s; }
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
 .skill-size { color: var(--muted); font-size: 10.5px; flex: none; }
+/* 内置技能不可停用：开关的位置换成一行常显说明 */
+.skill-always { color: var(--muted); font-size: 10.5px; flex: none; }
 .mcp-actions { display: flex; gap: 6px; }
 
 /* 右上角删除键：hover 浮出，触屏常显（照 .wallpaper-image-remove 的先例） */

@@ -12,7 +12,7 @@ function _t(key, ...args) {
 
 const UI_THEMES = new Set(["dark", "light", "midnight"]);
 const WALLPAPER_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
-const WALLPAPER_VIDEO_MAX_BYTES = 64 * 1024 * 1024;
+const WALLPAPER_VIDEO_MAX_BYTES = 100 * 1024 * 1024;
 const WALLPAPER_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 const WALLPAPER_VIDEO_TYPES = ["video/mp4", "video/webm"];
 const WALLPAPER_MAX_PIXELS = 40_000_000;
@@ -61,6 +61,13 @@ function applyUiTheme(theme) {
     button.setAttribute("aria-checked", String(active));
   });
   window.dispatchEvent(new Event("ot-theme-change"));
+}
+
+// 日夜一键切换：只走 applyUiTheme，壁纸是另一套状态（ot-wallpaper*），
+// 这里一个字都不碰——换主题不该把用户挑好的背景图/视频顶掉。
+function toggleUiTheme() {
+  const current = document.documentElement.dataset.theme || "dark";
+  applyUiTheme(current === "light" ? "dark" : "light");
 }
 
 function activeWallpaperImageId() {
@@ -159,6 +166,43 @@ function saveWallpaperState(patch) {
   }).catch(error => showWallpaperError(_t("保存失败：{0}", error.message)));
 }
 
+// 保存位置：默认 ~/.openterminal/wallpapers，用户可在设置里改。路径跟着服务端走
+// （落 SQLite），放浏览器里没用——换个浏览器就指不到文件了。
+let wallpaperDirLoaded = false;
+
+function syncWallpaperDirInput(info, force = false) {
+  const input = document.getElementById("wallpaper-dir-input");
+  // 只在首次加载与保存后回填：上传过程中 loadWallpapers 会重跑，别把用户
+  // 正在改的路径冲掉
+  if (!input || (!force && wallpaperDirLoaded)) return;
+  wallpaperDirLoaded = true;
+  input.value = (info && info.dir) || "";
+}
+
+function showWallpaperDirStatus(message) {
+  const status = document.getElementById("wallpaper-dir-status");
+  if (!status) return;
+  status.textContent = message;
+  status.hidden = !message;
+}
+
+async function saveWallpapersDir(path) {
+  showWallpaperError("");
+  showWallpaperDirStatus("");
+  try {
+    const info = await wallpaperRequest("/api/wallpapers/dir", {
+      method: "PUT", body: JSON.stringify({path: path || ""}),
+    });
+    syncWallpaperDirInput(info, true);
+    showWallpaperDirStatus(info.dir_custom
+      ? _t("保存位置已更改，已有背景一并搬了过去。")
+      : _t("已恢复默认保存位置。"));
+    await loadWallpapers();
+  } catch (error) {
+    showWallpaperError(_t("保存位置更改失败：{0}", error.message));
+  }
+}
+
 function setWallpaperImages(list) {
   wallpaperImageRevision += 1;
   // url/thumbUrl 是服务端静态路由，天然支持 Range：视频拖进度条才流畅
@@ -187,6 +231,7 @@ async function loadWallpapers() {
       };
     }
     setWallpaperImages(data.wallpapers);
+    syncWallpaperDirInput(data);
   } catch (error) {
     showWallpaperError(_t("读取本地背景图片失败：{0}", error.message));
   }
@@ -641,6 +686,20 @@ if (document.readyState === "loading") {
   initWallpaperStore();
 }
 document.getElementById("btn-settings").onclick = () => showSettings();
+{
+  const themeBtn = document.getElementById("btn-theme-toggle");
+  if (themeBtn) {
+    themeBtn.onclick = toggleUiTheme;
+    // 图标跟当前主题走（暗色显示太阳=切到白天，反之月亮）
+    const syncIcon = () => {
+      const isLight = document.documentElement.dataset.theme === "light";
+      themeBtn.classList.toggle("is-light", isLight);
+      themeBtn.title = isLight ? _t("切换到深色") : _t("切换到浅色");
+    };
+    syncIcon();
+    window.addEventListener("ot-theme-change", syncIcon);
+  }
+}
 document.getElementById("btn-close-settings").onclick = closeSettings;
 document.querySelectorAll("[data-settings-section]").forEach(button => {
   button.onclick = () => setSettingsSection(button.dataset.settingsSection);
@@ -662,6 +721,17 @@ document.getElementById("wallpaper-image-input").addEventListener("change", even
     event.preventDefault();
     upload.classList.remove("dragover");
     handleWallpaperUpload([...event.dataTransfer.files]);
+  });
+}
+{
+  const input = document.getElementById("wallpaper-dir-input");
+  const save = () => saveWallpapersDir((input.value || "").trim());
+  document.getElementById("btn-wallpaper-dir-save").onclick = save;
+  document.getElementById("btn-wallpaper-dir-reset").onclick = () => saveWallpapersDir("");
+  input.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    save();
   });
 }
 ["wallpaper-fit", "wallpaper-position", "wallpaper-opacity", "wallpaper-brightness"]

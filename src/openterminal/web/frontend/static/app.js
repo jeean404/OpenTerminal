@@ -247,6 +247,7 @@ class Session {
     tabBtn.innerHTML = `<span class="dot tab-dot connecting" title="${_t("连接状态")}"></span><span class="tab-name">${esc(this.name)}</span><span class="tab-x" title="${_t("关闭")}">×</span>`;
     tabBtn.querySelector(".tab-name").onclick = () => activateTab(this.tabId);
     tabBtn.querySelector(".tab-x").onclick = ev => { ev.stopPropagation(); closeTab(this.tabId); };
+    const runTextBtn = () => this._openRunTextDialog();
     document.getElementById("tabs").appendChild(tabBtn);
     this.tabEl = tabBtn;
 
@@ -272,6 +273,7 @@ class Session {
         <span class="status-text" id="status-${this.tabId}"></span>
         <span class="status-meta">
           <span class="status-cmdset" id="cs-${this.tabId}"></span>
+          <button class="run-text-btn" id="runtext-${this.tabId}" tabindex="-1" title="${_t("粘贴长文本并作为一条命令执行")}">${_t("执行长文本")}</button>
           <button class="status-newtask" id="newtask-${this.tabId}" tabindex="-1" title="${_t("开启新会话（/clear）：清掉本轮 AI 卡片与任务上下文")}">${_t("新会话")}</button>
           <button class="status-stop" id="stop-${this.tabId}" hidden tabindex="-1" title="${_t("停止当前任务（Ctrl+C）")}">⏹</button>
           <span class="status-tokens" id="tokens-${this.tabId}" title="${_t("累计 token 消耗（输入/输出）")}"></span>
@@ -281,6 +283,7 @@ class Session {
         </span>
       </div>`;
     document.getElementById("panes").appendChild(pane);
+    pane.querySelector(".run-text-btn").onclick = runTextBtn;
     this.paneEl = pane;
 
     this.filesPanel = new FilePanel(this);
@@ -555,6 +558,7 @@ class Session {
       this._lineBuf = "";
       this._lineCur = 0;
       if (this.mode === "agent" && line && this._looksNL(line) &&
+          !this._forceCmd &&          // 长文本弹框明确要「作为一条命令」
           !this._pwPromptLine() &&
           this.term.buffer.active.type === "normal") {
         if (out) { this.ws.send(enc.encode(out)); out = ""; }
@@ -3003,8 +3007,41 @@ if (inView) {
     return false;
   }
 
+  _openRunTextDialog() {
+    modalShell(_t("执行长文本"), `
+      <p class="run-text-hint">${_t("整段文本会一次性进入终端，并作为一条命令执行（只提交一次回车）。")}</p>
+      <textarea id="run-text-input" rows="8" spellcheck="false"
+                placeholder="${_t("粘贴或输入要执行的命令")}"></textarea>`, [
+      {label: _t("执行"), primary: true, onClick: () => {
+        const el = document.getElementById("run-text-input");
+        const text = (el ? el.value : "").replace(/\s+$/, "");
+        if (!text) return false;
+        this._runLongCommand(text);
+        this.focusCursor();
+        return true;
+      }},
+      {label: _t("取消")},
+    ]);
+    const el = document.getElementById("run-text-input");
+    if (el) el.focus();
+  }
+
   focusCursor() {
     try { this.term.focus(); } catch (e) {}
+  }
+
+  // 长文本一次性执行：整段进终端、只提交一次回车。
+  // 仍走 _feedData（手动命令要按增量并进消息历史），只是临时关掉 NL 分类——
+  // 用户在弹框里写的是「一条命令」，不该被当成自然语言任务交给 agent。
+  _runLongCommand(text) {
+    if (this._dead) return;
+    this._forceCmd = true;
+    try {
+      this.term.paste(text);       // bracketed paste：整段一次进终端
+    } finally {
+      this._forceCmd = false;
+    }
+    this._feedData(String.fromCharCode(13));
   }
 
   fit() {
@@ -3437,6 +3474,9 @@ function openTab(targetName) {
       const s = new Session(tab_id, targetName);
       sessions[tab_id] = s;
       activateTab(tab_id);
+      // 点「连接服务器」就是要看终端：设置页若开着得让开（它会 display:none
+      // 掉 #tabbar/#panes）。放在建 tab 成功后，POST 失败仍留在设置页不误跳
+      if (typeof closeSettings === "function") closeSettings();
       s.connectWS();
     })
     .catch(err => console.error("openTab failed", err));

@@ -142,6 +142,22 @@ I18N.en = {
   "加载技能详情失败：{0}": "Failed to load skill details: {0}",
   "内置技能": "Built-in skill",
   "我的技能": "My skill",
+  "始终启用": "Always on",
+  "切换深浅色": "Toggle light and dark",
+  "切换到深色": "Switch to dark",
+  "切换到浅色": "Switch to light",
+  "粘贴长文本并作为一条命令执行": "Paste long text and run it as one command",
+  "执行长文本": "Run long text",
+  "整段文本会一次性进入终端，并作为一条命令执行（只提交一次回车）。":
+    "The whole text goes into the terminal in one shot and is executed as a single command (one Enter).",
+  "粘贴或输入要执行的命令": "Paste or type the command to run",
+  "执行": "Run",
+  "API Key": "API Key",
+  "显示": "Show",
+  "隐藏": "Hide",
+  "正在测试连接…": "Testing the connection…",
+  "连接成功": "Connected",
+  "连接成功：{0}": "Connected: {0}",
   "已覆盖内置版": "Overrides the built-in version",
   "{0} 个文件 · {1}": "{0} files · {1}",
   "删除技能": "Delete skill",
@@ -219,7 +235,6 @@ I18N.en = {
   "claude-sonnet-4-6 或 gpt-5": "claude-sonnet-4-6 or gpt-5",
   "输入服务商提供的 API Key": "API key from your provider",
   "留空表示不修改": "Leave blank to keep unchanged",
-  "清除已保存的 API Key": "Clear the saved API key",
   " · API Key 已保存": " · API key saved",
   "添加模型配置": "Add model profile",
   "编辑模型配置": "Edit model profile",
@@ -375,6 +390,8 @@ I18N.en = {
   "记住密码（写入系统凭据库，不落数据库）":
     "Remember the password (saved to the system credential store, never the database)",
   "记住密码": "Remember password",
+  "没有 {0} 的密码，会改用 {1} 登录并提权到 {0} 浏览文件。":
+    "No saved password for {0}; signing in as {1} and elevating to {0} to browse files.",
   "该身份已记住密码，留空密码即可自动登录。":
     "A password is already saved for this identity — leave the field blank to sign in automatically.",
   "未保存 {0} 的密码。请在终端登录时选择「记住密码」，":
@@ -506,6 +523,6 @@ I18N.en = {
 
 
   // ---- 壁纸：存服务端后的新文案 ----
-  "保存在本机 ~/.openterminal/wallpapers，换浏览器仍在 · 图片 ≤ 12 MB · 视频 MP4 / WebM ≤ 64 MB，静音循环": "Saved on this machine in ~/.openterminal/wallpapers — survives switching browsers · images ≤ 12 MB · MP4 / WebM ≤ 64 MB, muted loop",
+  "保存在本机 ~/.openterminal/wallpapers，换浏览器仍在 · 图片 ≤ 12 MB · 视频 MP4 / WebM ≤ 100 MB，静音循环": "Saved on this machine in ~/.openterminal/wallpapers — survives switching browsers · images ≤ 12 MB · MP4 / WebM ≤ 100 MB, muted loop",
 
 };
