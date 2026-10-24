@@ -52,3 +52,6 @@ connections.toml
 /tmp/
 /Desktop/
 /~/
+
+# 真机取证脚本的截图输出
+tools/verify-web/out/
