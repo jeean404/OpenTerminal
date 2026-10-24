@@ -329,8 +329,9 @@ I18N.en = {
   "远程文件": "Remote files",
   "远程文件：登录该主机的家目录（上传/下载）":
     "Remote files: the home directory of that host (upload / download)",
-  "文件列表会随终端自动连接；也可点 🔗 手动连接。":
-    "The file list connects along with the terminal; you can also connect manually with 🔗.",
+  "文件列表会随终端自动连接。":
+    "The file list connects along with the terminal.",
+  "手动连接": "Connect manually",
   "关闭面板": "Close panel",
   "刷新": "Refresh",
   "下载": "Download",
@@ -378,7 +379,6 @@ I18N.en = {
   "{0} · {1} · Ctrl+S 保存": "{0} · {1} · Ctrl+S to save",
   "回到登录用户的家目录": "Back to the login user's home directory",
   "当前主机": "Current host",
-  "连接设置：IP / 端口 / 用户名 / 密码": "Connection: IP / port / username / password",
   "如 192.168.1.10": "e.g. 192.168.1.10",
   "默认 22": "22 by default",
   "如 root": "e.g. root",

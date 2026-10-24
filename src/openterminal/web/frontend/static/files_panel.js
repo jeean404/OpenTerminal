@@ -131,11 +131,10 @@ class FilePanel {
           <button class="fp-btn fp-icon" data-act="close" title="${_t("关闭面板")}">×</button>
         </div>
         <div class="fp-head-acts">
-          <button class="fp-btn fp-icon" data-act="home" title="${_t("回到登录用户的家目录")}">⌂</button>
-          <button class="fp-btn fp-icon" data-act="link" title="${_t("连接设置：IP / 端口 / 用户名 / 密码")}">⚙</button>
-          <button class="fp-btn fp-icon" data-act="mkdir" title="${_t("新建文件夹")}">⊞</button>
-          <button class="fp-btn fp-icon" data-act="create" title="${_t("新建文件")}">＋</button>
-          <button class="fp-btn fp-icon" data-act="refresh" title="${_t("刷新")}">⟳</button>
+          <button class="fp-btn fp-icon" data-act="home" title="${_t("回到登录用户的家目录")}">🏠</button>
+          <button class="fp-btn fp-icon" data-act="mkdir" title="${_t("新建文件夹")}">📁</button>
+          <button class="fp-btn fp-icon" data-act="create" title="${_t("新建文件")}">📄</button>
+          <button class="fp-btn fp-icon" data-act="refresh" title="${_t("刷新")}">🔄</button>
         </div>
       </div>
       <div class="fp-path"></div>
@@ -144,15 +143,13 @@ class FilePanel {
       <div class="fp-uploads" hidden></div>
       <div class="fp-foot">
         <input type="file" class="fp-input" multiple hidden>
-        <button class="fp-btn fp-icon fp-up" data-act="pick" title="${_t("上传文件")}">⬆</button>
+        <button class="fp-btn fp-icon fp-up" data-act="pick" title="${_t("上传文件")}">📤</button>
         <span class="fp-hint">${_t("可拖文件进列表上传，双击进入 / 打开")}</span>
       </div>`;
     this.pane.appendChild(el);
     this.el = el;
     this._built = true;
 
-    // 恒开弹框：既可连到别的主机/身份，也可在弹框里断开当前连接
-    el.querySelector('[data-act="link"]').onclick = () => this._connectDialog();
     el.querySelector('[data-act="home"]').onclick = () => {
       this.cwd = null;
       this._selected = null;
@@ -257,15 +254,24 @@ class FilePanel {
     }
   }
 
-  /** 没有可用凭据：不弹框，提示在终端登录时记住密码；🔗 仍可手动连接。 */
+  /** 没有可用凭据：不弹框，提示在终端登录时记住密码；空态留手动连接入口。 */
   _noCred() {
     this._setBadge("");
     const d = this._defaults || {};
     const who = d.host ? `${d.user ? d.user + "@" : ""}${d.host}` : _t("当前主机");
     const msg = _t("未保存 {0} 的密码。请在终端登录时选择「记住密码」，", who) +
-      _t("文件列表会随终端自动连接；也可点 🔗 手动连接。");
-    this.el.querySelector(".fp-list").innerHTML =
-      `<div class="fp-empty">${esc(msg)}</div>`;
+      _t("文件列表会随终端自动连接。");
+    // 「手动连接」只在无凭据时空态里出现：工具栏的连接设置已按需求去掉，
+    // 但没记住密码时仍要能手填一次（否则面板再也登不进去）
+    const list = this.el.querySelector(".fp-list");
+    list.innerHTML = `<div class="fp-empty">${esc(msg)}</div>`;
+    const box = list.firstChild;
+    box.appendChild(document.createElement("br"));
+    const manual = document.createElement("button");
+    manual.className = "fp-btn fp-retry";
+    manual.textContent = _t("手动连接");
+    manual.onclick = () => this._connectDialog();
+    box.appendChild(manual);
     this.el.querySelector(".fp-path").innerHTML =
       `<span class="fp-muted">${_t("未连接")}</span>`;
   }
@@ -391,7 +397,7 @@ class FilePanel {
       const acts = document.createElement("span");
       acts.className = "fp-acts";
       if (!e.is_dir) {
-        acts.appendChild(this._actBtn("⬇", _t("下载"), () =>
+        acts.appendChild(this._actBtn("📥", _t("下载"), () =>
           this.download(e.name, path)));
         acts.appendChild(this._actBtn("✏️", _t("编辑"), () =>
           this.edit(e.name, path)));
