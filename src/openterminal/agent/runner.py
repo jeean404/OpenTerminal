@@ -38,9 +38,39 @@ class TaskEvent:
     failed: bool = False  # tool_end：ToolMessage status=error
 
 
+# 待办状态 → 卡片符号（与卡片徽标同一套语义：完成/进行中/待办）
+_TODO_MARK = {"completed": "✓", "in_progress": "▸", "pending": "○"}
+_TODO_MAX_LINES = 20
+
+
+def _todos_summary(todos: list) -> str:
+    """``write_todos`` 的工具卡正文：渲染成清单（状态符号 + 序号 + 内容）。
+
+    这个工具的入参 ``todos`` 是**列表**，通用摘要只取字符串参数会直接返回空
+    ——工具卡就成了个空壳。write_todos 每次整份重写待办，卡片跟着换正文，
+    用户一眼看到「做到第几步」。ToolCard 把 text 放 ``<pre>``，故只用纯文本
+    符号，不掺 HTML。
+    """
+    lines = []
+    for item in todos:
+        if len(lines) >= _TODO_MAX_LINES:
+            break
+        if not isinstance(item, dict):
+            continue
+        content = " ".join(str(item.get("content") or "").split())
+        if not content:            # 空内容项跳过：不留光秃秃的符号行
+            continue
+        mark = _TODO_MARK.get(str(item.get("status") or "pending"), "○")
+        # 序号只给渲染出来的项：脏项被跳过时不占号，否则清单上会缺 1、2
+        lines.append(mark + " " + str(len(lines) + 1) + ". " + content)
+    return chr(10).join(lines)
+
+
 def _tool_args_summary(name: str, args: dict) -> str:
     """工具卡参数摘要：逐工具取关键参数（deepagents 内置文件工具的路径
     参数名是 file_path），未命中按常见参数名兜底，再取首个非空字符串值。"""
+    if name == "write_todos":
+        return _todos_summary(args.get("todos") or [])
     keyed = {"read_file": "file_path", "write_file": "file_path",
              "edit_file": "file_path", "ls": "path", "glob": "pattern",
              "grep": "pattern", "load_skill": "file_path"}

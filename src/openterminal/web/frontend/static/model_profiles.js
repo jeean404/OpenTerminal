@@ -13,7 +13,12 @@ function _t(key, ...args) {
 async function modelProfileRequest(url, options = {}) {
   const response = await authFetch(url, options);
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || _t("请求失败 ({0})", response.status));
+  if (!response.ok) {
+    // 带上状态码：调用方要分清「表单没填全」(400) 与「真连不上」，措辞不同
+    const error = new Error(body.detail || _t("请求失败 ({0})", response.status));
+    error.status = response.status;
+    throw error;
+  }
   return body;
 }
 
@@ -67,12 +72,51 @@ function openModelProfileForm(profile = null) {
       </select></label>
       <label class="mp-wide">URL<input name="base_url" type="url" placeholder="https://api.example.com/v1"></label>
       <label class="mp-wide">${_t("模型名称")}<input name="model" required placeholder="${_t("claude-sonnet-4-6 或 gpt-5")}"></label>
-      <label class="mp-wide">API Key<input name="api_key" type="password" autocomplete="new-password"
-        placeholder="${editing ? _t("留空表示不修改") : _t("输入服务商提供的 API Key")}"></label>
-      ${editing ? `<label class="mp-clear mp-wide"><input name="clear_api_key" type="checkbox"> ${_t("清除已保存的 API Key")}</label>` : ""}
+      <label class="mp-wide">${_t("API Key")}
+        <span class="mp-secret">
+          <input name="api_key" type="password" autocomplete="new-password"
+            placeholder="${editing ? _t("留空表示不修改") : _t("输入服务商提供的 API Key")}">
+          <button type="button" class="mp-eye" data-mp-eye
+                  title="${_t("显示")}" aria-label="${_t("显示")}">👁</button>
+        </span>
+      </label>
+      <p class="mp-test mp-wide" id="mp-test" hidden></p>
       <p class="mp-error mp-wide" id="mp-error" hidden></p>
     </form>`;
   const close = modalShell(editing ? _t("编辑模型配置") : _t("添加模型配置"), markup, [
+    {label: _t("连接测试"), onClick: async () => {
+      const form = document.getElementById("mp-form");
+      const values = Object.fromEntries(new FormData(form).entries());
+      const out = document.getElementById("mp-test");
+      out.hidden = false;
+      out.className = "mp-test mp-wide";
+      out.textContent = _t("正在测试连接…");
+      try {
+        const result = await modelProfileRequest("/api/model-profiles/test", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: values.provider,
+            base_url: values.base_url,
+            model: values.model,
+            api_key: values.api_key,
+            profile_id: editing ? profile.id : "",
+          }),
+        });
+        out.classList.add(result.ok ? "ok" : "bad");
+        // 只报结论：成功就把模型的应答原文糊在弹框里只会淹没「连上了」这件事，
+        // 失败才要带原因（不然没法排查）
+        out.textContent = result.ok
+          ? _t("连接成功")
+          : _t("连接失败：{0}", result.detail || "");
+      } catch (error) {
+        out.classList.add("bad");
+        // 400 是「表单没填全」，别糊成「连不上」
+        out.textContent = error.status === 400
+          ? error.message
+          : _t("连接失败：{0}", error.message);
+      }
+      return false;     // 测试完留在弹框里继续改
+    }},
     {label: _t("保存配置"), primary: true, onClick: async () => {
       const form = document.getElementById("mp-form");
       if (!form.reportValidity()) return false;
@@ -83,7 +127,6 @@ function openModelProfileForm(profile = null) {
         base_url: values.base_url,
         model: values.model,
         api_key: values.api_key,
-        clear_api_key: Boolean(form.elements.clear_api_key?.checked),
       };
       try {
         const url = editing
@@ -110,7 +153,17 @@ function openModelProfileForm(profile = null) {
     form.elements.provider.value = profile.provider;
     form.elements.base_url.value = profile.base_url;
     form.elements.model.value = profile.model;
-    form.elements.clear_api_key.checked = false;
+  }
+  {
+    const eye = form.querySelector("[data-mp-eye]");
+    if (eye) eye.onclick = () => {
+      const input = form.elements.api_key;
+      const show = input.type === "password";
+      input.type = show ? "text" : "password";
+      eye.classList.toggle("on", show);
+      eye.title = show ? _t("隐藏") : _t("显示");
+      eye.setAttribute("aria-label", eye.title);
+    };
   }
   form.elements.name.focus();
   return close;

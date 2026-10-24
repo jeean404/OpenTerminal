@@ -15,15 +15,18 @@
   margin-top: 10px;
 }
 
-/* 深色主题下实体底色（rgba over --term-bg 预混合）；去投影——浮层感主源 */
+/* 实体底色（去投影——浮层感主源）。**必须跟主题走**：这里原先写死深色，
+   会盖掉 style.css 里 color-mix(var(--panel)…) 的主题化底色——浅色主题下
+   卡面还是深色，而文字 var(--text) 已变近黑，整卡字压在深底上＝看不清
+   （真机反馈）。变量由 style.css 按主题给出，深色主题取值与原先写死的一致。 */
 .ablock {
-  background: #101827;
+  background: var(--card-analysis);
 }
 .scard {
-  background: #191411;
+  background: var(--card-summary);
 }
 .dline {
-  background: #101a13;
+  background: var(--card-done);
 }
 
 /* 卡片贴 decoration 盒：高度由内容自撑（app.js 把 host 的 inline height 覆写

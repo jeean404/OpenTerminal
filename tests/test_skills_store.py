@@ -54,6 +54,37 @@ def test_toggle_roundtrip_defaults_to_enabled():
     assert not disabled_names(), "全启用时不应残留任何停用记录"
 
 
+def test_builtin_skill_cannot_be_disabled():
+    """内置技能没有开关、恒启用：历史停用行也要兜底清掉。"""
+    # 先塞一笔改动前遗留的停用记录——只藏按钮不管数据就会卡死在这里
+    conn = store._connection()
+    conn.execute(
+        "INSERT INTO skill_state(name, enabled) VALUES('markdown-tables', 0)"
+    )
+    conn.commit()
+    conn.close()
+    store._invalidate()
+
+    names = {s["name"]: s for s in list_skills()}
+    assert names["markdown-tables"]["builtin"] is True
+    assert names["markdown-tables"]["enabled"] is True
+    assert "markdown-tables" not in disabled_names()
+
+    set_enabled("markdown-tables", False)     # 即便 API 被直接调用也不许停用
+    assert "markdown-tables" not in disabled_names()
+    assert {s["name"]: s for s in list_skills()}["markdown-tables"]["enabled"] is True
+
+
+def test_overridden_builtin_still_switchable():
+    """同名被用户版覆盖后就不是内置了，开关照旧有效。"""
+    _write_skill("markdown-tables", "用户覆盖版")
+    assert {s["name"]: s for s in list_skills()}["markdown-tables"]["builtin"] is False
+    set_enabled("markdown-tables", False)
+    assert "markdown-tables" in disabled_names()
+    set_enabled("markdown-tables", True)
+    assert "markdown-tables" not in disabled_names()
+
+
 def test_delete_user_skill_reverts_to_builtin():
     """删掉用户覆盖版 = 回退内置版，不是整个 skill 消失。"""
     _write_skill("markdown-tables", "用户覆盖版")

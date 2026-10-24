@@ -297,7 +297,7 @@ test("双击目录进入、双击文件打开编辑器", () => {
   assert.equal(fp.dlCalls.length, 0);
 });
 
-test("文件行有独立的 ⬇ 下载按钮，目录行没有（SFTP 无原生打包）", () => {
+test("文件行有独立的下载按钮，目录行没有（SFTP 无原生打包）", () => {
   const {fp, list} = makePanel();
   fp._render(ENTRIES);
   const titles = (row) => row.children[row.children.length - 1].children
@@ -325,7 +325,7 @@ test("选中态在 _render 重渲染后回填（不回填就闪没了）", () =>
 
 test("工具栏图标按钮都带 title 悬浮提示（防只换图标没加提示）", () => {
   const src = fs.readFileSync(PANEL, "utf8");
-  for (const act of ["close", "home", "link", "mkdir", "create", "refresh",
+  for (const act of ["close", "home", "mkdir", "create", "refresh",
                      "pick"]) {
     assert.match(src, new RegExp(`data-act="${act}"[^>]*title="[^"]+"`),
       `data-act=${act} 必须带 title`);
@@ -334,6 +334,16 @@ test("工具栏图标按钮都带 title 悬浮提示（防只换图标没加提�
   for (const gone of ["＋目录", "＋文件", "⌂ 家目录", "⇄ 主机"]) {
     assert.ok(!src.includes(gone), `文字按钮「${gone}」应已换成图标`);
   }
+  // 图标一律实体图标：⌂ ＋ ⟳ ⬆ 这类字符在按钮里像键盘按键，看不出是功能
+  const solid = {home: "🏠", mkdir: "📁", create: "📄", refresh: "🔄", pick: "📤"};
+  for (const [act, ico] of Object.entries(solid)) {
+    assert.match(src, new RegExp(`data-act="${act}"[^>]*>${ico}</button>`),
+      `data-act=${act} 要用实体图标 ${ico}`);
+  }
+  assert.match(src, /_actBtn\("📥", _t\("下载"\)/, "下载也用实体图标");
+  // 连接设置入口已去掉：面板靠终端记住的密码自动连
+  assert.ok(!src.includes('data-act="link"'), "不该再有连接设置按钮");
+  assert.match(src, /手动连接/, "无凭据空态要留手动连接入口");
 });
 
 test("登录成功后 cwd 归 null → 下一次列目录落登录用户的家目录（需求 3）", () => {

@@ -185,10 +185,29 @@ class Session {
     this._ghostKey = "";
     this.interactive = false;   // shell 集成就绪：AI 功能可用；false=纯终端回退（隐藏模型信息）
     this._dead = false;         // 会话已关闭：停止一切写终端
+    this._followStream = true;   // 跟流意愿：用户翻走即停（见 _onStageScroll）
+    this._userScrolling = false; // 用户手势进行中（滚轮/触摸/拖滚动条）
+    this._userScrollT = 0;
     this._buildDom();
     this._buildTerm();
     // 监听可视区而非终端内容：卡片增多只增加滚动长度，不递归撑高终端。
     const stage = this.paneEl.querySelector(".ot-stage");
+    // 跟流意愿：跟着滚；用户一往上翻就停住，回到流底自动再跟
+    if (stage) {
+      const mark = () => this._markUserScroll();
+      stage.addEventListener("scroll", () => this._onStageScroll(), { passive: true });
+      stage.addEventListener("wheel", mark, { passive: true });
+      stage.addEventListener("touchmove", mark, { passive: true });
+      // 只认真正的滚动手势。pointerdown 不算：点一下卡片/终端也是 pointerdown，
+      // 若把那次点击当手势，随后卡片 scrollIntoView 的原生滚动就会被误判成
+      // 「用户翻走」把跟流关掉（真机⑤）。拖滚动条是 pointermove+按键，够用。
+      stage.addEventListener("pointermove", ev => {
+        if (ev.buttons) mark();
+      }, { passive: true });
+      stage.addEventListener("keydown", ev => {
+        if (/^(PageUp|PageDown|Home|End|ArrowUp|ArrowDown)$/.test(ev.key)) mark();
+      }, { passive: true });
+    }
     if (stage && typeof ResizeObserver !== "undefined") {
       this._layoutObserver = new ResizeObserver(() => {
         cancelAnimationFrame(this._layoutFrame);
@@ -210,34 +229,77 @@ class Session {
     }
   }
 
-  _stageFollowTop(stage) {
-    const blocks = stage.querySelector(".ot-blocks");
-    if (!blocks) return Math.max(0, stage.scrollHeight - stage.clientHeight);
-    const bottom = blocks.getBoundingClientRect().bottom
-      - stage.getBoundingClientRect().top + stage.scrollTop;
-    return Math.max(0, bottom - stage.clientHeight);
+  // ── 跟流（已定决策：跟着滚；用户一往上翻就停住）──────────────────
+  // 几何与意愿判定见 static/follow_intent.js。这里只量几何、按意愿补滚动。
+  _stageEl() {
+    return this.paneEl ? this.paneEl.querySelector(".ot-stage") : null;
   }
 
-  _followBlockStream() {
-    if (this._dead || !this.paneEl) return;
-    const stage = this.paneEl.querySelector(".ot-stage");
+  // 意愿只由**用户手势**改：滚轮 / 触摸 / 拖滚动条 / 翻页键。
+  // 为什么不能听 scroll 事件：那条流里混着浏览器 scroll anchoring、
+  // scrollIntoView、聚焦滚入视口——全是原生滚动，分不出是谁滚的。当成用户滚
+  // 就会把跟流误关（真机⑤：跑任务时每张卡 scrollIntoView 一次，尾巴越飘越远）；
+  // 反过来当成程序滚又会跟用户抢滚动条（真机图一→图二）。
+  _markUserScroll() {
+    this._userScrolling = true;
+    clearTimeout(this._userScrollT);
+    // 拖滚动条会持续 pointermove；停手 400ms 后结束本次手势
+    this._userScrollT = setTimeout(() => { this._userScrolling = false; }, 400);
+  }
+
+  // 用户手势进行中的滚动才重算跟流意愿：一往上翻（光标离开视口）就停跟，
+  // 回到流底自动再跟（不锁存，无需额外按钮也能恢复跟流）。
+  // 不在手势里的滚动一律不动意愿——那是内容在动，不是人在翻；我们主动把人带去
+  // 别处的地方（_keepApprovalInView）自己声明停跟，不拿几何猜。
+  _onStageScroll() {
+    if (!this._userScrolling) return;
+    const stage = this._stageEl();
     if (!stage) return;
-    stage.scrollTop = this._stageFollowTop(stage);
+    this._followStream = this._atStreamTail(stage);
+  }
+
+  _atStreamTail(stage) {
+    const st = stage || this._stageEl();
+    if (!st) return false;
+    const cursor = this.paneEl.querySelector(".xterm-cursor");
+    const c = cursor ? cursor.getBoundingClientRect() : null;
+    return atStreamTail({
+      cursor: (c && c.height > 0)
+        ? { top: c.top, bottom: c.bottom, height: c.height } : null,
+      stage: {
+        top: st.getBoundingClientRect().top,
+        bottom: st.getBoundingClientRect().bottom,
+      },
+      scrollTop: st.scrollTop,
+      scrollHeight: st.scrollHeight,
+      clientHeight: st.clientHeight,
+    });
+  }
+
+  // 跟流补滚动。force=用户主动提交（回车/执行）：无条件对齐并重新武装；
+  // 否则只在用户仍看着活尾巴时补，翻走就一动不动（真机图一→图二的跳变根治点）。
+  _followLiveTail(force) {
+    if (this._dead || !this.paneEl) return;
+    if (force) this._followStream = true;
+    else if (!this._followStream) return;
+    this._ensureTerminalCursorVisible();
+  }
+
+  // 重排/块流变高后的跟流入口（stage RO 与 .ot-blocks RO 都走这里）。
+  // 跟的目标是活动终端光标（活尾巴），不是块流底边——贴块流底边会把活动终端
+  // 整块挤出视口（真机图二：命令行整块消失，只剩总结卡底）。
+  _followBlockStream() {
+    this._followLiveTail(false);
   }
 
   _ensureTerminalCursorVisible() {
-    if (!this.paneEl) return;
-    const stage = this.paneEl.querySelector(".ot-stage");
-    const cursor = this.paneEl.querySelector(".xterm-cursor");
+    const stage = this._stageEl();
+    const cursor = this.paneEl && this.paneEl.querySelector(".xterm-cursor");
     if (!stage || !cursor) return;
-    const stageRect = stage.getBoundingClientRect();
-    const cursorRect = cursor.getBoundingClientRect();
-    if (cursorRect.height === 0) return;
-    if (cursorRect.bottom > stageRect.bottom) {
-      stage.scrollTop += cursorRect.bottom - stageRect.bottom;
-    } else if (cursorRect.top < stageRect.top) {
-      stage.scrollTop -= stageRect.top - cursorRect.top;
-    }
+    const nudge = cursorNudge(stage.getBoundingClientRect(),
+                              cursor.getBoundingClientRect());
+    if (!nudge) return;
+    stage.scrollTop += nudge;
   }
 
   _buildDom() {
@@ -247,6 +309,7 @@ class Session {
     tabBtn.innerHTML = `<span class="dot tab-dot connecting" title="${_t("连接状态")}"></span><span class="tab-name">${esc(this.name)}</span><span class="tab-x" title="${_t("关闭")}">×</span>`;
     tabBtn.querySelector(".tab-name").onclick = () => activateTab(this.tabId);
     tabBtn.querySelector(".tab-x").onclick = ev => { ev.stopPropagation(); closeTab(this.tabId); };
+    const runTextBtn = () => this._openRunTextDialog();
     document.getElementById("tabs").appendChild(tabBtn);
     this.tabEl = tabBtn;
 
@@ -272,6 +335,7 @@ class Session {
         <span class="status-text" id="status-${this.tabId}"></span>
         <span class="status-meta">
           <span class="status-cmdset" id="cs-${this.tabId}"></span>
+          <button class="run-text-btn" id="runtext-${this.tabId}" tabindex="-1" title="${_t("粘贴长文本并作为一条命令执行")}">${_t("执行长文本")}</button>
           <button class="status-newtask" id="newtask-${this.tabId}" tabindex="-1" title="${_t("开启新会话（/clear）：清掉本轮 AI 卡片与任务上下文")}">${_t("新会话")}</button>
           <button class="status-stop" id="stop-${this.tabId}" hidden tabindex="-1" title="${_t("停止当前任务（Ctrl+C）")}">⏹</button>
           <span class="status-tokens" id="tokens-${this.tabId}" title="${_t("累计 token 消耗（输入/输出）")}"></span>
@@ -281,6 +345,7 @@ class Session {
         </span>
       </div>`;
     document.getElementById("panes").appendChild(pane);
+    pane.querySelector(".run-text-btn").onclick = runTextBtn;
     this.paneEl = pane;
 
     this.filesPanel = new FilePanel(this);
@@ -359,7 +424,7 @@ class Session {
     term.onData(d => {
       if (d.includes("\r")) {
         term.scrollToBottom();
-        this._ensureTerminalCursorVisible();
+        this._followLiveTail(true);
       }
       // WS 未就绪（连接中/重连间隙）不丢键：缓存待开连后按序回放。旧实现
       // 静默丢弃——刚开页就打字时前几个 IME 提交整段消失（「整行只剩尾巴」
@@ -555,6 +620,7 @@ class Session {
       this._lineBuf = "";
       this._lineCur = 0;
       if (this.mode === "agent" && line && this._looksNL(line) &&
+          !this._forceCmd &&          // 长文本弹框明确要「作为一条命令」
           !this._pwPromptLine() &&
           this.term.buffer.active.type === "normal") {
         if (out) { this.ws.send(enc.encode(out)); out = ""; }
@@ -691,8 +757,14 @@ class Session {
     this._lastByteAt = Date.now();
     this.term.write(u8, () => {
       if (this._dead) return;
-      this.term.scrollToBottom();
-      this._ensureTerminalCursorVisible();
+      // 用户翻过 xterm 自己的滚动条就不再拽回（同一「不跟用户抢滚动条」口径）
+      let atBottom = true;
+      try {
+        const b = this.term.buffer && this.term.buffer.active;
+        atBottom = !b || b.viewportY >= b.baseY;
+      } catch (e) { atBottom = true; }
+      if (atBottom) this.term.scrollToBottom();
+      this._followLiveTail(false);
     });
     this._scheduleHeal();
   }
@@ -1072,7 +1144,12 @@ class Session {
         if (!el || typeof el.scrollIntoView !== "function") continue;
         const interactive = slot.host.querySelector(
           ".cmdacts button, .apbtns button");
-        if (interactive) { el.scrollIntoView({ block: "nearest" }); return; }
+        if (interactive) {
+          el.scrollIntoView({ block: "nearest" });
+          // 主动把人带去审批卡：这里之后就别再跟流把人拽回终端尾巴
+          this._followStream = false;
+          return;
+        }
       }
     } catch (e) {}
   }
@@ -3003,8 +3080,41 @@ if (inView) {
     return false;
   }
 
+  _openRunTextDialog() {
+    modalShell(_t("执行长文本"), `
+      <p class="run-text-hint">${_t("整段文本会一次性进入终端，并作为一条命令执行（只提交一次回车）。")}</p>
+      <textarea id="run-text-input" rows="8" spellcheck="false"
+                placeholder="${_t("粘贴或输入要执行的命令")}"></textarea>`, [
+      {label: _t("执行"), primary: true, onClick: () => {
+        const el = document.getElementById("run-text-input");
+        const text = (el ? el.value : "").replace(/\s+$/, "");
+        if (!text) return false;
+        this._runLongCommand(text);
+        this.focusCursor();
+        return true;
+      }},
+      {label: _t("取消")},
+    ]);
+    const el = document.getElementById("run-text-input");
+    if (el) el.focus();
+  }
+
   focusCursor() {
     try { this.term.focus(); } catch (e) {}
+  }
+
+  // 长文本一次性执行：整段进终端、只提交一次回车。
+  // 仍走 _feedData（手动命令要按增量并进消息历史），只是临时关掉 NL 分类——
+  // 用户在弹框里写的是「一条命令」，不该被当成自然语言任务交给 agent。
+  _runLongCommand(text) {
+    if (this._dead) return;
+    this._forceCmd = true;
+    try {
+      this.term.paste(text);       // bracketed paste：整段一次进终端
+    } finally {
+      this._forceCmd = false;
+    }
+    this._feedData(String.fromCharCode(13));
   }
 
   fit() {
@@ -3437,6 +3547,9 @@ function openTab(targetName) {
       const s = new Session(tab_id, targetName);
       sessions[tab_id] = s;
       activateTab(tab_id);
+      // 点「连接服务器」就是要看终端：设置页若开着得让开（它会 display:none
+      // 掉 #tabbar/#panes）。放在建 tab 成功后，POST 失败仍留在设置页不误跳
+      if (typeof closeSettings === "function") closeSettings();
       s.connectWS();
     })
     .catch(err => console.error("openTab failed", err));
@@ -3614,6 +3727,17 @@ function connForm(opts = {}) {
     }},
     {label: _t("取消"), onClick: () => {}},
   ]);
+  // 密码栏回填凭据库里的密码（type="password" 恒以密文显示），不再留空让人
+  // 重敲一遍；取不到才空着，语义仍是「留空则不修改」。弹框已换代就丢弃结果。
+  const passEl = document.getElementById("f-pass");
+  if (src && src.name && passEl) {
+    authFetch("/api/saved/" + encodeURIComponent(src.name) + "/password")
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => {
+        if (passEl.isConnected && j && j.password) passEl.value = j.password;
+      })
+      .catch(() => {});
+  }
   // 复制/编辑聚焦 IP 地址（最可能改动）；新增聚焦主机名
   const first = document.getElementById(copy || edit ? "f-host" : "f-name");
   if (first) first.focus();

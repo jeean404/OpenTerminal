@@ -66,6 +66,42 @@ def list_profiles(*, with_keys: bool = True) -> tuple[list[dict], str | None]:
     return profiles, active_id
 
 
+def check_connection(data: dict) -> dict:
+    """测试 URL + API Key 能不能连通：发一次最小调用，如实回报结果。
+
+    api_key 留空且带了 profile_id 时用**已保存**的 key——用户不该为了测一下
+    连接就把密钥复制出来再贴回去。返回 ``{ok, detail}`` 而不是抛异常：连不通
+    是「测试结果」不是「请求出错」，前端据此在弹框里就地显示。
+    """
+    from .agent.model import build_chat_model
+
+    provider = str(data.get("provider") or "").strip().lower()
+    base_url = str(data.get("base_url") or "").strip()
+    model = str(data.get("model") or "").strip()
+    if provider not in {"anthropic", "openai"} or not model:
+        raise ValueError("请先填写协议与模型名称")
+    if not base_url and provider == "anthropic":
+        raise ValueError("Anthropic 协议必须填写 URL")
+
+    api_key = str(data.get("api_key") or "").strip() or None
+    if api_key is None:
+        pid = str(data.get("profile_id") or "").strip()
+        if pid:
+            api_key = load_model_api_key(pid)
+    if not api_key:
+        raise ValueError("请先填写 API Key")
+
+    chat = build_chat_model(ModelConfig(
+        provider=provider, base_url=base_url, model=model, api_key=api_key))
+    try:
+        reply = chat.invoke("ping")
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    text = str(getattr(reply, "content", "") or "").strip()
+    first = text.splitlines()[0] if text else "（模型已应答）"
+    return {"ok": True, "detail": first[:200]}
+
+
 def save_profile(
     data: dict, profile_id: str | None = None, *, require_existing: bool = False,
 ) -> dict:

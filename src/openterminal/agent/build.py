@@ -13,6 +13,7 @@ from deepagents.backends import CompositeBackend, FilesystemBackend
 from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
     ModelRetryMiddleware,
+    TodoListMiddleware,
 )
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -68,6 +69,10 @@ def build_agent(
         # 最外层：任何工具链异常先在这里收口成 ToolMessage，不再打死任务
         ToolErrorRetryMiddleware(max_retries=3),
         DenyMiddleware(policy),
+        # 复杂多步任务的待办清单：提供 write_todos 工具 + 「何时该用」的提示词。
+        # deepagents 默认工具面（ls/read_file/.../execute/task）里没有待办工具，
+        # 不挂它模型就没有可调的工具，前端自然也长不出待办卡。
+        TodoListMiddleware(),
     ]
 
     def _model_failure(exc: Exception) -> str:

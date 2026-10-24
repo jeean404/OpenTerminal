@@ -33,6 +33,21 @@ def test_api_targets_payload():
         assert "jumps" not in data
 
 
+def test_saved_password_for_edit_form_prefill(monkeypatch):
+    """编辑弹框回填密码：按名字读凭据库；列表载荷仍不带密码。"""
+    save_saved_targets([TargetConfig(
+        name="web01", mode="ssh", host="10.0.0.20", user="root")])
+    monkeypatch.setattr("openterminal.connections.secrets.load_password",
+                        lambda host, user, port: "s3cret")
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        r = client.get("/api/saved/web01/password")
+        assert r.status_code == 200
+        assert r.json() == {"password": "s3cret"}
+        assert client.get("/api/saved/nope/password").status_code == 404
+        assert "password" not in client.get("/api/targets").json()["direct"][0]
+
+
 def test_model_profile_crud_and_activation(monkeypatch, tmp_path):
     import openterminal.model_profiles as profiles
     import openterminal.web.server as web_server

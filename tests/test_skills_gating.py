@@ -59,6 +59,14 @@ def test_disabled_skill_disappears_from_prompt():
     assert "alpha-skill" in text, "重新启用要立刻回来，无需重建 agent"
 
 
+def test_builtin_skill_cannot_be_switched_off():
+    """内置技能恒启用：停用请求不该让它从模型可见的清单里消失。"""
+    store.set_enabled("markdown-tables", False)
+    skills = _loaded_skills()
+    text = _middleware()._format_skills_list(skills)
+    assert "markdown-tables" in text, "内置技能没有开关，必须始终出现在清单里"
+
+
 def test_all_disabled_says_so_instead_of_prompting_to_create():
     """全被关掉时别沿用基类那句「你可以创建 skill」——会诱导模型去新建。"""
     _write_skill("only-skill", "唯一技能")
