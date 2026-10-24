@@ -68,7 +68,12 @@ def _invalidate() -> None:
 
 
 def disabled_names() -> frozenset[str]:
-    """当前被停用的 skill 名。无行 = 启用（缺省即启用，少一份状态要迁移）。"""
+    """当前被停用的 skill 名。无行 = 启用（缺省即启用，少一份状态要迁移）。
+
+    内置技能（生效版本是内置版的）恒启用：设置页不给它开关，这里也必须兜底
+    ——否则 skill_state 里一笔历史停用记录会把它永久卡在关闭态，界面上再没有
+    开关能救回来。同名被用户版覆盖的不算 builtin，仍可停用。
+    """
     global _disabled_cache
     if _disabled_cache is None:
         conn = _connection()
@@ -76,13 +81,19 @@ def disabled_names() -> frozenset[str]:
             rows = conn.execute(
                 "SELECT name FROM skill_state WHERE enabled=0"
             ).fetchall()
-            _disabled_cache = frozenset(row["name"] for row in rows)
         finally:
             conn.close()
+        always_on = {n for n, entry in _merged().items() if entry["builtin"]}
+        _disabled_cache = frozenset(row["name"] for row in rows) - always_on
     return _disabled_cache
 
 
 def set_enabled(name: str, enabled: bool) -> None:
+    entry = _merged().get(name)
+    if entry is not None and entry["builtin"]:
+        # 内置技能不可停用：写进去也会被 disabled_names() 滤掉，直接按启用
+        # 走（顺手清行），别在表里留一笔永远不生效的记录
+        enabled = True
     conn = _connection()
     try:
         if enabled:

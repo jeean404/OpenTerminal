@@ -40,6 +40,26 @@ function skillToast(message, bad = false) {
   skillToast._timer = setTimeout(() => toast.classList.remove("show"), 2600);
 }
 
+// 内置技能恒启用（store.disabled_names() 兜底不许停用）：不画开关，换成一行
+// 说明，免得用户在卡片上找按钮。用户技能（含覆盖了内置版的）照旧可开关。
+function skillEnableControl(skill, detail = false) {
+  if (skill.builtin) {
+    return `<span class="skill-always">${_t("始终启用")}</span>`;
+  }
+  const attr = detail
+    ? ` id="skill-detail-toggle"`
+    : ` data-skill-action="toggle" data-name="${esc(skill.name)}"`;
+  const aria = detail
+    ? _t("{0}技能", skill.enabled ? _t("停用") : _t("启用"))
+    : _t("{0}技能：{1}", skill.enabled ? _t("停用") : _t("启用"), esc(skill.name));
+  return `
+        <label class="switch" title="${skill.enabled ? _t("点击停用") : _t("点击启用")}">
+          <input type="checkbox"${attr} ${skill.enabled ? "checked" : ""}
+                 aria-label="${aria}">
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>`;
+}
+
 function skillMetaLine(skill) {
   const tags = [];
   tags.push(skill.builtin ? _t("内置技能") : _t("我的技能"));
@@ -76,12 +96,7 @@ function renderSkillCards(skills) {
       <p class="skill-desc">${esc(skill.description)}</p>
       <footer class="skill-card-foot">
         <span class="skill-size">${_t("{0} 个文件 · {1}", skill.file_count, fmtSkillSize(skill.size))}</span>
-        <label class="switch" title="${skill.enabled ? _t("点击停用") : _t("点击启用")}">
-          <input type="checkbox" data-skill-action="toggle"
-                 data-name="${esc(skill.name)}" ${skill.enabled ? "checked" : ""}
-                 aria-label="${_t("{0}技能：{1}", skill.enabled ? _t("停用") : _t("启用"), esc(skill.name))}">
-          <span class="switch-track" aria-hidden="true"></span>
-        </label>
+${skillEnableControl(skill)}
       </footer>
     </article>`).join("");
 
@@ -215,11 +230,7 @@ function renderSkillDetail(skill) {
           <p class="skill-detail-sub">${esc(skillMetaLine(skill))}</p>
         </div>
       </div>
-      <label class="switch" title="${skill.enabled ? _t("点击停用") : _t("点击启用")}">
-        <input type="checkbox" id="skill-detail-toggle" ${skill.enabled ? "checked" : ""}
-               aria-label="${_t("{0}技能", skill.enabled ? _t("停用") : _t("启用"))}">
-        <span class="switch-track" aria-hidden="true"></span>
-      </label>
+${skillEnableControl(skill, true)}
     </div>
     <p class="skill-detail-desc">${esc(skill.description)}</p>
     <dl class="skill-detail-meta">
