@@ -48,6 +48,26 @@ def _strip_pad_echo(seg: str) -> str:
     return "".join(out)
 
 
+def _strip_pad_caret(seg: str) -> str:
+    """洗掉 pad 注入自身 0x19 的 tty 回显尾巴（live 流恒洗，比 _strip_pad_echo 窄）。
+
+    bash 下 bind -x 拦不住 0x19，字节落到 canonical 态的 tty 被 ECHOCTL 回显成
+    整行 ``^Y`` 外露（zsh 的 bindkey 会吃掉，故 zsh 录的旧动图没这道残迹）。实测
+    这一帧到得太晚：``_pad_inflight`` 已清、_strip_pad_echo 够不着（真机日志
+    ``(False, '^Y')``）。只吃两样：裸 0x19 字节，与**整行**是
+    ``^Y``（可带空白）的行——正文里行中出现的 ``^Y`` 不动（cat 出来的内容不该被改）。
+    """
+    if not seg:
+        return seg
+    out = []
+    for ln in seg.splitlines(keepends=True):
+        ln = ln.replace("\x19", "")
+        if ln.strip() == "^Y":
+            continue
+        out.append(ln)
+    return "".join(out)
+
+
 class ExecEvents:
     def __init__(self, core) -> None:
         self.core = core
@@ -204,9 +224,6 @@ class ExecEvents:
                     # mirror == ""（hook 不在位）：半行为空，不收纳（\x15 会误杀
                     # 历史召回等残影）
                     await self.core.session.send_raw(f"__ot_pad {n}\r".encode())
-                    if hook:
-                        # 接回存档半行：shell 侧 ^Y 原语（存档非空才接回）
-                        await self.core.session.send_raw(b"\x19")
                     first = False
                     # hook 不在位时不补 \x19（原生 yank 会把 kill ring 里刚提交
                     # 的自然语言行复活回提示符行，此后每块 pad 再 kill 再 yank，
@@ -216,6 +233,17 @@ class ExecEvents:
                                                self.core._pad_prompt_timeout)
                     except asyncio.TimeoutError:
                         pass
+                    if hook:
+                        # 接回存档半行：shell 侧 ^Y 原语（存档非空才接回）。
+                        # **必须等提示符回来再发**：__ot_pad 还在跑时 shell 不在
+                        # readline、tty 走 canonical+ECHOCTL，\x19 被回显成字面
+                        # ^Y 外露到终端（bash 的 bind -x 拦不住；zsh 的 bindkey
+                        # 会吃掉，故 zsh 录的旧动图没有这道残迹）。前后各留 80ms，
+                        # 给泵收尾——即便仍有残迹漏出，live 流的 _strip_pad_caret
+                        # 也会吃掉整行 ^Y。
+                        await asyncio.sleep(0.08)
+                        await self.core.session.send_raw(b"\x19")
+                        await asyncio.sleep(0.08)
                 if not hook and mirror:
                     # 复原收纳的半行：等价用户原样敲入（不发 \r，不触发执行）
                     await self.core.session.send_raw(mirror.encode())
@@ -326,6 +354,16 @@ class ExecEvents:
                 ev = (ev[0], seg)
                 if not seg:
                     return
+            else:
+                # 0x19 是我们自己注入的字节，不是用户内容：bash 的 bind -x
+                # 拦不住，落到 canonical 态的 tty 被 ECHOCTL 回显成整行 ^Y。
+                # 这一帧到得比 pad 窗口晚得多（真机日志 _pad_inflight 已清，
+                # 试过 1.5s 宽限也盖不住），按时间窗猜必漏，故 live 流恒洗
+                # （只吃整行 ^Y 与裸 0x19，行中的同字面不动）。
+                seg = _strip_pad_caret(ev[1])
+                if not seg:
+                    return
+                ev = (ev[0], seg)
             if self.core._probe_buf is not None:
                 # live 的 ev[1] 是 str（本分支末尾 emit 前也要 .encode），
                 # bytearray.extend(str) 抛 TypeError 当场打死泵任务；而任务
