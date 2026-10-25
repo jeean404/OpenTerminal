@@ -1,193 +1,55 @@
 # OpenTerminal
 
 [![CI](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ot-cli.svg)](https://pypi.org/project/ot-cli/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Downloads](https://img.shields.io/pypi/dm/ot-cli.svg)](https://pypi.org/project/ot-cli/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-
-[English](README.md) · [安装](#安装) · [快速开始](#快速开始) · [安全模型](#安全模型)
 
 **用大白话指挥你的终端——活它来干。**
 
-- **是什么** —— 面向习惯使用 shell 的用户的自然语言终端 Agent：说人话，它
-  自己琢磨出命令并执行。
-- **在哪用** —— 无需额外依赖。终端（`ot`）和浏览器（`ot web`）都支持，
-  底层是同一套核心。
-- **跨系统** —— macOS、Linux、Windows；本机 shell 和 SSH 远程主机都可以。
-- **能做什么** —— 在你的真实 shell 里执行命令，把结果汇总给你。只读命令
-  自己就跑；要改动你机器的先问你。
+[English](README.md) · [安装](#安装) · [安全模型](#安全模型)
 
 <div align="center">
   <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal 终端演示:先敲普通命令，再说人话——思考、分析、只读探查自己跑、删除卡在审批、最后落下总结表"><br><br>
   <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal 浏览器演示:同一条流程——自然语言任务、流式分析、破坏性命令进审批、执行、由真实输出汇成的总结表">
 </div>
 
-两张动图是同一条任务——第一张在纯终端(`ot`)里,第二张在浏览器
-(`ot web`)里。里面发生了什么:
+> ⚠️ **Beta**：OpenTerminal 在真实机器上执行真实命令——包括生产服务器。
+> 改动性命令都要经你审批（见[安全模型](#安全模型)），但点「执行」之前还是请
+> 看一眼它要干什么。安全类漏洞披露见 [SECURITY.md](SECURITY.md)。
 
-1. 先敲一条普通命令:`ls /tmp/ot-demo`——在你的真 shell 里原样执行,
-   带彩色输出;
-2. 再输入一句人话:**"看看 /tmp/ot-demo 下哪些目录最占空间,
-   清掉 build-cache，给我一张表"**;
-3. AI 流式亮出**思考**与**分析**——它打算干什么、为什么;
-4. 只读探查(`du -sh …`)**自己就跑了**——看一眼不花钱;
-5. 删目录这一步进**审批面板**,命令原文摊开,高危还多一道二次确认
-   ——你点头之前,磁盘上什么都不会变;
-6. 一张**总结**卡收尾:markdown 表格直接由真实输出汇总而成。
+## 介绍
 
-> **关于这两张动图**:录的是真界面,只是用脚本化 Agent 驱动,方便确定性
-> 重录([tools/demo-recorder](tools/demo-recorder))。里面的命令、策略判定、
-> 每一行输出都是真的。
+OpenTerminal 是一款面向习惯使用 shell 的用户的自然语言终端 Agent。你用大白话说出想要的结果，它自己琢磨出命令、在你的真实 shell 里执行，再把结果汇总给你。想直接敲命令也照常一行不差地执行，vim / top / tmux 这类全屏程序原生接管——它就是你的终端，不是一个套壳的命令执行器。
 
-> ⚠️ **Beta 阶段**:OpenTerminal 会在真实机器上执行真实命令——包括生产
-> 服务器。所有改动性命令都要经你审批(见[安全模型](#安全模型)),但点
-> 「执行」之前,还是请看一眼它要干什么。安全类漏洞披露见
-> [SECURITY.md](SECURITY.md)。
+无需额外依赖，终端（`ot`）和浏览器（`ot web`）都支持，底层是同一套核心；本机 shell 与 SSH 远程主机都可以，跨 macOS、Linux、Windows。
 
-## 目录
+上面两张动图是同一条任务的真界面录屏：普通命令 → 说人话 → 思考与分析 → 只读探查自己跑 → 删目录卡在审批 → 总结表。录制走的是脚本化 Agent，命令、策略判定和每一行输出都是真的，随时可重录（见 `tools/demo-recorder`）。
 
-- [一分钟跑起来](#一分钟跑起来)
-- [你为什么会喜欢它](#你为什么会喜欢它)
-- [功能特性](#功能特性)
-- [安装](#安装)
-- [快速开始](#快速开始)
-- [模型网关配置](#模型网关配置)
-- [日常使用](#日常使用)
-- [安全模型](#安全模型)
-- [架构](#架构)
-- [测试](#测试)
-- [贡献](#贡献)
+## 主要功能
 
-## 一分钟跑起来
+**自然语言任务。** 一句话就是一条任务：AI 流式给出思考与分析，执行完把结果汇总成 markdown 表格，表里的每一行都来自真实命令输出。命令和人话共用一个输入行——`!` 强制命令、`?` 强制任务，Ctrl+C 随时中断。斜杠命令有 `/help` `/target` `/system` `/clear` `/model` `/exit`。你在任务之间手动敲的命令也会以滚动摘要（命令 + 退出码 + 输出尾部）并进模型上下文，不占窗口。状态行显示本会话 token 用量，网关回传就用真值，否则退化为本地估算。
 
-```sh
-pipx install ot-cli        # 或: uv tool install ot-cli
-ot web                     # 浏览器终端 → http://127.0.0.1:8080
-```
+**Shell 与远程。** 会话持久，`cd`、环境变量、venv 跨任务保留；全屏程序经真 PTY 直通原生内联。发行版方言自动探测（apt / yum / dnf / apk / pacman / brew），可用 `/system` 手动覆盖。主机来自 `~/.ssh/config`、临时 `user@host:port` 或记住的连接；密码存系统凭据库，不落明文文件，嵌套 `ssh` / `sudo` / `su` 的密码提示会自动填。支持连接后命令集——跳板机接力、`su -` 换用户这类事登录即自动跑完，密码写一次 `> @名称=密码`，落库只留引用。
 
-再在「设置 → 模型」里接上模型网关,然后直接打字就行。
-想用自己的终端就跑 `ot`;不想装 Python 就用预编译二进制,见[安装](#安装)。
+**技能与工具。** 内置技能包随包分发（`SKILL.md` 挂在 `/skills/`），模型遇到对应任务才按需读取；Web 界面可逐个启停、上传 `.md` / `.zip`、从本机目录导入。MCP 服务器在「工具」入口粘贴 Claude Desktop / `.mcp.json` 配置即可批量导入（stdio、HTTP、SSE），可启停、可连接测试，与内置工具并列生效。
 
-## 你为什么会喜欢它
+**Web UI。** 服务器侧栏 + 多 tab 终端，每个 tab 可在 Agent 视图与纯 Shell 视图切换。文件面板支持分块断点续传。密码、主机密钥用浏览器弹窗输入；绑定非本机地址必须带 token。设置页覆盖终端字号与滚动缓冲、主题与背景、技能、工具、模型，界面语言中英原地切换、不刷新页面。
 
-- **说人话就行。** 自然语言进,正确的命令出,动手之前先把分析给你看。
-- **它懂各家系统。** Ubuntu→apt、CentOS 7→yum、Rocky/Fedora→dnf、
-  Alpine→apk、macOS→brew——同一句需求,每台机器都说对方的方言。
-- **它不瞎来。** 只读命令自动跑;改动系统的等你审批;灾难命令
-  (`rm -rf /`、fork 炸弹……)直接拒绝。失败了有界自纠(10 轮预算),
-  不会无限重试刷屏。
-- **你的 shell 还是你说了算。** 会话持久(`cd`、环境变量、venv 都在),
-  vim/top/tmux 这类全屏程序原生内联——管线就是真终端直通,无需任何登记。
-- **两种打开方式。** 单管线终端(`ot`),或者 `ot web`——浏览器里的服务器
-  侧栏 + 多 tab 终端,底层是同一套核心。
-
-## 功能特性
-
-**自然语言任务**
-
-- 每个任务都走 流式**思考 → 分析 → 审批 → 执行 → 总结**;总结里的
-  markdown 表格直接由真实命令输出汇总而成
-- 命令和人话共用一个输入行——`!` 强制命令、`?` 强制任务;
-  Ctrl+C 中断正在跑的任务
-- 斜杠命令:`/help` 查命令 · `/target` 切主机 · `/system` 手动方言 ·
-  `/clear` 新任务 · `/model` 查看模型 · `/exit` 退出
-- 有界自纠:同一失败最多重试一次,工具调用轮次有预算上限
-- 你在任务之间手动敲的命令也会作为上下文给到模型——送的是滚动摘要
-  （命令 + 退出码 + 输出尾部）并进上一条消息，不是原始输出，不占窗口
-- 状态行显示本会话 token 用量——网关回传就用真值,不回传退化为
-  tiktoken 本地估算
-
-**Shell 与系统**
-
-- 会话持久——`cd`、环境变量、venv 跨任务保留
-- 全屏程序(vim / top / tmux)经真 PTY 直通原生内联
-- 发行版方言自动探测:Ubuntu/Debian→apt、CentOS 7→yum、
-  Rocky/Fedora→dnf、Alpine→apk、Arch→pacman、macOS→brew,
-  可用 `/system` 手动覆盖
-- 本机 shell 支持 macOS 与 Linux(PTY)、Windows(ConPTY + PowerShell)
-
-**Agent 技能**
-
-- 内置技能包随包分发(如 `markdown-tables`);其 `SKILL.md` 挂在
-  `/skills/` 虚拟路径下,模型遇到对应任务才按需读取
-- 在 Web 界面的「技能」入口管理：卡片网格带悬浮效果，每个技能可单独
-  启停（停用后下一轮对话就不再加载，不用重启会话），点进详情页看渲染好
-  的 `SKILL.md`，顶部可返回卡片页
-- 添加方式：上传 `.md` / `.zip`、从本机目录导入、或用表单新建。内置技能
-  可停用不可删除；删掉同名用户技能会回退到内置版本
-
-**MCP 工具**
-
-- 在 Web 界面的「工具」入口接入 MCP 服务器——直接粘贴 Claude Desktop /
-  `.mcp.json` 的配置，一次可导入多个（支持 stdio、HTTP、SSE）。同名更新、
-  新名新增，任一条非法则整体不写，不会导入一半
-- 每台服务器可启停，「连接测试」会真的连上去列出它暴露的工具。MCP 工具
-  是加性的，与内置的文件/执行工具并存
-
-**SSH 与连接**
-
-- 主机来自 `~/.ssh/config`、临时 `user@host:port`,或记住的连接
-- 密码与密钥认证;密码存系统凭据库,不落明文文件
-- 主机密钥 TOFU 确认;每 target 的历史在重连时灌回 shell
-- **连接后命令集**——登录即自动逐条执行(跳板机接力、`su - deploy` 等)。
-  行内写 `> @名称=密码` 会在保存时抽进系统凭据库,落库只留
-  `> @名称` 引用;其余密码弹窗询问。进度按行显示,卡在等输入的行
-  Web 端可手动「继续」
-- 手输密码验证成功后会问一次要不要记住;之后嵌套 `ssh` / `sudo` / `su`
-  的密码提示自动从凭据库填
-
-**安全**——详见[安全模型](#安全模型)
-
-- 三级命令策略(auto / approve / deny)在 Agent 中间件层强制,
-  另支持精确匹配的自定义规则(`auto_extra` / `approve_extra` / `deny_extra`)
-- 每条输入、命令、审批、总结都落 JSONL 会话记录
-  (`~/.openterminal/sessions/`)
-
-**Web UI**(`ot web`)
-
-- 服务器侧栏 + 多 tab 终端;每个 tab 可在 Agent 视图与纯 Shell 视图切换,
-  tab 标签上各自显示连接状态
-- 文件面板支持分块上传；网络中断或刷新页面后，重新选择同一文件可从已上传位置继续；
-  上传进行中会阻止终端断线回收任务关闭文件连接
-- 密码、主机密钥用浏览器弹窗输入;可选局域网访问,绑定非本机地址
-  必须带 token
-- **设置**：通用（终端字号、滚动缓冲、光标、选中即复制）、外观（主题、
-  背景），以及技能 / 工具 / 模型三个入口。界面语言在中文与英文之间
-  **原地切换**，不刷新页面
-- 自定义背景存在本机 `~/.openterminal/wallpapers/`，铺放参数进 SQLite，
-  换浏览器不丢；媒体走支持 Range 的静态路由，视频背景拖进度条也流畅
-
-**无头 / 脚本**——AI 编程工具调用的 `ot exec` 执行面
-
-- `ot exec -t <目标> -c "<命令>" --output json`——一次调用跑一条
-  策略闸门把关的命令,输出与退出码机器可读
-  (`APPROVAL_REQUIRED` / `DENIED` / `HOST_KEY_UNKNOWN`),
-  可放心接入 cron、CI,或另一个 Agent
-- 退出码分层是故意的:远程命令退出码原样透传(0–63),工具自身错误用 64 以上的
-  保留码——调用方因此能分清「命令失败」与「调用失败」
-- 无头下审批永不卡住:`deny` 与 `APPROVAL_REQUIRED` 一律结构化拒绝,出路只有
-  人的动作(交互界面记住允许,或改 `config.toml`)
-- `ot list targets --output json`
-
-**模型网关**
-
-- 在 Web 界面的「模型」入口管理多组 Anthropic / OpenAI 兼容配置，设置
-  URL、模型和 API Key 后启用；新建终端会使用当前启用的配置
-- 配置元数据存入 `~/.openterminal/connections.db`，API Key 存入系统凭据库
-- Web 状态栏的模型下拉显示当前启用配置的模型
+**无头调用。** `ot exec -t <目标> -c "<命令>" --output json` 一次跑一条策略闸门把关的命令，输出机器可读，可接 cron、CI，或交给另一个 Agent。
 
 ## 安装
 
-三选一——预编译二进制(无需装 Python)、包管理器,或源码安装。
+三选一——预编译二进制（无需 Python）、包管理器、源码。
 
-### 预编译二进制(macOS 与 Windows)
-
-从 [Releases](https://github.com/jeean404/OpenTerminal/releases) 下载、解压,
-把 `ot` 可执行文件放进 `PATH`。`vX.Y.Z` 换成最新 tag:
+**预编译二进制**：从 [Releases](https://github.com/jeean404/OpenTerminal/releases) 下载解压，把 `ot` 放进 `PATH`。`vX.Y.Z` 换成最新 tag：
 
 | 平台 | 附件 |
 |---|---|
-| macOS(Apple Silicon) | `ot-vX.Y.Z-macos-arm64.tar.gz` |
-| macOS(Intel) | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
-| Windows(x64) | `ot-vX.Y.Z-windows-x64.zip` |
+| macOS（Apple Silicon） | `ot-vX.Y.Z-macos-arm64.tar.gz` |
+| macOS（Intel） | `ot-vX.Y.Z-macos-x86_64.tar.gz` |
+| Windows（x64） | `ot-vX.Y.Z-windows-x64.zip` |
 
 ```sh
 # macOS
@@ -195,23 +57,15 @@ tar -xzf ot-vX.Y.Z-macos-arm64.tar.gz
 sudo mv ot/ot /usr/local/bin/ot        # 或任意在 PATH 里的目录
 ```
 
-Windows 解压后把 `ot` 目录加进 `PATH`,运行 `ot.exe`。
+Windows 解压后把 `ot` 目录加进 `PATH`，运行 `ot.exe`。
 
-> **Intel Mac**:GitHub 已退役 Intel macOS runner,x86_64 二进制为每次发版
-> 手工构建挂载。若某个 release 缺这个附件,请走下面的 pipx 方式从 PyPI
-> 安装,两种架构都可用。
+> Intel Mac 的二进制是发版时手工构建挂载的（GitHub 已退役 Intel macOS runner）。某个 release 缺这个附件时走下面的 pipx 即可，两种架构都可用。
+>
+> macOS 首次启动可能被 Gatekeeper 拦（二进制为 ad-hoc 签名）：执行一次 `xattr -cr "$(command -v ot)"` 清除隔离属性，或右键 → 打开。首次运行会触发一次性系统安全扫描，之后启动不到 1 秒。
+>
+> Windows 可能弹 SmartScreen（二进制未签名）：**更多信息 → 仍要运行**。
 
-> **macOS Gatekeeper**——二进制为 ad-hoc 签名(未做 notarization),首次启动
-> 可能被拦(*“无法打开 ot”*)。执行一次 `xattr -cr "$(command -v ot)"` 清除隔离
-> 属性,或右键 → 打开。首次运行会触发一次性系统安全扫描,之后启动不到 1 秒
-> (AI 栈在首个 AI 任务时才惰性加载,那次会多等几秒)。
-
-> **Windows SmartScreen**——可能出现 *“Windows 已保护你的电脑”*(二进制未签名)。
-> 点 **更多信息 → 仍要运行**。
-
-### pipx / uv(从 PyPI)
-
-PyPI 包名为 `ot-cli`(安装后提供 `ot` 命令;Python 模块名仍是 `openterminal`):
+**pipx / uv**（PyPI 包名 `ot-cli`，装完提供 `ot` 命令，模块名仍是 `openterminal`）：
 
 ```sh
 pipx install ot-cli
@@ -219,11 +73,9 @@ pipx install ot-cli
 uv tool install ot-cli
 ```
 
-> 旧名 `open-terminal-agent`(仅 0.1.0)已弃用,新版本一律以 `ot-cli` 发布。
+需要 Python 3.11+。旧名 `open-terminal-agent`（仅 0.1.0）已弃用，新版本一律以 `ot-cli` 发布。
 
-需要 Python 3.11+。
-
-### 源码安装(开发用)
+**源码**：
 
 ```sh
 conda create -n openterminal python=3.12 -y   # 或任意 virtualenv
@@ -231,39 +83,11 @@ conda activate openterminal
 pip install -e .
 ```
 
-模型网关可在 `ot web` 启动后通过「设置 → 模型」配置，无需编辑配置文件；
-「设置 → 外观」可切换三种配色主题和十款内置纹理背景，也可上传本地图片
-（PNG / JPEG / WebP，≤ 12 MB）或短视频（MP4 / WebM，≤ 64 MB），调整平铺/
-铺满/适应方式、位置、透明度和亮度。视频会静音循环播放作背景，使用无缝循环的
-短片段效果最好。所有背景仅保存于当前浏览器，不上传到服务端；外观会应用到整个
-Web 页面，离线可用。
-CLI 仍可使用环境变量或 `config.toml` 中的模型设置。
+## 配置方式
 
-## 快速开始
+模型网关在 **设置 → 模型** 里配：填协议、URL、模型和 API Key，启用后新建的终端才使用它，已打开的不受切换影响。配置元数据存 `~/.openterminal/connections.db`，API Key 存操作系统凭据库，不写进项目配置文件。CLI 仍兼容环境变量和 `config.toml` 的 `[model]`。
 
-```sh
-ot          # 终端——本机 shell + 主菜单(连接 / 管理主机)
-ot web      # 浏览器终端——服务器侧栏 + 多 tab(默认 http://127.0.0.1:8080)
-```
-
-更多连接方式:
-
-```sh
-ot connect prod-web      # ~/.ssh/config 里的主机
-ot ssh deploy@host:2222  # 直接指定 user@host:port
-```
-
-## 模型网关配置
-
-Web 界面左侧「设置」中的「模型」页可管理多组 Anthropic / OpenAI 兼容配置。
-点击「添加配置」后，在弹窗中填写配置名称、协议、URL、模型和 API Key 并保存；
-再点击「启用」让之后新建的终端使用该配置，已打开的终端不受切换影响。主题
-主题与背景选择保存在当前浏览器中。模型配置元数据保存在
-`~/.openterminal/connections.db`，API Key 保存在操作系统凭据库中，不写入
-项目配置文件或 SQLite。
-
-CLI 仍兼容原有环境变量和 `config.toml` `[model]` 配置。其他 Web 设置
-（shell、策略、目标主机等）仍可在 `config.toml` 中配置：
+其余设置写 `~/.openterminal/config.toml`：
 
 ```toml
 [shell]
@@ -272,7 +96,7 @@ max_output_bytes = 102400    # 单条命令输出截断
 max_tool_turns = 10          # Agent 工具调用轮次预算
 
 [policy]
-mode = "tiered"              # tiered(分级)| approve-all | deny-all
+mode = "tiered"              # tiered(分级) | approve-all | deny-all
 # auto_extra / approve_extra / deny_extra 可追加精确匹配的自定义规则
 
 [target.prod-web]
@@ -280,7 +104,7 @@ mode = "ssh"
 host = "prod-web.example.com"
 user = "deploy"
 # 连接后命令集——登录成功后逐行执行。
-# "> @名称=密码" 那一行会把密码抽进系统凭据库,落库只留 "> @名称";
+# "> @名称=密码" 那一行会把密码抽进系统凭据库，落库只留 "> @名称";
 # 密码框应答时按这个引用去取。
 commands = [
   "su - deploy",
@@ -288,79 +112,29 @@ commands = [
 ]
 ```
 
-配置目录可用环境变量 `OPENTERMINAL_HOME` 覆盖(测试即用它做隔离)。
-会话记录写入 `~/.openterminal/sessions/`,主机画像缓存在
-`~/.openterminal/hosts.toml`。
+配置目录可用环境变量 `OPENTERMINAL_HOME` 覆盖（测试即用它做隔离）。会话记录写入 `~/.openterminal/sessions/`，主机画像缓存在 `~/.openterminal/hosts.toml`。
 
-## 日常使用
+## 支持平台
 
-**终端里**——直接打字。说人话就是任务,敲命令就在你的真 shell 里跑。
-`!` 强制命令、`?` 强制任务;`/help` 列出全部斜杠命令:`/target` 切主机、
-`/system` 手动方言、`/clear` 新任务、`/model` 查看模型、`/exit` 退出;
-Ctrl+C 中断当前任务,回到提示符。
+| 项 | 支持 |
+|---|---|
+| 操作系统 | macOS、Linux、Windows |
+| 本机 shell | macOS / Linux 走 PTY；Windows 走 ConPTY + PowerShell |
+| 兼容 shell | zsh 与 bash ≥ 4 全功能；bash 3.2（macOS 自带）拿不到 `READLINE_LINE`，自然语言触发链不可用 |
+| Python | 3.11+（pipx / 源码安装时需要；预编译二进制不需要） |
+| 模型网关 | Anthropic 兼容与 OpenAI 兼容，可配多组 |
 
-**连接后命令集**在目标连上的那一刻自己跑完——跳板机接力、`su -` 换用户
-这类事最顺手。密码别写进文件:写一次 `> @名称=密码`,落库只剩
-`> @名称`,提示符要密码时按引用去凭据库取。哪一行停下来等输入,Web 状态栏
-有「继续」,不会把你晾在那(终端 CLI 暂无续跑入口)。
-
-**浏览器里**(`ot web`)——侧栏选服务器(local / 直连 SSH),
-tab 想开几个开几个,Agent 视图和纯 Shell 视图随意切换。密码、主机密钥
-用浏览器弹窗输入;记住的密码走系统凭据库,下次连接直接免密。
-
-**局域网访问**:`ot web --host 0.0.0.0 --token <TOKEN>`——绑定非本机地址
-必须带 token。配置:`config.toml` 的 `[web] host/port/token`。
-
-**进脚本**:`ot exec` 对指定目标跑一条命令,同样过策略闸门,并说 JSON——
-只读命令直接执行;需审批的命令不执行,以退出码 `APPROVAL_REQUIRED`(67)
-返回;被策略拒绝的以 `DENIED`(66)返回,自动化可以按码处置而不是瞎猜:
-
-```sh
-ot exec -t prod-web -c "df -h /" --output json
-```
-
-## 安全模型
-
-一句话:**只看随便看;要动手得经你同意;闯祸的事直接不做。** 上面那段动图走的正是这条线:`du` 探查自己跑,`rm -rf` 卡在闸门上等你。
-
-三级命令策略(`src/openterminal/policy.py`):
-
-- **auto**:纯查看类自动执行——`ls`/`cat`/`df`/`ps`、`git status/log`、
-  不带 `-exec/-delete` 的 `find` 等;
-- **approve**:改动系统的都要审批——删文件、写文件、装软件、
-  `systemctl`、`sudo`、网络配置,以及静态规则拿不准的命令。弹审批面板,
-  `y` 执行 / `e` 编辑 / `n` 拒绝 / `a` 本会话始终允许(Web 界面是按钮,
-  高危命令还有二次确认);
-- **deny**:灾难命令直接拒绝,拒绝原因回灌给模型让它改道——
-  `rm -rf /`、mkfs、`dd` 写块设备、fork 炸弹、关机重启、重定向到 /dev 盘等。
-
-被拒和失败的命令不会被原样重试:系统提示词规定同一失败最多重试一次、
-被拒命令不得换皮重试,工具调用轮次也有预算上限。
-
-## 架构
+## 系统架构
 
 <div align="center">
   <img src="docs/images/architecture.svg" width="860" alt="OpenTerminal 架构图">
 </div>
 
-详细文档:[架构文档](docs/architecture.md) · [设计说明](docs/design.md) ·
-[流程图](docs/flows.md)
+三层结构：自然语言前端（终端或 Web）、deepagents（LangGraph）Agent、持久 shell 会话。自然语言直接交给 Agent 多轮调用工具，命令执行是 Agent 的子能力，经同一个会话；三级策略在 Agent 中间件层强制，提示词内容绕不过审批闸门。内置技能以文件形式挂在 `/skills/`，模型读技能和读普通参考文件走同一条路；MCP 工具经 `langchain-mcp-adapters` 接进来，与内置工具并列。
 
-三层结构:自然语言前端(终端或 Web)、deepagents(LangGraph)Agent、
-持久 shell 会话。自然语言直接交给 Agent 多轮调用工具,命令执行是 Agent
-的子能力(经同一会话);三级策略在 Agent 中间件层强制,提示词内容绕不过
-审批闸门。内置技能以文件形式挂在 `/skills/` 下,模型读技能和读普通参考
-文件走同一条路。MCP 工具经 `langchain-mcp-adapters` 接进来,与内置工具并列;
-技能停用是在下一轮对话的提示词里过滤掉,不是卸载挂载点。
+显示走单管线：PTY 字节流原样直达终端，shell 集成 hook 用带内 OSC 标记记账（历史、退出码、AI 上下文），Agent 工具命令经 `__ot_exec__` 注入同一个 PTY，输出天然归位。单会话内命令严格串行——一个 PTY 就是一条交互 shell，Agent 并发发起的 execute 会排队。哨兵切分只保留给无头 `ot exec` 与能力探测等非显示路径。
 
-显示走**单管线**:PTY 字节流原样直达终端,shell 集成 hook 用带内 OSC 标记
-记账(历史/退出码/AI 上下文),AI 工具命令经 `__ot_exec__` 注入同一个 PTY,
-输出天然归位;单会话内命令严格串行——一个 PTY 就是一条交互 shell,Agent
-并发发起的 execute 会排队。哨兵切分(`session/base.py`)只保留给无头
-`ot exec` 与能力探测等非显示路径。
-
-项目**没有模型级长期记忆**——Agent 的 checkpointer 在内存里,重启即清空。
-持久化的是"事实型"数据:
+项目没有模型级长期记忆——Agent 的 checkpointer 在内存里，重启即清空。持久化的是「事实型」数据：
 
 | 存储 | 位置 | 内容 |
 |---|---|---|
@@ -368,49 +142,46 @@ ot exec -t prod-web -c "df -h /" --output json
 | 数据库 | `~/.openterminal/connections.db` | 记住的连接及命令集、模型配置、技能启停、MCP 服务器、背景参数 |
 | 技能 | `~/.openterminal/skills/` | 用户技能包（每目录一个 `SKILL.md`），同名覆盖内置 |
 | 背景 | `~/.openterminal/wallpapers/` | 自定义背景媒体；浏览器端不留存 |
-| 命令历史 | `~/.openterminal/history.db` | 每 target 的历史,重连灌回 shell |
-| 密码 | 系统凭据库(keyring) | 连接密码、命令集内联密码——不落明文文件 |
+| 命令历史 | `~/.openterminal/history.db` | 每 target 的历史，重连灌回 shell |
+| 密码 | 系统凭据库（keyring） | 连接密码、命令集内联密码——不落明文文件 |
 | 主机画像缓存 | `~/.openterminal/hosts.toml` | 免重复探测 |
-| 会话记录 | `~/.openterminal/sessions/<日期>/` | 输入/命令/审批/总结的 JSONL |
+| 会话记录 | `~/.openterminal/sessions/<日期>/` | 输入 / 命令 / 审批 / 总结的 JSONL |
 | 主机密钥 | `~/.ssh/known_hosts` | TOFU 确认后写入 |
 
-## 测试
+## 支持模式
 
-```sh
-pytest -q                      # Python 测试套件(平台门控自动跳过)
-node --test tests/js/*.test.cjs                        # 静态前端
-cd src/openterminal/web/frontend/ui && npm ci && npm test  # React island
-```
+**终端模式（`ot`）。** 直接在你的终端里跑，本机 shell 加一个主菜单（连接、管理主机）。说人话就是任务，敲命令就在真 shell 里执行，`!` 与 `?` 可以强制指定。Ctrl+C 中断任务回到提示符，`/exit` 退出。这是单管线实现：命令输出、AI 卡片、命令历史都在同一个字符流里。
 
-真实 sshd 门控测试需要显式开启:
+**浏览器模式（`ot web`）。** 起一个 Web 服务，默认 <http://127.0.0.1:8080>。左侧服务器侧栏选目标，tab 想开几个开几个；每个 tab 可在 Agent 视图（AI 卡片 + 审批）与纯 Shell 视图之间切换，tab 标签上各自显示连接状态。密码与主机密钥走浏览器弹窗，记住的密码下次连接免密。局域网访问用 `ot web --host 0.0.0.0 --token <TOKEN>`，绑定非本机地址必须带 token。
 
-```sh
-OT_TEST_SSH=1 OT_TEST_SSH_HOST=127.0.0.1 OT_TEST_SSH_PORT=2222 pytest -m ssh
-```
+**无头模式（`ot exec` / `ot list`）。** 给脚本和别的 AI 编程工具（Claude Code、Codex、opencode 等）当子进程调用，不进 REPL。一次一条命令、过同一套策略闸门、输出结构化 JSON。退出码分层：远程命令退出码原样透传（0–63），工具自身错误用 64 以上的保留码，调用方因此能分清「命令失败」与「调用失败」。无头下审批永不卡住，一律结构化拒绝，出路只有人的动作。
 
-浏览器级验证会起真 Chrome 打真服务端，每条自成一体、跑完自动清理、
-逐项打印 PASS/FAIL:
+## 安全模型
 
-```sh
-node tools/verify-web/verify-settings-modules.cjs   # 设置页：通用 / 技能 / 工具
-node tools/verify-web/verify-manual-history.cjs     # 手动命令进消息历史，系统提示词不动
-node tools/verify-web/verify-wallpaper-storage.cjs  # 背景换浏览器不丢
-```
+一句话：**只看随便看；要动手得经你同意；闯祸的事直接不做。**
 
-README 里的两张动图也可精确重录,命令见
-[tools/demo-recorder](tools/demo-recorder)。
+三级命令策略（`src/openterminal/policy.py`）：
 
-## 贡献
+- **auto**：纯查看类自动执行——`ls`/`cat`/`df`/`ps`、`git status/log`、不带 `-exec/-delete` 的 `find` 等。
+- **approve**：改动系统的都要审批——删文件、写文件、装软件、`systemctl`、`sudo`、网络配置，以及静态规则拿不准的命令。弹审批面板，`y` 执行 / `e` 编辑 / `n` 拒绝 / `a` 本会话始终允许（Web 界面是按钮，高危命令另有二次确认）。
+- **deny**：灾难命令直接拒绝，拒绝原因回灌给模型让它改道——`rm -rf /`、mkfs、`dd` 写块设备、fork 炸弹、关机重启、重定向到 /dev 盘等。
 
-见 [CONTRIBUTING.md](CONTRIBUTING.md)。欢迎提 Issue 和 Pull Request。
+这道闸门在 **Agent 中间件层**强制，不在提示词里——提示词写得再好也只是「请」，中间件才是「不许」，再会说的 prompt 也绕不过去。被拒和失败的命令不会被原样重试：同一失败最多重试一次，被拒命令不得换皮重试，工具调用轮次也有预算上限。每条输入、命令、审批、总结都落 JSONL 会话记录（`~/.openterminal/sessions/`）。
 
-## 致谢
+## 主要特征
 
-- [deepagents](https://github.com/langchain-ai/deepagents) & LangGraph — Agent 运行时
-- [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) — MCP 客户端
-- [xterm.js](https://xtermjs.org/) — 浏览器终端(内置于 `web/frontend/vendor/`)
-- [asyncssh](https://github.com/ronf/asyncssh) — SSH 客户端
+**它是真 shell，不是命令执行器。** `cd`、环境变量、venv 跨任务保留，vim / top / tmux 原生接管。要做到这一点只能走真 PTY 直通，壳里加一层 hook 用带内标记记账——代价是 bash 3.2 这类老壳支持不全，见[支持平台](#支持平台)。
 
-## 许可证
+**闸门在中间件层。** 审批不依赖模型自觉，也不依赖提示词约束，而是 Agent 工具调用路径上的强制检查。这是它跟「直接放行」那类工具最本质的差别。
+
+**失败有预算，不无限重试。** 同一失败最多重试一次，被拒命令不允许换皮重来，工具调用轮次有上限。刷屏式自纠是很多 Agent 让人失去信任的原因。
+
+**一方一言。** 同一句需求，Ubuntu 出 apt、CentOS 7 出 yum、Rocky 出 dnf、Alpine 出 apk、macOS 出 brew；探错了还能用 `/system` 手动改。
+
+**一切留痕。** 输入、命令、审批决策、总结全落 JSONL，出问题能回看当时到底发生了什么。
+
+**没有长期记忆，只有事实状态。** 会话记忆随重启清空，留下的是配置、连接、历史、密钥这类事实数据——不会悄悄记住你不想让它记住的东西。
+
+## License
 
 [Apache License 2.0](LICENSE)

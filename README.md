@@ -8,210 +8,43 @@
 
 **Tell your terminal what you want in plain language — it does the work.**
 
-[中文文档](README.zh-CN.md) · [Install](#installation) · [Quick start](#quick-start) · [Security model](#security-model)
-
-- **What it is** — a natural-language terminal agent for people who live in a
-  shell: say what you want, it works out the commands and runs them.
-- **Where it runs** — no extra dependencies. Your terminal (`ot`) and your
-  browser (`ot web`), sharing the same core.
-- **Platforms** — macOS, Linux and Windows; local sessions and SSH hosts alike.
-- **What it does** — runs commands in your real shell and hands you a summary.
-  Read-only runs on its own; anything that changes your machine asks first.
+[中文文档](README.zh-CN.md) · [Install](#install) · [Security model](#security-model)
 
 <div align="center">
-  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal in the terminal: plain command, then a plain-language task — thinking, analysis, the read-only probe runs on its own, the delete waits for approval, and a summary table lands at the end"><br><br>
-  <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal in the browser: the same flow — plain-language task, streaming analysis, an approval panel on the destructive command, execution, and a summary table built from the real output">
+  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal in the terminal: a plain command first, then plain language — thinking, analysis, the read-only probe runs on its own, the delete waits for approval, and a summary table lands at the end"><br><br>
+  <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal in the browser: the same flow — natural-language task, streaming analysis, the destructive command goes to approval, execution, and a summary table built from the real output">
 </div>
-
-Both GIFs show the same task — the first in the plain terminal (`ot`), the
-second in the browser (`ot web`). Here's what happens:
-
-1. A plain command first — `ls /tmp/ot-demo` runs in your real shell,
-   colored output and all;
-2. then a plain-language task: *"看看 /tmp/ot-demo 下哪些目录最占空间，
-   清掉 build-cache，给我一张表"*;
-3. the AI streams its **thinking** and **analysis** — what it's about to
-   do and why;
-4. the read-only probe (`du -sh …`) **runs by itself** — looking is free;
-5. the delete gets an **approval panel** with the exact command, plus a
-   second confirm because it's flagged high-risk — nothing changes
-   without your OK;
-6. a **summary** card wraps up, its markdown table built from the real
-   output.
-
-> **About the GIFs**: they are recordings of the real interface, driven by a
-> scripted agent so they can be reproduced exactly ([tools/demo-recorder](tools/demo-recorder)).
-> The commands, the policy decisions, and every line of output are real.
 
 > ⚠️ **Beta**: OpenTerminal runs real commands on real machines — including
 > production servers. Every state-changing command needs your approval (see
 > [Security model](#security-model)), but please still read what you're approving.
 > Security-sensitive disclosures: [SECURITY.md](SECURITY.md).
 
-## Table of contents
+## Introduction
 
-- [Up and running in a minute](#up-and-running-in-a-minute)
-- [Why you might like it](#why-you-might-like-it)
-- [Features](#features)
-- [Installation](#installation)
-- [Quick start](#quick-start)
-- [Model gateway configuration](#model-gateway-configuration)
-- [Day-to-day use](#day-to-day-use)
-- [Security model](#security-model)
-- [Architecture](#architecture)
-- [Testing](#testing)
-- [Contributing](#contributing)
+OpenTerminal is a natural-language terminal agent for people who live in a shell. Describe the outcome you want and it works out the commands, runs them in your real shell, and hands you a summary. Plain commands keep working exactly as you'd expect, and full-screen programs like vim/top/tmux take over the terminal natively — it *is* your terminal, not a command runner with a REPL on top.
 
-## Up and running in a minute
+It needs no extra dependencies: it runs in your terminal (`ot`) and in the browser (`ot web`) off the same core. Local shells and SSH hosts alike, across macOS, Linux and Windows.
 
-```sh
-pipx install ot-cli        # or: uv tool install ot-cli
-ot web                     # browser terminal → http://127.0.0.1:8080
-```
+The two GIFs above are recordings of the same task on the real interface — the first in the terminal, the second in the browser: a plain command, then plain language, then thinking and analysis, then the read-only probe running by itself, then the delete waiting at the approval gate, then the summary table. They're driven by a scripted agent, so they can be reproduced exactly — but the commands, the policy decisions and every line of output are real.
 
-Then point it at a model gateway (**Settings → Models**) and just type.
-Prefer your own terminal? Run `ot` instead. Prefer a pre-built binary with no
-Python? See [Installation](#installation).
+## What it does
 
-## Why you might like it
+**Natural-language tasks.** One sentence is one task: the AI streams its thinking and analysis, runs the commands, then summarises the result as a markdown table whose rows come from the actual output. Plain commands and plain sentences share one input line — `!` forces a command, `?` forces a task, Ctrl+C interrupts at any time. Slash commands are `/help` `/target` `/system` `/clear` `/model` `/exit`. Commands you type between tasks reach the model as a rolling summary (command, exit code, output tail) merged into the context, so they don't bloat the window. The status line shows session token usage — exact when the gateway reports it, a local estimate otherwise.
 
-- **Say it, don't grep it.** Natural language in, correct commands out — with
-  the analysis shown before anything runs.
-- **It knows your systems.** Ubuntu→apt, CentOS 7→yum, Rocky/Fedora→dnf,
-  Alpine→apk, macOS→brew. Same request, right dialect for each machine.
-- **It doesn't get sloppy.** Read-only commands run by themselves; anything
-  destructive waits for your approval; catastrophic commands (`rm -rf /`,
-  fork bombs, …) are refused outright. Failed attempts get a bounded
-  self-correction budget (10 turns), not infinite retry loops.
-- **Your shell stays yours.** Persistent session (`cd`, exports, venv all
-  survive), and full-screen programs like vim/top/tmux take over the
-  terminal natively — the pipeline is a true PTY passthrough, so
-  they just work inline.
-- **Two ways in.** A single-pipeline terminal (`ot`), or `ot web` — a
-  browser UI with a server sidebar and multi-tab terminals, sharing the
-  same core.
+**Shell and remote.** Sessions are persistent: `cd`, exports and venvs survive across tasks, and full-screen programs run inline through true PTY passthrough. Package dialects are auto-detected (apt / yum / dnf / apk / pacman / brew) with a `/system` override. Hosts come from `~/.ssh/config`, an ad-hoc `user@host:port`, or remembered connections; passwords live in the OS credential store, never in plaintext files, and nested `ssh` / `sudo` / `su` prompts fill themselves in. Post-connect command sets handle jump-host hops and `su -` switches the moment a target is up — write `> @name=secret` once and only the reference is stored.
 
-## Features
+**Skills and tools.** Skill packs ship inside the package (`SKILL.md` mounted under `/skills/`) and the model pulls one in only when the task calls for it. From the web UI you can toggle them individually, upload a `.md` / `.zip`, or import a local folder. MCP servers go in through the Tools entry — paste a Claude Desktop / `.mcp.json` config and import several at once (stdio, HTTP, SSE); each can be toggled and test-connected, and they join the built-in tools.
 
-**Natural-language tasks**
+**Web UI.** A server sidebar with multi-tab terminals; each tab switches between an Agent view (cards and approvals) and a plain Shell view, and shows its own connection status. The file panel supports chunked uploads that resume after a network interruption. Passwords and host keys are entered in browser dialogs, and binding to a non-loopback address requires a token. Settings cover terminal font size and scrollback, themes and wallpapers, skills, tools and models; the interface language switches between 中文 and English in place.
 
-- Streaming **thinking → analysis → approval → execution → summary** for
-  every task; summaries are markdown built from the real command output
-- Plain commands and plain sentences share one input line — `!` forces a
-  command, `?` forces a task; Ctrl+C interrupts a running task
-- Slash commands: `/help` list them · `/target` switch host · `/system`
-  override dialect · `/clear` new task · `/model` show model · `/exit` quit
-- Bounded self-correction: a failed command is retried at most once,
-  tool-call turns are budget-capped
-- Commands you type by hand between tasks reach the model as context — a
-  rolling summary (command, exit code, output tail) merged into the last
-  message, not the raw output, so it doesn't bloat the window
-- Session token usage on the status line — exact when the gateway reports
-  it, a local tiktoken estimate otherwise
+**Headless.** `ot exec -t <target> -c "<cmd>" --output json` runs one policy-gated command per call with machine-readable output — safe to wire into cron, CI, or another agent.
 
-**Shells & systems**
+## Install
 
-- Persistent sessions — `cd`, exports, and venvs survive across tasks
-- Full-screen programs (vim / top / tmux) run inline via true PTY
-  passthrough
-- Dialects auto-detected: Ubuntu/Debian→apt, CentOS 7→yum, Rocky/Fedora→dnf,
-  Alpine→apk, Arch→pacman, macOS→brew — with `/system` manual override
-- Local shells on macOS & Linux (PTY) and Windows (ConPTY + PowerShell)
+Three options: a pre-built binary (no Python needed), a package manager, or source.
 
-**Agent skills**
-
-- Skill packs ship inside the package (e.g. `markdown-tables`); their
-  `SKILL.md` files are mounted at `/skills/` and the model pulls one in
-  only when the task calls for it
-- Manage them from the web UI's **Skills** entry: a card grid with hover,
-  per-skill on/off (off drops it from the model's next turn — no session
-  restart), and a detail page with the rendered `SKILL.md`
-- Add skills by uploading a `.md` or `.zip`, importing a local folder, or
-  writing one from a form. Built-ins can be disabled but not deleted;
-  deleting a same-named user skill falls back to the built-in.
-
-**MCP tools**
-
-- Connect MCP servers from the web UI's **Tools** entry — paste a Claude
-  Desktop / `.mcp.json` config and import several at once (stdio, HTTP and
-  SSE). Same-named entries are updated, new names are added, and one bad
-  entry rejects the whole import rather than landing half of it.
-- Toggle each server; a live test-connection lists the tools it exposes.
-  MCP tools are additive and join the built-in file/shell tools.
-
-**SSH & connections**
-
-- Hosts from `~/.ssh/config`, ad-hoc `user@host:port`, or remembered
-  connections
-- Password and key auth; passwords live in the OS keyring, never in
-  plaintext files
-- Host-key TOFU confirmation; per-target history is replayed into the
-  shell on reconnect
-- **Post-connect command sets** — per-target lists that run on login
-  (jump-host hops, `su - deploy`, …). An inline `> @name=secret` line is
-  stripped into the keyring on save and answered by reference; anything
-  else is asked in a dialog. Progress is shown per line, and on the web a
-  line stuck waiting for input can be resumed by hand.
-- A password you type by hand is offered for remembering once it verifies;
-  nested `ssh` / `sudo` / `su` prompts then fill themselves in from the
-  keyring
-
-**Safety** — details in [Security model](#security-model)
-
-- Three-tier command policy (auto / approve / deny) enforced as agent
-  middleware, plus custom exact-match rules (`auto_extra` / `approve_extra`
-  / `deny_extra`)
-- Every input, command, approval, and summary lands in a JSONL transcript
-  under `~/.openterminal/sessions/`
-
-**Web UI** (`ot web`)
-
-- Server sidebar + multi-tab terminals; Agent view and plain Shell view
-  per tab, each tab showing its own connection status
-- The file panel supports chunked uploads; after a network interruption or
-  page refresh, select the same file again to resume from the uploaded offset.
-  Active uploads also keep the file connection alive while a disconnected
-  terminal tab is waiting for cleanup.
-- Browser-dialog password and host-key entry; optional LAN access with a
-  mandatory token for non-loopback binds
-- **Preferences** — General (terminal font size, scrollback, cursor, copy
-  on select), Appearance (theme, wallpapers), plus the Skills / Tools /
-  Model entries. Interface language switches between 中文 and English in
-  place, without a page reload.
-- Custom wallpapers live on the machine (`~/.openterminal/wallpapers`) with
-  their options in SQLite, so they survive switching browsers. Media is
-  served with Range support, so video wallpapers scrub smoothly.
-
-**Headless / scripting** — the `ot exec` surface AI coding agents call
-
-- `ot exec -t <target> -c "<cmd>" --output json` — one policy-gated
-  command per invocation, with machine-readable output and exit codes
-  (`APPROVAL_REQUIRED` / `DENIED` / `HOST_KEY_UNKNOWN`), safe to wire
-  into cron, CI, or another agent
-- Exit codes are layered on purpose: the remote command's code passes
-  through as-is (0–63), tool errors use reserved codes 64+, so a caller
-  can tell "the command failed" from "the call failed"
-- Approvals never block headlessly — `deny` and `APPROVAL_REQUIRED` come
-  back as structured refusals, and the only way through is a human action
-  (allow it in the interactive UI, or edit `config.toml`)
-- `ot list targets --output json`
-
-**Model gateways**
-
-- Manage multiple Anthropic-compatible or OpenAI-compatible profiles from the
-  Web UI's **Model** entry. Profile metadata is stored in SQLite; API keys
-  are kept in the OS credential store.
-
-## Installation
-
-Pick whichever suits you — a pre-built binary (no Python needed), a package
-manager, or from source.
-
-### Pre-built binaries (macOS & Windows)
-
-Download from [Releases](https://github.com/jeean404/OpenTerminal/releases),
-unpack, and put the `ot` executable on your `PATH`. Replace `vX.Y.Z` with the
-latest tag:
+**Pre-built binaries** — download from [Releases](https://github.com/jeean404/OpenTerminal/releases), unpack, and put `ot` on your `PATH`. Replace `vX.Y.Z` with the latest tag:
 
 | Platform | Asset |
 |---|---|
@@ -227,25 +60,13 @@ sudo mv ot/ot /usr/local/bin/ot        # or any directory on your PATH
 
 On Windows, unzip and add the `ot` folder to your `PATH`, then run `ot.exe`.
 
-> **Intel Macs**: GitHub retired its Intel macOS runners, so the x86_64 binary
-> is built and attached manually per release. If a release is missing it,
-> install from PyPI with `pipx install ot-cli` (see below), which works
-> on both architectures.
+> The Intel Mac binary is built and attached manually per release (GitHub retired its Intel macOS runners). If a release is missing it, install from PyPI instead — that works on both architectures.
+>
+> macOS may block the first launch (the binary is ad-hoc signed): clear the quarantine flag once with `xattr -cr "$(command -v ot)"`, or right-click → Open. The first run also triggers a one-time OS security scan; later runs start in under a second.
+>
+> Windows may show SmartScreen (the binary is unsigned): **More info → Run anyway**.
 
-> **macOS Gatekeeper** — the binaries are ad-hoc signed (not notarized), so
-> the first launch may be blocked with *“ot cannot be opened.”* Clear the
-> quarantine flag once with `xattr -cr "$(command -v ot)"`, or right-click →
-> Open. The first run also triggers a one-time OS security scan; later runs
-> start in under a second (the AI stack is loaded lazily on the first AI
-> task, which takes a few extra seconds once).
-
-> **Windows SmartScreen** — you may see *“Windows protected your PC”* (the
-> binary is unsigned). Click **More info → Run anyway**.
-
-### pipx / uv (from PyPI)
-
-The Python package is `ot-cli` (it installs the `ot` command; the importable
-module remains `openterminal`):
+**pipx / uv** — the PyPI package is `ot-cli` (it installs the `ot` command; the importable module remains `openterminal`):
 
 ```sh
 pipx install ot-cli
@@ -253,12 +74,9 @@ pipx install ot-cli
 uv tool install ot-cli
 ```
 
-> Previously published as `open-terminal-agent` (0.1.0 only) — that name was
-> retired in favor of `ot-cli`. Use `pipx install ot-cli` for current releases.
+Requires Python 3.11+. The old name `open-terminal-agent` (0.1.0 only) was retired in favour of `ot-cli`.
 
-Requires Python 3.11+.
-
-### From source (development)
+**Source**:
 
 ```sh
 conda create -n openterminal python=3.12 -y   # or any virtualenv
@@ -266,41 +84,11 @@ conda activate openterminal
 pip install -e .
 ```
 
-Configure a model gateway under **Settings → Models** after starting `ot web`.
-The **Settings → Appearance** page offers three color themes and ten built-in
-textured wallpapers. You can also upload a local image (PNG / JPEG / WebP, up to
-12 MB) or a short clip (MP4 / WebM, up to 64 MB) and adjust its fit, tiling,
-position, opacity, and brightness. A clip plays back as a muted, looping
-background — a seamlessly looping clip gives the best result. Everything is
-stored in the current browser, never uploaded to the server. Appearance applies
-across the Web UI and works offline.
-The CLI continues to support settings from environment variables or `config.toml`.
+## Configuration
 
-## Quick start
+Model gateways are managed under **Settings → Models**: pick the protocol, URL, model and API key, then enable it — newly opened tabs use it, existing ones don't switch. Profile metadata is stored in `~/.openterminal/connections.db` and API keys in the OS credential store, never in the project config. The CLI stays compatible with environment variables and `[model]` in `config.toml`.
 
-```sh
-ot          # terminal — local shell + main menu (connect / manage hosts)
-ot web      # browser terminal — server sidebar + multi-tab UI (default http://127.0.0.1:8080)
-```
-
-More ways to connect:
-
-```sh
-ot connect prod-web      # a host from ~/.ssh/config
-ot ssh deploy@host:2222  # or user@host:port directly
-```
-
-## Model gateway configuration
-
-The Web UI's **Settings → Models** page manages multiple profiles, including
-provider, base URL, model, and API key. Add or edit a profile in the dialog,
-then select it for newly opened terminal tabs. Existing tabs do not switch.
-Theme and wallpaper selections are stored in the current browser. Profile metadata is stored in
-`~/.openterminal/connections.db`; API keys are stored in the OS credential
-store. CLI model settings remain compatible with environment variables and
-`[model]` in `config.toml`.
-
-Optional `~/.openterminal/config.toml` for non-model settings:
+Everything else goes in `~/.openterminal/config.toml`:
 
 ```toml
 [shell]
@@ -325,67 +113,17 @@ commands = [
 ]
 ```
 
-Config directory can be moved with `OPENTERMINAL_HOME` (the test suite uses
-this for isolation). Transcripts go to `~/.openterminal/sessions/`; host
-profiles are cached in `~/.openterminal/hosts.toml`.
+The config directory can be moved with `OPENTERMINAL_HOME` (the test suite uses this for isolation). Transcripts go to `~/.openterminal/sessions/`, host profiles are cached in `~/.openterminal/hosts.toml`.
 
-## Day-to-day use
+## Supported platforms
 
-**In the terminal** — just type. A normal sentence becomes a task; a plain
-command runs in your real shell. `!` forces a command, `?` forces a task.
-`/help` lists the slash commands: `/target` switch host, `/system` override
-the detected dialect, `/clear` new task, `/model` show model, `/exit` quit.
-Ctrl+C interrupts a running task and returns you to the prompt.
-
-**Post-connect command sets** run themselves the moment a target is up —
-handy for jump hosts and `su -` switches. Keep a password out of the file by
-writing `> @name=secret` once; the stored line is just `> @name` and the
-prompt is answered from the keyring. If a line stops to ask for something,
-the web status bar offers a Resume button instead of leaving you stuck
-(the terminal CLI has no resume entry yet).
-
-**In the browser** (`ot web`) — pick a server from the sidebar (local or
-direct SSH), open as many tabs as you like, and work in the Agent view or
-plain Shell view. Passwords and host keys are entered in browser dialogs;
-remembered passwords go through the OS credential store, so reconnecting is
-password-free.
-
-**LAN access**: `ot web --host 0.0.0.0 --token <TOKEN>` — a token is
-mandatory for non-loopback binds. Config: `[web] host/port/token` in
-`config.toml`.
-
-**In scripts**: `ot exec` runs one command against a target behind the
-same policy gate and speaks JSON — read-only commands execute; anything
-needing approval exits with `APPROVAL_REQUIRED` (67) instead of running,
-and refused commands exit with `DENIED` (66), so automation can react
-instead of guessing:
-
-```sh
-ot exec -t prod-web -c "df -h /" --output json
-```
-
-## Security model
-
-The rule of thumb: **looking is free; changing things needs your OK; disasters
-are refused.** The demo above walks through exactly that: the `du` probe runs
-on its own, the `rm -rf` waits at the gate.
-
-Three tiers (`src/openterminal/policy.py`):
-
-- **auto** — read-only stuff runs on its own: `ls`/`cat`/`df`/`ps`,
-  `git status/log`, `find` without `-exec/-delete`, …
-- **approve** — anything that modifies the system: deleting files, writing
-  files, installing packages, `systemctl`, `sudo`, network config, plus
-  anything the static rules can't confidently judge. A panel opens:
-  `y` execute / `e` edit / `n` reject / `a` allow for this session (in the
-  web UI it's a button, with a second confirm for high-risk commands).
-- **deny** — the catastrophic stuff is refused and the reason is fed back to
-  the model so it changes course: `rm -rf /`, mkfs, `dd` to block devices,
-  fork bombs, shutdown, redirects to /dev devices, …
-
-Rejected and failed commands aren't retried verbatim: the agent is prompted
-to retry a failure at most once and never re-skin a rejected command, and
-tool-call turns are budget-bounded.
+| | |
+|---|---|
+| Operating systems | macOS, Linux, Windows |
+| Local shell | PTY on macOS / Linux; ConPTY + PowerShell on Windows |
+| Shells | zsh and bash ≥ 4 are fully featured; bash 3.2 (still shipped by macOS) can't see `READLINE_LINE`, so the natural-language trigger doesn't work there |
+| Python | 3.11+ (needed for pipx / source installs; not for the pre-built binaries) |
+| Model gateways | Anthropic-compatible and OpenAI-compatible, multiple profiles |
 
 ## Architecture
 
@@ -393,31 +131,11 @@ tool-call turns are budget-bounded.
   <img src="docs/images/architecture.svg" width="860" alt="OpenTerminal architecture">
 </div>
 
-Full docs: [Architecture](docs/architecture.md) · [Design notes](docs/design.md) ·
-[Flow diagrams](docs/flows.md)
+Three layers: a natural-language front end (terminal or web), a deepagents (LangGraph) agent, and persistent shell sessions. Natural language goes straight to the agent for multi-turn tool use; command execution is a sub-capability of the agent over the same session. The tiered policy is enforced as agent middleware, so prompt content can't talk its way past the approval gate. Built-in skills are mounted as files under `/skills/`, so the agent loads them the same way it loads any other reference file; MCP tools come in through `langchain-mcp-adapters` and join the built-in set.
 
-Three layers: the natural-language front end (terminal or web), a
-deepagents (LangGraph) agent, and persistent shell sessions. Natural
-language goes straight to the agent for multi-turn tool use; command
-execution is a sub-capability of the agent, over the same session. The
-tiered policy is enforced as agent middleware, so the approval gate can't
-be bypassed by prompt content. Built-in skills are mounted as files under
-`/skills/`, so the agent loads them the same way it loads any other
-reference file. MCP tools come in through `langchain-mcp-adapters` and join
-the built-in tool set; a disabled skill is filtered out of the model's next
-turn rather than unmounted.
+Display is a single pipeline: PTY bytes go straight to the terminal, shell-integration hooks keep the books via in-band OSC markers (history, exit codes, AI context), and agent tool commands are injected into the same PTY via `__ot_exec__`, so their output lands in place. Commands are strictly serial within a session — one PTY is one interactive shell, so concurrent agent `execute` calls queue up. Sentinel slicing remains only for non-display paths such as headless `ot exec` and capability probes.
 
-Display is a **single pipeline**: PTY bytes go straight to the terminal,
-shell-integration hooks keep the books via in-band OSC markers (history /
-exit codes / AI context), and agent tool commands are injected into the
-same PTY via `__ot_exec__`, so their output lands in place. A per-session
-lock keeps commands strictly serial — one PTY is one interactive shell, so
-concurrent agent `execute` calls queue up. BEGIN/END sentinel slicing
-(`session/base.py`) remains only for non-display paths such as headless
-`ot exec` and capability probes.
-
-There is **no model-level long-term memory** — the agent's checkpointer is
-in-memory and cleared on restart. What persists is factual state:
+There is no model-level long-term memory — the agent's checkpointer is in-memory and cleared on restart. What persists is factual state:
 
 | Store | Location | Contents |
 |---|---|---|
@@ -428,45 +146,42 @@ in-memory and cleared on restart. What persists is factual state:
 | Command history | `~/.openterminal/history.db` | per-target history, replayed into the shell on reconnect |
 | Passwords | OS credential store (keyring) | connection passwords and command-set secrets — never written to plaintext files |
 | Host profiles | `~/.openterminal/hosts.toml` | per-host system profile cache |
-| Transcripts | `~/.openterminal/sessions/<date>/` | JSONL of inputs/commands/approvals/summaries |
+| Transcripts | `~/.openterminal/sessions/<date>/` | JSONL of inputs, commands, approvals and summaries |
 | Host keys | `~/.ssh/known_hosts` | written after TOFU confirmation |
 
-## Testing
+## Modes
 
-```sh
-pytest -q                      # Python suite (platform-gated tests auto-skip)
-node --test tests/js/*.test.cjs                        # static frontend
-cd src/openterminal/web/frontend/ui && npm ci && npm test  # React island
-```
+**Terminal (`ot`).** Runs in your own terminal: a local shell plus a main menu for connecting and managing hosts. A sentence is a task, a command runs in your real shell, and `!` / `?` force either one. Ctrl+C interrupts a task and returns you to the prompt; `/exit` quits. This is the single-pipeline implementation — command output, AI cards and command history all live in the same character stream.
 
-Real-sshd tests are opt-in:
+**Browser (`ot web`).** Starts a web server (default <http://127.0.0.1:8080>). Pick a target from the server sidebar and open as many tabs as you like; each switches between an Agent view (cards and approvals) and a plain Shell view, and shows its own connection status. Passwords and host keys go through browser dialogs, and remembered passwords make reconnection password-free. For LAN access use `ot web --host 0.0.0.0 --token <TOKEN>` — a token is mandatory for non-loopback binds.
 
-```sh
-OT_TEST_SSH=1 OT_TEST_SSH_HOST=127.0.0.1 OT_TEST_SSH_PORT=2222 pytest -m ssh
-```
+**Headless (`ot exec` / `ot list`).** Meant to be called as a subprocess by scripts and by other AI coding tools (Claude Code, Codex, opencode, …) without entering the REPL. One command per call, behind the same policy gate, structured JSON out. Exit codes are layered: the remote command's code passes through as-is (0–63) and tool errors use reserved codes above 64, so a caller can tell "the command failed" from "the call failed". Approvals never block headlessly — they come back as structured refusals, and the only way through is a human action.
 
-Browser-level checks drive a real Chrome against a live server. Each is
-self-contained, cleans up after itself, and prints PASS/FAIL:
+## Security model
 
-```sh
-node tools/verify-web/verify-settings-modules.cjs   # settings: general / skills / tools
-node tools/verify-web/verify-manual-history.cjs     # manual commands reach the model; system prompt untouched
-node tools/verify-web/verify-wallpaper-storage.cjs  # wallpapers survive switching browsers
-```
+The rule of thumb: **looking is free; changing things needs your OK; disasters are refused.**
 
-The README demos are reproducible too — see
-[tools/demo-recorder](tools/demo-recorder) for the exact commands.
+Three tiers (`src/openterminal/policy.py`):
 
-## Contributing
+- **auto** — read-only work runs on its own: `ls`/`cat`/`df`/`ps`, `git status/log`, `find` without `-exec/-delete`, and so on.
+- **approve** — anything that modifies the system: deleting or writing files, installing packages, `systemctl`, `sudo`, network config, plus anything the static rules can't confidently judge. A panel opens: `y` execute / `e` edit / `n` reject / `a` allow for this session (a button in the web UI, with a second confirm for high-risk commands).
+- **deny** — the catastrophic stuff is refused outright and the reason is fed back to the model so it changes course: `rm -rf /`, mkfs, `dd` to block devices, fork bombs, shutdown, redirects to /dev devices, and so on.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Issues and pull requests are welcome.
+The gate is enforced as **agent middleware**, not in the prompt. A prompt is a request; middleware is a wall — no amount of persuasiveness gets past it. Rejected and failed commands aren't retried verbatim either: a failure is retried at most once, a rejected command can't be re-skinned, and tool-call turns are budget-bounded. Every input, command, approval and summary lands in a JSONL transcript under `~/.openterminal/sessions/`.
 
-## Acknowledgments
+## What makes it different
 
-- [deepagents](https://github.com/langchain-ai/deepagents) & LangGraph — agent runtime
-- [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters) — MCP client
-- [xterm.js](https://xtermjs.org/) — browser terminal (vendored in `web/frontend/vendor/`)
-- [asyncssh](https://github.com/ronf/asyncssh) — SSH client
+**It's a real shell, not a command runner.** `cd`, exports and venvs survive across tasks and vim/top/tmux take over natively. Getting there means true PTY passthrough with a hook doing the bookkeeping via in-band markers — which is also why old shells like bash 3.2 are only partly supported (see [Supported platforms](#supported-platforms)).
+
+**The gate is middleware, not a prompt.** Approval doesn't depend on the model behaving itself or on instructions in the system prompt; it's a hard check on the agent's tool-call path. That's the essential difference from tools that simply let the agent run.
+
+**Failures are budgeted, not retried forever.** A failure is retried once at most, a rejected command can't come back disguised, and tool-call turns are capped. Endless self-correction is a big part of why agents lose people's trust.
+
+**One request, every dialect.** The same request becomes apt on Ubuntu, yum on CentOS 7, dnf on Rocky, apk on Alpine and brew on macOS — with a `/system` override when detection gets it wrong.
+
+**Everything is logged.** Inputs, commands, approval decisions and summaries all land in JSONL, so when something goes wrong you can see exactly what happened.
+
+**No long-term memory, only factual state.** Session memory is cleared on restart. What stays behind is configuration, connections, history and credentials — it won't quietly remember things you didn't ask it to.
 
 ## License
 
