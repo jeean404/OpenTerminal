@@ -7,8 +7,8 @@
     python tools/demo-recorder/record_terminal.py /tmp/ot-term.cast
 
 剧情与 record.cjs（web 版）对齐：plain 彩色命令 → 自然语言任务 → 思考/
-分析流式 → 审批面板停顿 → Enter 执行 → 真输出 + 总结卡 → /exit 收尾。
-等待一律事件驱动（wait_for 输出子串），不停死等固定秒数。
+分析流式 → 只读 du 原地跑 → 高危删除进审批 → Enter + 二段确认 → 真输出
++ 总结卡 → /exit 收尾。等待一律事件驱动（wait_for 输出子串），不停死等。
 """
 from __future__ import annotations
 
@@ -30,8 +30,9 @@ ROWS, COLS = 30, 100
 READY_MARK = "shell 集成已就绪"             # ready 提示语：interactive=1 才出现；
                                            # 注入期（探针+27 分片）打字会混进注入流
 APPROVAL_MARK = "待审批"                    # term_frontend 审批框标题
-FINAL_MARK = "聚合完成"                     # DemoRunner 总结卡首句
-TASK_TEXT = "看看 /tmp/ot-demo 下哪些目录最占空间，给我一张表"
+CONFIRM_MARK = "确认执行"                   # 高危二段确认红行（放行/取消）
+FINAL_MARK = "已清掉"                       # DemoRunner 总结卡首句
+TASK_TEXT = "看看 /tmp/ot-demo 下哪些目录最占空间，清掉 build-cache，给我一张表"
 
 
 class Recorder:
@@ -109,18 +110,23 @@ def main() -> None:
         rec.press("\r")
         rec._pump(2.6)
 
-        # beat 2：自然语言任务 → 思考流 + 分析卡流式
+        # beat 2：自然语言任务 → 思考流 + 分析卡流式 → 只读 du 自己跑完
         rec.type(TASK_TEXT, delay=0.045)
         rec.press("\r")
 
-        # beat 3：审批面板——停顿让观看者读清命令，再 Enter 执行
-        rec.wait_for(APPROVAL_MARK, timeout=30)
-        rec._pump(2.4)
+        # beat 3：审批面板——停顿让观看者读清命令，再 Enter
+        rec.wait_for(APPROVAL_MARK, timeout=45)
+        rec._pump(2.6)
+        rec.press("\r")
+
+        # beat 3b：高危二段确认红行——再 Enter 放行
+        rec.wait_for(CONFIRM_MARK, timeout=15)
+        rec._pump(1.5)
         rec.press("\r")
 
         # beat 4：真命令输出落地 + 总结卡
         rec.wait_for(FINAL_MARK, timeout=30)
-        rec._pump(4.0)
+        rec._pump(4.2)
 
         # 收尾：/exit 退出（前端斜杠命令，关会话）
         rec.type("/exit", delay=0.03)
@@ -141,7 +147,8 @@ def main() -> None:
 
     header = {"version": 2, "width": COLS, "height": ROWS,
               "timestamp": int(time.time()),
-              "env": {"SHELL": "zsh", "TERM": "xterm-256color"}}
+              "env": {"SHELL": os.path.basename(os.environ.get("SHELL", "bash")),
+                      "TERM": "xterm-256color"}}
     with open(out, "w", encoding="utf-8") as f:
         f.write(json.dumps(header) + "\n")
         for ev in rec.events:

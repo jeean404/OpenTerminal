@@ -3,7 +3,7 @@
 [![CI](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-[English](README.md) | 中文
+[English](README.md) · [安装](#安装) · [快速开始](#快速开始) · [安全模型](#安全模型)
 
 **用大白话指挥你的终端——活它来干。**
 
@@ -13,25 +13,55 @@ OpenTerminal 住在你的终端里(也可以住进浏览器)。你输入一句�
 Xshell 可以省了。
 
 <div align="center">
-  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal 终端演示:普通命令 → 自然语言任务 → 流式分析 → 审批 → 执行 → 总结"><br><br>
-  <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal 演示:自然语言任务 → 分析 → 审批 → 执行 → 总结">
+  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal 终端演示:先敲普通命令，再说人话——思考、分析、只读探查自己跑、删除卡在审批、最后落下总结表"><br><br>
+  <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal 浏览器演示:同一条流程——自然语言任务、流式分析、破坏性命令进审批、执行、由真实输出汇成的总结表">
 </div>
 
-两张动图是同一条流程——第一张在纯终端(`ot`)里,第二张在浏览器
+两张动图是同一条任务——第一张在纯终端(`ot`)里,第二张在浏览器
 (`ot web`)里。里面发生了什么:
 
 1. 先敲一条普通命令:`ls /tmp/ot-demo`——在你的真 shell 里原样执行,
    带彩色输出;
-2. 再输入一句人话:**"看看 /tmp/ot-demo 下哪些目录最占空间,给我一张表"**;
+2. 再输入一句人话:**"看看 /tmp/ot-demo 下哪些目录最占空间,
+   清掉 build-cache，给我一张表"**;
 3. AI 流式亮出**思考**与**分析**——它打算干什么、为什么;
-4. 弹出**审批面板**,命令原文摊开——你点头之前,什么都不会执行;
-5. 你点了**执行**——命令在同一个终端真实运行,输出原样展示;
+4. 只读探查(`du -sh …`)**自己就跑了**——看一眼不花钱;
+5. 删目录这一步进**审批面板**,命令原文摊开,高危还多一道二次确认
+   ——你点头之前,磁盘上什么都不会变;
 6. 一张**总结**卡收尾:markdown 表格直接由真实输出汇总而成。
+
+> **关于这两张动图**:录的是真界面,只是用脚本化 Agent 驱动,方便确定性
+> 重录([tools/demo-recorder](tools/demo-recorder))。里面的命令、策略判定、
+> 每一行输出都是真的。
 
 > ⚠️ **Beta 阶段**:OpenTerminal 会在真实机器上执行真实命令——包括生产
 > 服务器。所有改动性命令都要经你审批(见[安全模型](#安全模型)),但点
 > 「执行」之前,还是请看一眼它要干什么。安全类漏洞披露见
 > [SECURITY.md](SECURITY.md)。
+
+## 目录
+
+- [一分钟跑起来](#一分钟跑起来)
+- [你为什么会喜欢它](#你为什么会喜欢它)
+- [功能特性](#功能特性)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [模型网关配置](#模型网关配置)
+- [日常使用](#日常使用)
+- [安全模型](#安全模型)
+- [架构](#架构)
+- [测试](#测试)
+- [贡献](#贡献)
+
+## 一分钟跑起来
+
+```sh
+pipx install ot-cli        # 或: uv tool install ot-cli
+ot web                     # 浏览器终端 → http://127.0.0.1:8080
+```
+
+再在「设置 → 模型」里接上模型网关,然后直接打字就行。
+想用自己的终端就跑 `ot`;不想装 Python 就用预编译二进制,见[安装](#安装)。
 
 ## 你为什么会喜欢它
 
@@ -284,7 +314,7 @@ ot exec -t prod-web -c "df -h /" --output json
 
 ## 安全模型
 
-一句话:**只看随便看;要动手得经你同意;闯祸的事直接不做。**
+一句话:**只看随便看;要动手得经你同意;闯祸的事直接不做。** 上面那段动图走的正是这条线:`du` 探查自己跑,`rm -rf` 卡在闸门上等你。
 
 三级命令策略(`src/openterminal/policy.py`):
 
@@ -359,6 +389,9 @@ node tools/verify-web/verify-settings-modules.cjs   # 设置页：通用 / 技�
 node tools/verify-web/verify-manual-history.cjs     # 手动命令进消息历史，系统提示词不动
 node tools/verify-web/verify-wallpaper-storage.cjs  # 背景换浏览器不丢
 ```
+
+README 里的两张动图也可精确重录,命令见
+[tools/demo-recorder](tools/demo-recorder)。
 
 ## 贡献
 

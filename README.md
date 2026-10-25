@@ -1,10 +1,14 @@
 # OpenTerminal
 
 [![CI](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml/badge.svg)](https://github.com/jeean404/OpenTerminal/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ot-cli.svg)](https://pypi.org/project/ot-cli/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Downloads](https://img.shields.io/pypi/dm/ot-cli.svg)](https://pypi.org/project/ot-cli/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[中文文档](README.zh-CN.md)
 
 **Tell your terminal what you want in plain language — it does the work.**
+
+[中文文档](README.zh-CN.md) · [Install](#installation) · [Quick start](#quick-start) · [Security model](#security-model)
 
 OpenTerminal lives in your terminal (and your browser). Type a normal sentence
 like *"check which files are eating the most space"* and it figures out the
@@ -13,30 +17,59 @@ exactly as you'd expect. It can hop to your remote servers over SSH too, so
 you can leave Xshell behind.
 
 <div align="center">
-  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal terminal demo: plain command → natural language task → streaming analysis → approval → execution → summary"><br><br>
-  <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal demo: natural language task → analysis → approval → execution → summary">
+  <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal in the terminal: plain command, then a plain-language task — thinking, analysis, the read-only probe runs on its own, the delete waits for approval, and a summary table lands at the end"><br><br>
+  <img src="docs/images/demo-web.gif" width="860" alt="OpenTerminal in the browser: the same flow — plain-language task, streaming analysis, an approval panel on the destructive command, execution, and a summary table built from the real output">
 </div>
 
-Both GIFs show the same flow — the first in the plain terminal (`ot`), the
+Both GIFs show the same task — the first in the plain terminal (`ot`), the
 second in the browser (`ot web`). Here's what happens:
 
 1. A plain command first — `ls /tmp/ot-demo` runs in your real shell,
    colored output and all;
 2. then a plain-language task: *"看看 /tmp/ot-demo 下哪些目录最占空间，
-   给我一张表"*;
+   清掉 build-cache，给我一张表"*;
 3. the AI streams its **thinking** and **analysis** — what it's about to
    do and why;
-4. an **approval panel** pops up with the exact command — nothing runs
+4. the read-only probe (`du -sh …`) **runs by itself** — looking is free;
+5. the delete gets an **approval panel** with the exact command, plus a
+   second confirm because it's flagged high-risk — nothing changes
    without your OK;
-5. you hit **执行 (Execute)** — the command runs in the same terminal,
-   output shown verbatim;
 6. a **summary** card wraps up, its markdown table built from the real
    output.
+
+> **About the GIFs**: they are recordings of the real interface, driven by a
+> scripted agent so they can be reproduced exactly ([tools/demo-recorder](tools/demo-recorder)).
+> The commands, the policy decisions, and every line of output are real.
 
 > ⚠️ **Beta**: OpenTerminal runs real commands on real machines — including
 > production servers. Every state-changing command needs your approval (see
 > [Security model](#security-model)), but please still read what you're approving.
 > Security-sensitive disclosures: [SECURITY.md](SECURITY.md).
+
+## Table of contents
+
+- [Up and running in a minute](#up-and-running-in-a-minute)
+- [Why you might like it](#why-you-might-like-it)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Model gateway configuration](#model-gateway-configuration)
+- [Day-to-day use](#day-to-day-use)
+- [Security model](#security-model)
+- [Architecture](#architecture)
+- [Testing](#testing)
+- [Contributing](#contributing)
+
+## Up and running in a minute
+
+```sh
+pipx install ot-cli        # or: uv tool install ot-cli
+ot web                     # browser terminal → http://127.0.0.1:8080
+```
+
+Then point it at a model gateway (**Settings → Models**) and just type.
+Prefer your own terminal? Run `ot` instead. Prefer a pre-built binary with no
+Python? See [Installation](#installation).
 
 ## Why you might like it
 
@@ -158,8 +191,8 @@ second in the browser (`ot web`). Here's what happens:
 **Model gateways**
 
 - Manage multiple Anthropic-compatible or OpenAI-compatible profiles from the
-  Web UI's **Model** entry. Profile metadata is stored in SQLite; API keys are
-  kept in the OS credential store.
+  Web UI's **Model** entry. Profile metadata is stored in SQLite; API keys
+  are kept in the OS credential store.
 
 ## Installation
 
@@ -326,7 +359,8 @@ ot exec -t prod-web -c "df -h /" --output json
 ## Security model
 
 The rule of thumb: **looking is free; changing things needs your OK; disasters
-are refused.**
+are refused.** The demo above walks through exactly that: the `du` probe runs
+on its own, the `rm -rf` waits at the gate.
 
 Three tiers (`src/openterminal/policy.py`):
 
@@ -411,6 +445,9 @@ node tools/verify-web/verify-settings-modules.cjs   # settings: general / skills
 node tools/verify-web/verify-manual-history.cjs     # manual commands reach the model; system prompt untouched
 node tools/verify-web/verify-wallpaper-storage.cjs  # wallpapers survive switching browsers
 ```
+
+The README demos are reproducible too — see
+[tools/demo-recorder](tools/demo-recorder) for the exact commands.
 
 ## Contributing
 
