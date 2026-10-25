@@ -11,7 +11,8 @@
 
 数据面（Path(__file__) 相对定位的资源，两种模式都必须原样打进包）：
 - openterminal/web/frontend —— `ot web` 静态资源（server.py 以
-  Path(__file__)/frontend 定位；React island 构建产物 static/ui/ 已提交）；
+  Path(__file__)/frontend 定位；React island 构建产物 static/ui/ 已提交）。
+  只带运行时真正 serve 的 index.html + static/ + vendor/ 三类；
 - openterminal/skills —— 内置 Agent Skills 的 SKILL.md（与 pyproject
   package-data 同源）。
 
@@ -36,7 +37,13 @@ a = Analysis(
     pathex=["src"],
     binaries=[],
     datas=[
-        ("src/openterminal/web/frontend", "openterminal/web/frontend"),
+        # 与 pyproject 的 package-data 同源：只带 server.py 真正 serve 的三类
+        # （/static、/vendor、index.html）。绝不整目录打包 frontend/：
+        # frontend/ui/ 是 React 源码工程（含 node_modules），运行时从不
+        # 访问，整目录会把它原样拖进 Release 包（实测 47MB）。
+        ("src/openterminal/web/frontend/index.html", "openterminal/web/frontend"),
+        ("src/openterminal/web/frontend/static", "openterminal/web/frontend/static"),
+        ("src/openterminal/web/frontend/vendor", "openterminal/web/frontend/vendor"),
         ("src/openterminal/skills", "openterminal/skills"),
     ],
     hiddenimports=[
