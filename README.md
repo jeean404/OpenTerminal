@@ -10,11 +10,18 @@
 
 [中文文档](README.zh-CN.md) · [Install](#installation) · [Quick start](#quick-start) · [Security model](#security-model)
 
-OpenTerminal lives in your terminal (and your browser). Type a normal sentence
-like *"check which files are eating the most space"* and it figures out the
-right commands, runs them, and sums up the results. Plain commands still work
-exactly as you'd expect. It can hop to your remote servers over SSH too, so
-you can leave Xshell behind.
+**OpenTerminal is a natural-language terminal agent** for people who live in a
+shell. Say what you want — *"check which files are eating the most space"* —
+and it works out the commands, runs them in your real session (locally or over
+SSH), and hands you a summary. Read-only commands run on their own; anything
+that changes your machine asks first.
+
+Two ways in: `ot` in your terminal, `ot web` in a browser. And `ot exec` is a
+policy-gated execution surface that **AI coding agents — Claude Code, Codex,
+opencode and friends — call as a subprocess**, so an agent can work on your
+servers without a blank cheque. Plain commands keep working exactly as you'd
+expect, and full-screen programs like vim/top/tmux take over the terminal
+natively — so you can leave Xshell behind.
 
 <div align="center">
   <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal in the terminal: plain command, then a plain-language task — thinking, analysis, the read-only probe runs on its own, the delete waits for approval, and a summary table lands at the end"><br><br>
@@ -180,12 +187,18 @@ Python? See [Installation](#installation).
   their options in SQLite, so they survive switching browsers. Media is
   served with Range support, so video wallpapers scrub smoothly.
 
-**Headless / scripting**
+**Headless / scripting** — the `ot exec` surface AI coding agents call
 
 - `ot exec -t <target> -c "<cmd>" --output json` — one policy-gated
   command per invocation, with machine-readable output and exit codes
   (`APPROVAL_REQUIRED` / `DENIED` / `HOST_KEY_UNKNOWN`), safe to wire
-  into cron or CI
+  into cron, CI, or another agent
+- Exit codes are layered on purpose: the remote command's code passes
+  through as-is (0–63), tool errors use reserved codes 64+, so a caller
+  can tell "the command failed" from "the call failed"
+- Approvals never block headlessly — `deny` and `APPROVAL_REQUIRED` come
+  back as structured refusals, and the only way through is a human action
+  (allow it in the interactive UI, or edit `config.toml`)
 - `ot list targets --output json`
 
 **Model gateways**
