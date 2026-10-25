@@ -17,11 +17,13 @@
 
 == Step 1 侦查结论（2026-09-27，HEAD de00737；ScriptedRunner 的事件契约权威） ==
 
-1. **patch 点 = ``openterminal.agent.TaskRunner``**：core.py ``_run_task``
-   函数体内 lazy import（``from .agent import TaskRunner``，core.py:1212），
-   调用时才解析模块属性——monkeypatch ``openterminal.agent.TaskRunner``
-   即可（test_web_worker._PatchBridge 同经验：patch 必须在 driver 进程，
-   且要在第一条任务启动前打上）。
+1. **patch 点 = ``openterminal.agent.runner.TaskRunner``**（2026-10-25 复核）：
+   ai_flow 的调用点是函数体内 ``from ..agent.runner import TaskRunner``，
+   每次任务重解析模块属性。打 ``openterminal.agent.TaskRunner`` 只改包的
+   惰性转发槽、调用点根本不看它，剧情会滑回真模型。本文件的 agent_mod
+   就是 ``openterminal.agent.runner``，故原写法侥幸打对了地方；serve_demo
+   曾打在包上失效过（模型重试 3 次 AnthropicConnectionError）。patch 必须
+   在 driver 进程，且要在第一条任务启动前打上。
 2. **事件对象 = ``openterminal.agent.TaskEvent``**（dataclass）：
    ``TaskEvent(kind, text="", command="", reasons=[])``。
 3. **构造签名**（core.py:1247 实调用）::
