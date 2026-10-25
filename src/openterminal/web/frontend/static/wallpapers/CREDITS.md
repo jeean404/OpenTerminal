@@ -1,6 +1,6 @@
 ﻿# Built-in wallpapers (CC0 / public domain, via Wikimedia Commons)
 
-resized to 3840px wide.
+resized to 2560px wide.
 
 - wilderness.jpg: File:Alone in the unspoilt wilderness (Unsplash).jpg
 - ida.jpg: File:Mount Ida chain Messara plain from Phaistos Crete Greece.jpg
