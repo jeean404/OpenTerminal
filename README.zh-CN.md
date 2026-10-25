@@ -7,10 +7,15 @@
 
 **用大白话指挥你的终端——活它来干。**
 
-OpenTerminal 住在你的终端里(也可以住进浏览器)。你输入一句人话,比如
-"帮我看看哪些文件占的空间最大",它自己琢磨出合适的命令、执行、再把结果
-讲给你听。想直接敲命令也照常执行,一点不耽误。它还能 SSH 到远程服务器,
-Xshell 可以省了。
+**OpenTerminal 是一个自然语言终端 Agent**，给离不开 shell 的人用。你说人话
+——*"帮我看看哪些文件占的空间最大"*——它自己琢磨出命令，在你的真实会话里
+执行（本机或 SSH 远程），再把结果汇总给你。只读命令自己就跑；要改动你机器的
+先问你。
+
+两个入口：终端里的 `ot`，浏览器里的 `ot web`。另外还有 `ot exec`——一个带
+策略闸门的执行面，**给 Claude Code、Codex、opencode 这类 AI 编程工具当子进程
+调**，让 Agent 在你的服务器上干活时手里不握空白支票。普通命令照常一行不差地
+执行，vim / top / tmux 这类全屏程序也是原生内联，Xshell 可以省了。
 
 <div align="center">
   <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal 终端演示:先敲普通命令，再说人话——思考、分析、只读探查自己跑、删除卡在审批、最后落下总结表"><br><br>
@@ -152,12 +157,16 @@ ot web                     # 浏览器终端 → http://127.0.0.1:8080
 - 自定义背景存在本机 `~/.openterminal/wallpapers/`，铺放参数进 SQLite，
   换浏览器不丢；媒体走支持 Range 的静态路由，视频背景拖进度条也流畅
 
-**无头 / 脚本**
+**无头 / 脚本**——AI 编程工具调用的 `ot exec` 执行面
 
 - `ot exec -t <目标> -c "<命令>" --output json`——一次调用跑一条
   策略闸门把关的命令,输出与退出码机器可读
   (`APPROVAL_REQUIRED` / `DENIED` / `HOST_KEY_UNKNOWN`),
-  可放心接入 cron 或 CI
+  可放心接入 cron、CI,或另一个 Agent
+- 退出码分层是故意的:远程命令退出码原样透传(0–63),工具自身错误用 64 以上的
+  保留码——调用方因此能分清「命令失败」与「调用失败」
+- 无头下审批永不卡住:`deny` 与 `APPROVAL_REQUIRED` 一律结构化拒绝,出路只有
+  人的动作(交互界面记住允许,或改 `config.toml`)
 - `ot list targets --output json`
 
 **模型网关**
