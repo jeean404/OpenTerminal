@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from openterminal.config import Config, TargetConfig
 from openterminal.connections import (
@@ -416,3 +418,37 @@ def test_edit_saved_port_alias_is_not_address_change(monkeypatch):
         assert r.status_code == 200
     assert deleted == []
     assert stored == []
+
+def test_ws_unknown_tab_delivers_close_code_4404():
+    # 回归：accept 之前的 close 会被 uvicorn 翻成握手 403 空 body，关闭码
+    # 到不了客户端——前端只拿到 1006，判死条件（ev.code !== 4404）永不
+    # 生效，于是拿旧 tabId 无限重连、每次被拒（真机三连 403）。
+    # 契约：必须 accept 再 close，4404 才送达。
+    app = create_app(Config.load())
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/deadbeef") as ws:
+            with pytest.raises(WebSocketDisconnect) as ei:
+                ws.receive_text()
+    assert ei.value.code == 4404
+
+
+def test_ws_bad_token_delivers_close_code_4401():
+    # 同上：鉴权失败也必须给到 4401，前端才能停手并提示刷新（而不是
+    # 和「tab 已回收」混成同一个 403）。
+    app = create_app(Config.load(), token="secret")
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/deadbeef?token=wrong") as ws:
+            with pytest.raises(WebSocketDisconnect) as ei:
+                ws.receive_text()
+    assert ei.value.code == 4401
+
+
+def test_ws_empty_token_rejected_when_token_configured():
+    # 浏览器 WebSocket 设不了自定义 header，只能走 ?token=；query 也空就是没带
+    app = create_app(Config.load(), token="secret")
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/deadbeef") as ws:
+            with pytest.raises(WebSocketDisconnect) as ei:
+                ws.receive_text()
+    assert ei.value.code == 4401
+

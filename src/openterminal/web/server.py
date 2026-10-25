@@ -97,6 +97,20 @@ def _resolve_target_name(cfg: Config, text: str) -> str:
     return name
 
 
+async def _reject_ws(ws: WebSocket, code: int) -> None:
+    """拒连，但**必须先 accept 再 close**。
+
+    accept 之前的 close 会被 uvicorn 翻成 HTTP 403 空 body
+    （websockets_impl.asgi_send 对 accept 前的 websocket.close 硬编码
+    FORBIDDEN），关闭码根本到不了客户端：浏览器只拿到握手失败 1006，
+    分不清「鉴权失败」与「tab 已回收」，于是拿旧 tabId 无限重连、每次
+    都被拒（真机日志三连 403）。先 accept 再 close，4401/4404 才能送达，
+    前端 onclose 的判死条件才有机会生效。
+    """
+    await ws.accept()
+    await ws.close(code=code)
+
+
 def create_app(cfg: Config, *, token: str = "") -> FastAPI:
     tabs: dict[str, TabWorker] = {}
     # 断线回收任务：浏览器刷新/断网后 ws 关闭，但 PTY/远端 shell 还活着；
@@ -341,11 +355,11 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         # 前端以 ?token= 携带）
         q_token = ws.query_params.get("token", "")
         if token and ws.headers.get("x-ot-token") != token and q_token != token:
-            await ws.close(code=4401)
+            await _reject_ws(ws, 4401)
             return
         worker = tabs.get(tab_id)
         if worker is None:
-            await ws.close(code=4404)
+            await _reject_ws(ws, 4404)
             return
         await ws.accept()
         sink = _WebSink(ws)

@@ -645,12 +645,14 @@ class Session {
     const ws = new WebSocket(wsUrl(this.tabId));
     ws.binaryType = "arraybuffer";
     this.ws = ws;
+    this._wsOpened = false;   // 本次连是否握过手：分「没连上」与「连上又断」
     // 上行记账（看门狗判「发过却无回音」）：send 有两个直调点（raw 字节与
     // sendJson），统一在包装里记，避免漏记
     const rawSend = ws.send.bind(ws);
     ws.send = d => { this._lastSendAt = Date.now(); return rawSend(d); };
     // 开连（或重连）后按序回放 WS 未就绪期缓存的按键（onData 不丢键）
     ws.onopen = () => {
+      this._wsOpened = true;
       this._wsRetries = 0;
       const bl = this._keyBacklog;
       this._keyBacklog = null;
@@ -677,13 +679,36 @@ class Session {
     ws.onclose = ev => {
       this._pwCapture = null;   // 断线终结登录期密码捕获，重连后不残留
       this._pwEntered = null;
-      this.setStatus("closed", _t("连接已关闭"));
       this._failPads();
-      // 断线自动重连（指数退避）；4401/4404（鉴权失败/worker 已回收）重试无意义
-      if (!this._dead && ev.code !== 4401 && ev.code !== 4404) {
-        this._scheduleWsRetry();
+      // 4401/4404（鉴权失败 / worker 已回收）重试无意义。这两个码能到得了
+      // 这里，是因为服务端 _reject_ws 先 accept 再 close；旧行为在 accept
+      // 前 close，被 uvicorn 翻成握手 403，客户端只拿到 1006，下面的判死
+      // 条件永不生效，于是拿旧 tabId 无限重连、每次被拒（真机三连 403）。
+      if (ev.code === 4401 || ev.code === 4404) {
+        this.setStatus("closed", ev.code === 4401
+          ? _t("访问令牌无效，请刷新页面")
+          : _t("会话已失效，请从左侧重新连接"));
+        return;
       }
+      this.setStatus("closed", _t("连接已关闭"));
+      if (!this._dead) this._scheduleWsRetry();
     };
+  }
+
+  // 服务端还在吗：**任何 HTTP 响答都算活着**（401 也算），只有网络层失败
+  // 才算不在。别用 authFetch——它撞上 401 会弹「访问令牌」模态，后台探测
+  // 弹框会莫名其妙打断用户（真机反馈同款）。
+  async _serverAlive() {
+    try {
+      const t = getToken();
+      await fetch("/api/targets", {
+        cache: "no-store",
+        headers: t ? {"x-ot-token": t} : {},
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
   }
 
   // ws 断线自动重连：0.5s 起指数退避、封顶 10s，**不限次数**。旧实现 8 次
@@ -697,9 +722,17 @@ class Session {
     this._wsRetries = (this._wsRetries || 0) + 1;
     if (this._wsRetries === 1 || this._wsRetries % 8 === 0)
       console.warn(_t("[ot] 第 {0} 次重连，{1}ms 后", this._wsRetries, delay));
-    this._wsRetryT = setTimeout(() => {
+    this._wsRetryT = setTimeout(async () => {
       this._wsRetryT = null;
-      if (!this._dead) this.connectWS();
+      if (this._dead) return;
+      // 上一次压根没握上手（不是断线）：先探服务端死活。活着却拒绝握手 ＝
+      // 这个 tab 已随服务重启消失，再连多少次都是被拒（真机三连 403）；
+      // 服务端无响应才是真·断线，按上面「不限次数」继续退避重连。
+      if (!this._wsOpened && (await this._serverAlive())) {
+        this.setStatus("closed", _t("会话已失效，请从左侧重新连接"));
+        return;
+      }
+      this.connectWS();
     }, delay);
   }
 
