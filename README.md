@@ -10,18 +10,13 @@
 
 [中文文档](README.zh-CN.md) · [Install](#installation) · [Quick start](#quick-start) · [Security model](#security-model)
 
-**OpenTerminal is a natural-language terminal agent** for people who live in a
-shell. Say what you want — *"check which files are eating the most space"* —
-and it works out the commands, runs them in your real session (locally or over
-SSH), and hands you a summary. Read-only commands run on their own; anything
-that changes your machine asks first.
-
-Two ways in: `ot` in your terminal, `ot web` in a browser. And `ot exec` is a
-policy-gated execution surface that **AI coding agents — Claude Code, Codex,
-opencode and friends — call as a subprocess**, so an agent can work on your
-servers without a blank cheque. Plain commands keep working exactly as you'd
-expect, and full-screen programs like vim/top/tmux take over the terminal
-natively — so you can leave Xshell behind.
+- **What it is** — a natural-language terminal agent for people who live in a
+  shell: say what you want, it works out the commands and runs them.
+- **Where it runs** — no extra dependencies. Your terminal (`ot`) and your
+  browser (`ot web`), sharing the same core.
+- **Platforms** — macOS, Linux and Windows; local sessions and SSH hosts alike.
+- **What it does** — runs commands in your real shell and hands you a summary.
+  Read-only runs on its own; anything that changes your machine asks first.
 
 <div align="center">
   <img src="docs/images/demo-terminal.gif" width="860" alt="OpenTerminal in the terminal: plain command, then a plain-language task — thinking, analysis, the read-only probe runs on its own, the delete waits for approval, and a summary table lands at the end"><br><br>
