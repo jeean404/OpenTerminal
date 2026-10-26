@@ -360,3 +360,148 @@ test("弹框默认值取终端最终服务器，密码栏恒空（需求 1）", 
   assert.match(src, /autocomplete="new-password"/, "密码栏不预填明文");
   assert.match(src, /记住密码/, "要有记住密码选项");
 });
+
+// --- 会话收束：定时器泄漏（真机 404 刷屏回归）-----------------------------
+//
+// 现象：关掉 tab（或断线宽限期后被服务端 reap）之后，日志每 1～2 秒刷一条
+//   "GET /api/tabs/<tabId>/files/state" 404 Not Found
+// 一直刷到用户刷新页面才停。
+//
+// 根因是两条定时链都不跟会话一起死：
+//   ① _startFollow 的 2 秒 _followTick，404 被 `if (!r.ok) return` 吞掉，
+//      setInterval 照跑；
+//   ② _fetchState 把 404 当「连接未就绪」走 _pending 退避重试，无限排下一轮。
+// Session.close() 清了别的定时器，却没碰 filesPanel。
+//
+// 不变量（**不得回归**）：真·网络抖动必须继续退避重试，绝不能因为这层守卫
+// 把面板冻死；终端身份没变时的跟随轮询必须继续跑。
+
+function barePanel() {
+  global.esc = (s) => String(s == null ? "" : s);
+  const fp = Object.create(FilePanel.prototype);
+  fp.tabId = "t1";
+  fp.el = {hidden: false, querySelector: () => ({innerHTML: ""})};
+  fp.pane = {classList: {toggle() {}, remove() {}}};
+  fp.cwd = null;
+  fp._conn = null;
+  fp._defaults = null;
+  fp._selected = null;
+  fp._seq = 0;
+  fp._stateSeq = 0;
+  fp._retryT = null;
+  fp._wantOpen = false;
+  fp._retryWait = 0;
+  fp._connecting = false;
+  fp._followKey = "";
+  fp._pendKey = "";
+  fp._followT = null;
+  fp._dead = false;
+  return fp;
+}
+
+test("dispose() 收掉 follow 与退避两条定时链并停机", () => {
+  const fp = barePanel();
+  fp._wantOpen = true;
+  fp._startFollow();
+  assert.ok(fp._followT, "跟随定时器应已武装");
+  fp._retryT = setTimeout(() => {}, 60000);
+  fp.dispose();
+  assert.equal(fp._dead, true);
+  assert.equal(fp._wantOpen, false);
+  assert.equal(fp._followT, null);
+  assert.equal(fp._retryT, null);
+});
+
+test("dispose 后 _startFollow 不得再武装定时器（防死后复活）", () => {
+  const fp = barePanel();
+  fp._wantOpen = true;
+  fp.dispose();
+  fp._startFollow();
+  assert.equal(fp._followT, null);
+});
+
+test("dispose 后 open() 不再发任何请求", async () => {
+  const fp = barePanel();
+  let hits = 0;
+  global.authFetch = async () => {
+    hits++;
+    return {ok: true, status: 200, json: async () => ({})};
+  };
+  try {
+    fp.dispose();
+    await fp.open();
+    assert.equal(hits, 0);
+  } finally {
+    delete global.authFetch;
+  }
+});
+
+test("_followTick 遇 404 no_tab 就地停机，不再排下一轮", async () => {
+  const fp = barePanel();
+  fp._wantOpen = true;
+  let hits = 0;
+  global.authFetch = async () => { hits++; return {ok: false, status: 404}; };
+  try {
+    fp._startFollow();
+    await fp._followTick();
+    assert.equal(hits, 1);
+    assert.equal(fp._dead, true);
+    assert.equal(fp._followT, null);
+  } finally {
+    clearInterval(fp._followT);
+    delete global.authFetch;
+  }
+});
+
+test("终端身份未变时跟随轮询不得停机（真·跟随要继续）", async () => {
+  const fp = barePanel();
+  fp._wantOpen = true;
+  fp._followKey = "h|22|u";
+  global.authFetch = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      defaults: {supported: true, host: "h", port: 22, user: "u"},
+    }),
+  });
+  try {
+    fp._startFollow();
+    await fp._followTick();
+    assert.equal(fp._dead, false);
+    assert.ok(fp._followT, "定时器应仍在");
+  } finally {
+    clearInterval(fp._followT);
+    delete global.authFetch;
+  }
+});
+
+test("_fetchState 遇 404 返回 null 且不得排退避重试", async () => {
+  const fp = barePanel();
+  global.authFetch = async () => ({ok: false, status: 404});
+  try {
+    assert.equal(await fp._fetchState(), null);
+    assert.equal(fp._retryT, null, "404 是终态，不得退避重试");
+    assert.equal(fp._dead, true);
+  } finally {
+    delete global.authFetch;
+  }
+});
+
+test("网络抖动仍退避重试，不许当成会话没了（不得回归）", async () => {
+  const fp = barePanel();
+  global.authFetch = async () => { throw new Error("net down"); };
+  try {
+    assert.equal(await fp._fetchState(), null);
+    assert.ok(fp._retryT, "仍要排重试");
+    assert.equal(fp._dead, false, "网络抖动 ≠ 会话回收");
+  } finally {
+    clearTimeout(fp._retryT);
+    delete global.authFetch;
+  }
+});
+
+test("Session.close() 必须收掉文件面板", () => {
+  const app = fs.readFileSync(path.join(__dirname, "..", "..", "src",
+    "openterminal", "web", "frontend", "static", "app.js"), "utf8");
+  assert.match(app, /close\(\) \{[\s\S]{0,240}this\.filesPanel\.dispose\(\)/,
+    "漏了就拿死 tabId 无限刷 404");
+});

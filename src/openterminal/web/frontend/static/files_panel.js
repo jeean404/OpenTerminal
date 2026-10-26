@@ -44,6 +44,7 @@ class FilePanel {
     this._followKey = "";       // 面板已对齐的终端身份（host|port|user）
     this._pendKey = "";         // 候选新身份：连续两次轮询一致才切换
     this._followT = null;       // 跟随终端身份的轮询定时器
+    this._dead = false;         // 会话已收束：定时器与在飞响应就地失效
   }
 
   static _idKey(d) {
@@ -54,16 +55,40 @@ class FilePanel {
   /** 面板展开期间轮询终端身份：跳到 B / 切用户后自动重连到新身份。 */
   _startFollow() {
     clearInterval(this._followT);
+    if (this._dead) return;
     this._followT = setInterval(() => this._followTick(), 2000);
   }
 
   _stopFollow() { clearInterval(this._followT); this._followT = null; }
 
+  /**
+   * 会话收束：停掉一切定时器、作废在飞响应，之后不再发任何请求。
+   *
+   * 两个调用点缺一不可——Session.close() 收掉用户关 tab 的那次；`/state`
+   * 回 404 时面板自己收（会话已被服务端 close/reaper 回收）。少了这层，
+   * 2 秒的 _followTick 与 _pending 的退避链会拿着死 tabId 无限打 404，
+   * 一直刷到用户刷新页面为止（真机日志现象）。
+   */
+  dispose() {
+    this._dead = true;
+    this._wantOpen = false;
+    this._connecting = false;
+    this._stopFollow();
+    clearTimeout(this._retryT);
+    this._retryT = null;
+    this._seq++;        // 在飞的列目录/读写响应一律作废
+    this._stateSeq++;   // 在飞的 state 响应一律作废
+  }
+
   async _followTick() {
-    if (!this._wantOpen || this.el.hidden || this._connecting) return;
+    if (this._dead || !this._wantOpen || this.el.hidden
+        || this._connecting) return;
     let st;
     try {
       const r = await authFetch(this._api("state"));
+      // 404 只可能是 no_tab（令牌错是 401，没连上是 200+connected:false）：
+      // 会话已经没了，跟不动了，直接停机，别再排下一轮
+      if (r.status === 404) { this.dispose(); return; }
       if (!r.ok) return;
       st = await r.json();
     } catch (e) { return; }
@@ -212,6 +237,7 @@ class FilePanel {
 
   /** 打开面板：已连接就列目录；没连接先试着用记住的密码连，连不上才弹框。 */
   async open() {
+    if (this._dead) return;
     const st = await this._fetchState();
     if (!st) return;
     if (!st.supported) { this.setSupported(false); return; }
@@ -291,11 +317,12 @@ class FilePanel {
       : retryIn;
     if (retryIn == null) this._retryWait = Math.min(4000, wait * 1.7);
     this._retryT = setTimeout(() => {
-      if (this._wantOpen && !this.el.hidden) this.open();
+      if (!this._dead && this._wantOpen && !this.el.hidden) this.open();
     }, wait);
   }
 
   async _fetchState() {
+    if (this._dead) return null;
     const seq = ++this._stateSeq;
     let r;
     try {
@@ -306,6 +333,8 @@ class FilePanel {
       return null;
     }
     if (seq !== this._stateSeq) return null;
+    // 404 no_tab 是终态：退避重试只会把 404 刷满日志，就地停机
+    if (r.status === 404) { this.dispose(); return null; }
     if (!r.ok) {
       this._pending("not_ready", 1500);
       return null;

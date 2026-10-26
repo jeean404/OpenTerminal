@@ -3550,6 +3550,9 @@ if (inView) {
 
   close() {
     this._dead = true;
+    // 文件面板的定时器不归 Session 管，但随会话一起死：不收就会拿着死 tabId
+    // 无限轮询 /state，日志刷 404 直到刷新页面
+    if (this.filesPanel) this.filesPanel.dispose();
     if (this._layoutObserver) this._layoutObserver.disconnect();
     if (this._stageContentObserver) this._stageContentObserver.disconnect();
     if (this._layoutFrame != null) cancelAnimationFrame(this._layoutFrame);
