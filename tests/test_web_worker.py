@@ -115,6 +115,39 @@ async def test_worker_keys_and_resize_forwarded(monkeypatch):
     await asyncio.wait_for(_seen(), timeout=2)
 
 
+async def test_worker_input_error_emits_visible_alert(monkeypatch):
+    """SSH/PTTY 写入异常不能只留在底部状态栏，需同时发送终端区告警事件。"""
+    class BrokenInputSession(FakeSession):
+        async def send_raw(self, data):
+            raise BrokenPipeError("Channel not open for sending")
+
+    w, sink = await _make_worker(monkeypatch, session=BrokenInputSession())
+    try:
+        await asyncio.wait_for(w.connected.wait(), timeout=2)
+        await w.handle_client(ClientMsg(type="raw", data="中文".encode("utf-8")))
+        msgs = await _wait_json(
+            sink,
+            lambda m: any(
+                x.get("type") == "event"
+                and x.get("event", {}).get("kind") == "alert"
+                and "BrokenPipeError" in x["event"].get("text", "")
+                for x in m),
+        )
+        alert = next(
+            x["event"] for x in msgs
+            if x.get("type") == "event"
+            and x.get("event", {}).get("kind") == "alert"
+        )
+        assert "Channel not open for sending" in alert["text"]
+        assert any(
+            x.get("type") == "status"
+            and "BrokenPipeError" in x.get("text", "")
+            for x in sink.json()
+        )
+    finally:
+        await w.close()
+
+
 async def test_worker_interrupt_sends_ctrl_c(monkeypatch):
     # ⏹/Ctrl+C：字节直达 PTY（不经过排队的 _inbox）
     w, sink = await _make_worker(monkeypatch)

@@ -674,8 +674,11 @@ class PipelineCore:
             try:
                 await self._dispatch(msg)
             except Exception as e:  # noqa: BLE001 - 单条消息出错不能让 tab 变僵尸
+                text = f"处理出错：{type(e).__name__}: {e}"
                 await self.emit_msg(ServerMsg(
-                    type="status", text=f"处理出错：{type(e).__name__}: {e}"))
+                    type="status", text=text))
+                await self.emit_msg(ServerMsg(
+                    type="event", event={"kind": "alert", "text": text}))
 
     async def _connect(self) -> None:
         target = self.cfg.targets.get(self.target_name, self.cfg.targets["default"])

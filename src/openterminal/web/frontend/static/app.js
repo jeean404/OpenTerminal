@@ -3564,7 +3564,12 @@ if (inView) {
         break;
       case "denied":
       case "limit":
+        this._onTaskFail(msg.type, msg.text);
+        break;
       case "error":
+        // 独立顶层 error 与兼容 event.error 使用同一告警卡呈现；否则错误
+        // 只会进入底部状态栏，终端主区域看不到异常详情。
+        this._onAlert({text: msg.text || _t("系统异常")});
         this._onTaskFail(msg.type, msg.text);
         break;
     }
