@@ -89,11 +89,15 @@ function makeKeySession() {
   s._lastSendAt = 0;
   s._ghostEl = null;
   s._ghostDec = null;
+  const input = {
+    listeners: {},
+    addEventListener(name, fn) { this.listeners[name] = fn; },
+  };
   const fakeEl = {
     insertAdjacentHTML() {},
     classList: {add() {}, remove() {}, toggle() {}, contains: () => false},
     style: {},
-    querySelector: () => null,
+    querySelector: selector => selector === ".xterm-helper-textarea" ? input : null,
     querySelectorAll: () => [],
     onclick: null,
   };
@@ -120,6 +124,56 @@ const key = (k, mods = {}) => Object.assign({
   type: "keydown", key: k, ctrlKey: false, shiftKey: false,
   altKey: false, metaKey: false, isComposing: false, preventDefault() {},
 }, mods);
+
+test("IME 组合期间与提交后产生的 Tab 字节不透传，普通补全恢复", async () => {
+  const s = makeKeySession();
+  const input = s.paneEl.querySelector().querySelector(".xterm-helper-textarea");
+  input.listeners.compositionstart();
+  assert.strictEqual(s.term._keyHandler(key("Process", {keyCode: 229})), true,
+    "229/Process 必须交给 xterm 更新组合输入框");
+  assert.strictEqual(s.term._keyHandler(key("Tab")), true,
+    "候选 Tab 也要让 xterm 完成当前组合");
+  s.term._onData("\t\t");
+  assert.deepStrictEqual(s.sent, [], "组合期间的 Tab 字节不能进入 PTY");
+  input.listeners.compositionend({data: "中"});
+  assert.strictEqual(s.term._keyHandler(key("Tab")), true,
+    "紧随候选提交的 Tab 应由字节过滤器处理");
+  s.term._onData("\t");
+  assert.deepStrictEqual(s.sent, [], "提交后的候选 Tab 不能进入 PTY");
+  await new Promise(resolve => setTimeout(resolve, 160));
+  assert.strictEqual(s.term._keyHandler(key("Tab")), true,
+    "组合结束后的正常 Tab 补全仍应透传");
+  s.term._onData("\t");
+  assert.deepStrictEqual(s.sent, ["中", "\t"],
+    "组合文本应发送，普通 Tab 补全仍应进入 PTY");
+});
+
+test("IME compositionend 提交在 Enter 前透传，延迟的 xterm 提交不重复发送", async () => {
+  const s = makeKeySession();
+  const input = s.paneEl.querySelector().querySelector(".xterm-helper-textarea");
+  input.listeners.compositionend({data: "中文"});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepStrictEqual(s.sent, ["中文"]);
+
+  s.term._onData("中文");
+  assert.deepStrictEqual(s.sent, ["中文"]);
+});
+
+test("IME insertFromComposition 在 compositionend 前可提交，不等 Enter", async () => {
+  const s = makeKeySession();
+  const input = s.paneEl.querySelector().querySelector(".xterm-helper-textarea");
+  input.listeners.beforeinput({
+    inputType: "insertFromComposition",
+    data: "已选中文",
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepStrictEqual(s.sent, ["已选中文"]);
+
+  input.listeners.compositionend({data: "已选中文"});
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.deepStrictEqual(s.sent, ["已选中文"],
+    "同一次 IME 提交不能因 compositionend 再发送一次");
+});
 
 test("原生按键直通：Tab/↑↓/PageUp/PageDown/Ctrl+R 不被键钩子拦截", () => {
   const s = makeKeySession();

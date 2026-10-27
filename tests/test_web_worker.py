@@ -97,16 +97,19 @@ async def test_worker_connect_failure_sends_closed(monkeypatch):
 
 
 async def test_worker_keys_and_resize_forwarded(monkeypatch):
-    # 键盘字节直发 PTY；回退模型下不做任何分类/路由
+    # 键盘字节（包含 UTF-8 中文输入）直发 PTY；回退模型下不做分类/路由
     w, sink = await _make_worker(monkeypatch)
     await asyncio.wait_for(w.connected.wait(), timeout=2)
     await w.handle_client(ClientMsg(type="raw", data=b"ls\r"))
     await w.handle_client(ClientMsg(type="raw", data=b"\x1b[A"))
+    chinese = "中文输入".encode("utf-8")
+    await w.handle_client(ClientMsg(type="raw", data=chinese))
     await w.handle_client(ClientMsg(type="resize", cols=100, rows=30))
 
     async def _seen():
         while ("raw", b"ls\r") not in w.session.calls \
                 or ("raw", b"\x1b[A") not in w.session.calls \
+                or ("raw", chinese) not in w.session.calls \
                 or ("resize", 30, 100) not in w.session.calls:
             await asyncio.sleep(0.01)
     await asyncio.wait_for(_seen(), timeout=2)

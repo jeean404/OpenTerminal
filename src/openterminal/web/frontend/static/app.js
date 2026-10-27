@@ -421,7 +421,26 @@ class Session {
     // 起任务——触发不再依赖 shell hook（sudo su - 等 login shell 重置后仍可用）；
     // 其余按键原样透传，命令执行/英文自然语言仍由 shell hook 分类（行为不变）。
     // 全屏应用（vim/htop 走 alternate buffer）不拦截，Enter 照常送达。
-    term.onData(d => {
+    let imeCommit = null;
+    let imeDuplicate = null;
+    let imeComposing = false;
+    let imeEndedAt = 0;
+    let imeSuppressTabUntil = 0;
+    const forwardInput = d => {
+      if ((imeComposing || Date.now() < imeSuppressTabUntil) &&
+          d.includes("\t")) {
+        d = d.replace(/\t/g, "");
+        if (!d) return;
+      }
+      if (imeDuplicate && Date.now() < imeDuplicate.until) {
+        const i = d.indexOf(imeDuplicate.text);
+        if (i >= 0) {
+          d = d.slice(0, i) + d.slice(i + imeDuplicate.text.length);
+          imeDuplicate = null;
+          if (!d) return;
+        }
+      }
+      if (imeCommit && d.includes(imeCommit.text)) imeCommit.sent = true;
       if (d.includes("\r")) {
         term.scrollToBottom();
         this._followLiveTail(true);
@@ -440,7 +459,42 @@ class Session {
         return;
       }
       this._feedData(d);
-    });
+    };
+    term.onData(forwardInput);
+    const queueImeCommit = text => {
+      if (!text || imeCommit && imeCommit.text === text) return;
+      const commit = {text, sent: false};
+      imeCommit = commit;
+      setTimeout(() => {
+        if (imeCommit !== commit) return;
+        imeCommit = null;
+        if (commit.sent) return;
+        forwardInput(text);
+        const duplicate = {text, until: Date.now() + 250};
+        imeDuplicate = duplicate;
+        setTimeout(() => {
+          if (imeDuplicate === duplicate) imeDuplicate = null;
+        }, 250);
+      }, 20);
+    };
+    const input = termEl.querySelector(".xterm-helper-textarea");
+    if (input) {
+      input.addEventListener("compositionstart", () => {
+        imeComposing = true;
+        imeEndedAt = 0;
+        imeSuppressTabUntil = 0;
+        imeDuplicate = null;
+      });
+      input.addEventListener("beforeinput", ev => {
+        if (ev.inputType === "insertFromComposition") queueImeCommit(ev.data);
+      });
+      input.addEventListener("compositionend", ev => {
+        imeComposing = false;
+        imeEndedAt = Date.now();
+        imeSuppressTabUntil = imeEndedAt + 150;
+        queueImeCommit(ev.data);
+      });
+    }
     term.onResize(({cols, rows}) => {
       this.sendJson({type: "resize", cols, rows});
       const el = document.getElementById(`size-${this.tabId}`);
@@ -473,6 +527,14 @@ class Session {
     // Cmd/Ctrl+Shift+C 有选中时复制（无选中时 Ctrl+C 照常发 ^C 中断）。
     // attachCustomKeyEventHandler 只有一个槽位，多个逻辑必须合并在一个 handler 里
     term.attachCustomKeyEventHandler(ev => {
+      // IME 用 Tab 选中文候选时不是 shell 补全；不能把候选键透传为
+      // \t，否则 Bash 会弹出 "Display all possibilities?"。
+      if (ev.type === "keydown" &&
+          (ev.key === "Tab" || ev.code === "Tab" || ev.keyCode === 9) &&
+          (ev.isComposing || imeComposing ||
+           Date.now() - imeEndedAt < 100)) {
+        imeSuppressTabUntil = Date.now() + 100;
+      }
       // 卡片 island 的 DOM 选区优先原生复制：返回 false 让 xterm 不吞键
       // （否则 Cmd/Ctrl+C 会变成 ^C 发进 PTY，中断正在跑的命令）
       if (ev.type === "keydown" && (ev.metaKey || ev.ctrlKey) &&
