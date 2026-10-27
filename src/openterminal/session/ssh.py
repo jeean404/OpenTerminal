@@ -143,9 +143,17 @@ class SshPtySession(BasePtySession):
 
         # 密码重试上限：对齐 OpenSSH 默认 NumberOfPasswordPrompts=3——错密后
         # 前端重讨提示符（Permission denied 行 + 新提示符），三次全错才判失败
-        async def _open(tofu_allowed: bool, tries: int):
+        async def _open(tofu_allowed: bool, tries: int,
+                        connect_retry: int = 0):
             try:
                 return await asyncssh.connect(host, **kwargs)
+            except (asyncssh.ConnectionLost, OSError, asyncio.TimeoutError):
+                # 转发型远端（如临时 Pod SSH 入口）偶发在 TCP/SSH 握手阶段
+                # 断开；有限重试可跨过短暂抖动，但认证/主机密钥错误不重试。
+                if connect_retry >= 2:
+                    raise
+                await asyncio.sleep(0.25 * (connect_retry + 1))
+                return await _open(tofu_allowed, tries, connect_retry + 1)
             except asyncssh.PermissionDenied:
                 if tries >= 3:
                     raise
@@ -154,7 +162,8 @@ class SshPtySession(BasePtySession):
                 kwargs["password"] = pw
                 if record_last is not None:
                     record_last(pw)
-                return await _open(tofu_allowed=True, tries=tries + 1)
+                return await _open(
+                    tofu_allowed=True, tries=tries + 1, connect_retry=0)
             except asyncssh.HostKeyNotVerifiable:
                 if not tofu_allowed:
                     raise
