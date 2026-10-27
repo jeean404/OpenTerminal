@@ -172,6 +172,8 @@ def test_injection_line_posix_and_ps():
     # eval 是倒数第二行，bind 是最后一行（bind 不进 base64 块）
     assert chunks[-2].decode().lstrip().startswith("eval")
     assert "bind -x" in chunks[-1].decode()
+    # 非 UTF-8 locale 的远端：8 位字节不得被当 Meta 键（中文不回显的根因）
+    assert "set convert-meta off" in chunks[-1].decode()
     b64 = "".join(
         c.decode().split("'")[1] for c in chunks[:-2])
     script = base64.b64decode(b64).decode()

@@ -965,8 +965,14 @@ def injection_lines(shell: str, instance: int,
         # 单字节键无此问题（真机 RHEL 7.9 bash 4.2.46 验证）。
         # 静默窗口收口在 _BASH_SCRIPT 尾（与 zsh 同位），本行只负责换绑。
         # 本行发完时 \C-m 才换绑，整行走的仍是原生 accept-line。
+        # 远端 locale 非 UTF-8（LANG=C/POSIX，部分机器如此）时 readline 把 8 位
+        # 字节当控制符不回显，中文要到 Enter 重绘才出现；开 8 位直通即可
+        # 逐字节回显（UTF-8 locale 下这三项本就是默认行为，无副作用）。
         lines.append(
-            "bind -x '\"\\C-o\": __ot_submit'"
+            "bind 'set input-meta on' 2>/dev/null;"
+            " bind 'set output-meta on' 2>/dev/null;"
+            " bind 'set convert-meta off' 2>/dev/null;"
+            " bind -x '\"\\C-o\": __ot_submit'"
             " 2>/dev/null; bind '\"\\e[45~\": accept-line'"
             " 2>/dev/null; bind '\"\\C-m\": \"\\C-o\\e[45~\"'"
             " 2>/dev/null; bind '\"\\C-j\": \"\\C-o\\e[45~\"' 2>/dev/null")
