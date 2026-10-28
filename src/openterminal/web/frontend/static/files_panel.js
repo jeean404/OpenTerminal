@@ -23,6 +23,7 @@ function _t(key, ...args) {
 // 列表交互：单击＝选中，双击目录＝进入、双击文件＝打开编辑器；下载是
 // 独立的 ⬇ 按钮，不跟单击绑在一起。
 const UP_MAX = 5;   // 同时上传的文件数上限，其余排队
+const DL_MAX = 5;   // 同时下载的文件数上限，其余排队（与上传同规则）
 const UP_CHUNK_SIZE = 1024 * 1024;
 
 class FilePanel {
@@ -164,7 +165,6 @@ class FilePanel {
       </div>
       <div class="fp-path"></div>
       <div class="fp-list" tabindex="-1"></div>
-      <div class="fp-progress" hidden><i></i></div>
       <div class="fp-uploads" hidden></div>
       <div class="fp-foot">
         <input type="file" class="fp-input" multiple hidden>
@@ -506,15 +506,6 @@ class FilePanel {
       hour: "2-digit", minute: "2-digit" });
   }
 
-  _progress(show, frac) {
-    const p = this.el.querySelector(".fp-progress");
-    p.hidden = !show;
-    if (show) {
-      p.querySelector("i").style.width =
-        frac == null ? "33%" : `${Math.max(2, Math.min(100, Math.round(frac * 100)))}%`;
-    }
-  }
-
   _toast(msg, bad) {
     let el = this.pane.querySelector(".fp-toast");
     if (!el) {
@@ -660,41 +651,185 @@ class FilePanel {
     this._connectDialog();
   }
 
-  // --- 下载 / 上传 ---------------------------------------------------------
+  // --- 下载 / 上传（传输队列）----------------------------------------------
+  //
+  // 两个方向共用一条传输列表（`.fp-uploads`）与同一套行渲染：各最多 DL_MAX /
+  // UP_MAX 个并发，其余排队；每行独立进度、独立取消，一项失败不牵连其它项。
+  // 之前下载只有一个全局进度条，两个下载会互相覆盖、先完成的那个还把条藏了。
+  //
+  // 唯一的方向差别是「总量从哪来」：上传一进队就知道（本地 file.size），
+  // 下载要等响应头的 Content-Length；服务器不给就按不定长走（字节数 + 滑条）。
 
-  async download(name, path) {
-    this._progress(true, 0);
+  // --- 传输行（上传 / 下载共用）--------------------------------------------
+  // 一行 = 方向图标 + 文件名 + 进度文案 + 取消/关闭 + 细进度条。
+  // 三态：queued（排队中）/ running（比例，或不定长）/ error（原因留在行上）。
+  _trRender(it) {
+    const box = this.el.querySelector(".fp-uploads");
+    const row = document.createElement("div");
+    row.className = "fp-up";
+    row.dataset.dir = it.dir;
+    row.innerHTML = `
+      <div class="fp-up-top">
+        <span class="fp-up-dir"></span>
+        <span class="fp-up-name"></span>
+        <span class="fp-up-pct"></span>
+        <button class="fp-act fp-up-x"></button>
+      </div>
+      <div class="fp-up-bar"><i></i></div>`;
+    row.querySelector(".fp-up-dir").textContent = it.dir === "down" ? "📥" : "📤";
+    row.querySelector(".fp-up-name").textContent = it.name;
+    row.querySelector(".fp-up-name").title = it.name;
+    row.querySelector(".fp-up-x").onclick = () =>
+      (it.dir === "down" ? this._dnCancel(it) : this._upCancel(it));
+    it.row = row;
+    box.appendChild(row);
+    box.hidden = false;
+    this._trPaint(it);
+  }
+
+  _trPaint(it) {
+    const row = it.row;
+    if (!row) return;
+    const pct = row.querySelector(".fp-up-pct");
+    const bar = row.querySelector(".fp-up-bar i");
+    const x = row.querySelector(".fp-up-x");
+    row.dataset.state = it.state;
+    x.textContent = it.state === "error" ? "✕" : "⏹";
+    x.title = it.state === "error" ? _t("关闭")
+      : it.state === "queued" ? _t("移出队列")
+      : it.dir === "down" ? _t("取消下载") : _t("取消上传");
+    pct.textContent = this._trLabel(it);
+    const total = it.total || 0;
+    if (it.state === "error") {
+      bar.style.width = "100%";
+    } else if (!total) {
+      // 不定长：滑条占一小段来回走（宽度定了反而像卡在那儿不动）
+      bar.style.width = it.state === "running" ? "40%" : "0";
+    } else {
+      const p = Math.max(0, Math.min(1, (it.got || 0) / total));
+      bar.style.width = `${Math.round(p * 100)}%`;
+    }
+    row.classList.toggle("indet", it.state === "running" && !total);
+  }
+
+  /** 行内进度文案（纯文案，单测直调）：queued / error / running 三态。 */
+  _trLabel(it) {
+    if (it.state === "queued") return _t("排队中");
+    if (it.state === "error") return it.err || _t("失败");
+    const total = it.total || 0;
+    const got = it.got || 0;
+    if (!total) return _t("已收 {0}", this._fmtSize(got));
+    const p = Math.max(0, Math.min(1, got / total));
+    return `${Math.floor(p * 100)}% · `
+      + `${this._fmtSize(Math.round(p * total))}/${this._fmtSize(total)}`;
+  }
+
+  // 一行撤场：出队 + 摘 DOM；传输列表空了就整块收起
+  _trRemove(it) {
+    const q = it.queue || [];
+    const i = q.indexOf(it);
+    if (i >= 0) q.splice(i, 1);
+    if (it.row) it.row.remove();
+    it.row = null;
+    const box = this.el.querySelector(".fp-uploads");
+    box.hidden = !box.children.length;
+  }
+
+  // --- 下载队列 -------------------------------------------------------------
+  download(name, path) {
+    if (!this._downs) this._downs = [];
+    const it = {name, path, dir: "down", queue: this._downs, state: "queued",
+                ac: null, row: null, total: 0, got: 0};
+    this._downs.push(it);
+    this._trRender(it);
+    this._dnPump();
+  }
+
+  _dnPump() {
+    let running = this._downs.filter((d) => d.state === "running").length;
+    for (const it of this._downs) {
+      if (running >= DL_MAX) break;
+      if (it.state !== "queued") continue;
+      it.state = "running";
+      running++;
+      this._trPaint(it);
+      this._dnRun(it);
+    }
+  }
+
+  async _dnRun(it) {
+    // AbortController 是取消的唯一通道：流式读取挂着等数据，只有 abort 能叫醒
+    it.ac = new AbortController();
     try {
-      const url = this._url("download", {path: path});
-      let r = await authFetch(url);
+      const r = await authFetch(this._url("download", {path: it.path}),
+        {signal: it.ac.signal});
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
-        this._toast(_t("下载失败：{0}", j.detail || r.status), true);
-        return;
+        throw new Error(j.detail || `HTTP ${r.status}`);
       }
-      // 流式读取：按 Content-Length 显示真实进度
       const total = +(r.headers.get("content-length") || 0);
+      if (total > 0) { it.total = total; this._trPaint(it); }
       const reader = r.body.getReader();
       const chunks = [];
-      let got = 0;
       for (;;) {
         const {done, value} = await reader.read();
         if (done) break;
         chunks.push(value);
-        got += value.length;
-        this._progress(true, total ? got / total : null);
+        it.got += value.length;
+        this._trPaint(it);
       }
-      const blob = new Blob(chunks);
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 30000);
-      this._toast(_t("已下载 {0}（{1}）", name, this._fmtSize(got)));
-    } catch (e) {
-      this._toast(_t("下载失败：{0}", e), true);
+      // 读完到收尾之间没有 await：取消要嘛在读的时候 abort 进 catch，
+      // 要嘛已经把 state 改掉，这里只认 running，绝不在取消后落盘
+      if (it.state === "running") {
+        if (!it.total) it.total = it.got;
+        this._dnSave(it.name, chunks);
+        it.state = "done";
+        this._toast(_t("已下载 {0}（{1}）", it.name, this._fmtSize(it.got)));
+      }
+      this._dnEnd(it);
+    } catch (error) {
+      if (it.state !== "running") { this._dnEnd(it); return; }
+      it.state = "error";
+      it.err = error.message || String(error);
+      this._trPaint(it);
+      this._toast(_t("下载失败 {0}：{1}", it.name, it.err), true);
+      this._dnEnd(it);
     } finally {
-      this._progress(false);
+      it.ac = null;
+    }
+  }
+
+  /** 收下的字节交给浏览器落盘：内存攒块 → blob → a[download]。 */
+  _dnSave(name, chunks) {
+    const blob = new Blob(chunks);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+
+  // 一项结束（成功 / 失败 / 取消）：腾出槽位、补位排队项；
+  // 失败行留着给用户看原因，成功行闪一下再收
+  _dnEnd(it) {
+    it.ac = null;
+    if (it.state === "done" || it.state === "canceled") {
+      if (it.state === "done") this._trPaint(it);
+      setTimeout(() => this._trRemove(it), it.state === "done" ? 1200 : 0);
+    }
+    this._dnPump();
+  }
+
+  _dnCancel(it) {
+    if (it.state === "error" || it.state === "queued") {
+      this._trRemove(it);
+      return;
+    }
+    if (it.state === "running") {
+      it.state = "canceled";
+      if (it.ac) it.ac.abort();           // abort 让 _dnRun 的 catch 收尾
+      else this._dnEnd(it);
+      this._toast(_t("已取消 {0}", it.name));
     }
   }
 
@@ -705,9 +840,11 @@ class FilePanel {
     if (!files.length) return;
     if (!this._ups) { this._ups = []; this._upOk = false; }
     for (const f of files) {
-      const it = {file: f, dir: this.cwd, state: "queued", xhr: null, row: null};
+      const it = {file: f, name: f.name, dir: "up", queue: this._ups,
+                  state: "queued", xhr: null, row: null,
+                  total: f.size, got: 0};
       this._ups.push(it);
-      this._upRender(it);
+      this._trRender(it);
     }
     this._upPump();
   }
@@ -719,56 +856,21 @@ class FilePanel {
       if (it.state !== "queued") continue;
       it.state = "running";
       running++;
+      this._upPaint(it, 0);
       this._upRun(it);
     }
   }
 
-  _upRender(it) {
-    const box = this.el.querySelector(".fp-uploads");
-    const row = document.createElement("div");
-    row.className = "fp-up";
-    row.innerHTML = `
-      <div class="fp-up-top">
-        <span class="fp-up-name"></span>
-        <span class="fp-up-pct"></span>
-        <button class="fp-act fp-up-x"></button>
-      </div>
-      <div class="fp-up-bar"><i></i></div>`;
-    row.querySelector(".fp-up-name").textContent = it.file.name;
-    row.querySelector(".fp-up-name").title = it.file.name;
-    row.querySelector(".fp-up-x").onclick = () => this._upCancel(it);
-    it.row = row;
-    box.appendChild(row);
-    box.hidden = false;
-    this._upPaint(it, 0);
-  }
-
+  // 上传的进度比例来自 xhr 的 loaded/total，这里折成「已收字节」交给共用行
   _upPaint(it, frac) {
-    const row = it.row;
-    if (!row) return;
-    const pct = row.querySelector(".fp-up-pct");
-    const bar = row.querySelector(".fp-up-bar i");
-    const x = row.querySelector(".fp-up-x");
-    row.dataset.state = it.state;
-    x.textContent = it.state === "error" ? "✕" : "⏹";
-    x.title = it.state === "error" ? _t("关闭") : (it.state === "queued" ? _t("移出队列") : _t("取消上传"));
-    if (it.state === "queued") {
-      pct.textContent = _t("排队中");
-      bar.style.width = "0";
-    } else if (it.state === "error") {
-      pct.textContent = it.err || _t("失败");
-      bar.style.width = "100%";
-    } else {
-      const total = it.file.size;
-      const p = Math.max(0, Math.min(1, frac));
-      pct.textContent = `${Math.floor(p * 100)}% · ${this._fmtSize(Math.round(p * total))}/${this._fmtSize(total)}`;
-      bar.style.width = `${Math.round(p * 100)}%`;
-    }
+    it.total = it.file.size;
+    it.got = (frac || 0) * it.file.size;
+    this._trPaint(it);
   }
 
   _upCancel(it) {
     if (it.state === "error" || it.state === "queued") {
-      this._upRemove(it);
+      this._trRemove(it);
       return;
     }
     if (it.state === "running") {
@@ -779,14 +881,6 @@ class FilePanel {
     }
   }
 
-  _upRemove(it) {
-    this._ups = this._ups.filter((u) => u !== it);
-    if (it.row) it.row.remove();
-    it.row = null;
-    const box = this.el.querySelector(".fp-uploads");
-    box.hidden = !box.children.length;
-  }
-
   // 一项结束（成功 / 失败 / 取消）：腾出槽位、补位排队项、全部结束后刷新目录
   _upEnd(it) {
     it.xhr = null;
@@ -795,7 +889,7 @@ class FilePanel {
         this._upOk = true;
         this._upPaint(it, 1);
       }
-      setTimeout(() => this._upRemove(it), it.state === "done" ? 1200 : 0);
+      setTimeout(() => this._trRemove(it), it.state === "done" ? 1200 : 0);
     }
     this._upPump();
     if (!this._ups.some((u) => u.state === "queued" || u.state === "running")) {
@@ -1166,5 +1260,6 @@ if (typeof module !== "undefined" && module.exports) {
     url: FilePanel.prototype._url,
     crumbTargets: FilePanel.prototype._crumbTargets,
     connLabel: FilePanel.prototype._connLabel,
+    xferLabel: FilePanel.prototype._trLabel,
   }};
 }

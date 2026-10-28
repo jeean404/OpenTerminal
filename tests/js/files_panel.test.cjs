@@ -505,3 +505,245 @@ test("Session.close() 必须收掉文件面板", () => {
   assert.match(app, /close\(\) \{[\s\S]{0,240}this\.filesPanel\.dispose\(\)/,
     "漏了就拿死 tabId 无限刷 404");
 });
+// --- 下载队列（与上传同构：并发 + 每项进度 + 可取消）-----------------------
+
+// 传输行用的最小 DOM 桩：querySelector 按选择器记名返回同一个桩节点，
+// 够断言进度文案 / 细条宽度；appendChild/remove 维护 children 供撤场断言
+function makeNode(tag = "div") {
+  const el = {
+    tagName: tag, children: [], className: "", textContent: "", innerHTML: "",
+    title: "", style: {}, dataset: {}, hidden: false, href: "", download: "",
+    _bySel: new Map(),
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+      contains(c) { return this._s.has(c); },
+    },
+    querySelector(sel) {
+      if (!this._bySel.has(sel)) this._bySel.set(sel, makeNode("span"));
+      return this._bySel.get(sel);
+    },
+    querySelectorAll() { return []; },
+    appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
+    remove() {
+      const p = this.parentNode;
+      if (!p) return;
+      const i = p.children.indexOf(this);
+      if (i >= 0) p.children.splice(i, 1);
+    },
+    click() { this.clicked = (this.clicked || 0) + 1; },
+  };
+  return el;
+}
+
+const tick = async (n = 1) => {
+  for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
+};
+// 收尾靠 setTimeout（成功行 1.2s 后自撤），数 tick 等不稳：有界轮询更实在
+const until = async (fn, n = 60) => {
+  for (let i = 0; i < n; i++) {
+    if (fn()) return true;
+    await tick(1);
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  return fn();
+};
+
+// 响应桩：total 是 Content-Length（0 = 服务端没给），size 是实际吐出的字节数。
+// gated=true 时每次 read() 要先吃一个 token（resp.feed()），测试才卡得住
+// 「块与块之间」的进度；默认整条流直接放完
+function fakeResponse({total, size, gated}) {
+  const half = Math.floor(size / 2);
+  const parts = [new Uint8Array(half), new Uint8Array(size - half)];
+  let i = 0, tokens = 0;
+  const waiters = [];
+  return {
+    ok: true,
+    status: 200,
+    headers: {get: (h) => (h === "content-length" && total ? String(total) : null)},
+    json: async () => ({}),
+    feed(n = 1) {
+      tokens += n;
+      while (tokens > 0 && waiters.length) waiters.shift()();
+    },
+    body: {getReader: () => ({
+      read: async () => {
+        if (gated) {
+          while (tokens <= 0) await new Promise((r) => waiters.push(r));
+          tokens--;
+        }
+        return i < parts.length
+          ? {done: false, value: parts[i++]}
+          : {done: true, value: undefined};
+      },
+    })},
+  };
+}
+
+// 下载面板桩：请求先挂在 held 上，release(spec) 才回响应（并交回响应桩）；
+// releaseAll() 放行本次与后续的全部请求，补位排队项也靠它跑完。落盘记 _dnSave。
+function makeDlPanel(total = 8) {
+  const saved = [];                       // [name, 字节数]
+  const held = [];
+  let auto = false;
+  global.document = {createElement: (tag) => makeNode(tag)};
+  global.authFetch = (url, opts) => new Promise((resolve, reject) => {
+    const entry = {
+      path: new URL(url, "http://t").searchParams.get("path"),
+      release: (spec) => {
+        const r = fakeResponse(spec || {total, size: total});
+        resolve(r);
+        return r;
+      },
+    };
+    const signal = opts && opts.signal;
+    if (signal) {
+      // abort 必须让请求整个失败（真实 fetch 也是 reject），否则读块会一直挂着
+      signal.addEventListener("abort", () => reject(new Error("aborted")));
+    }
+    held.push(entry);
+    if (auto) entry.release();
+  });
+  const box = makeNode();
+  const el = makeNode();
+  el.querySelector = (sel) => (sel === ".fp-uploads" ? box : makeNode());
+  const fp = Object.create(FilePanel.prototype);
+  fp.el = el;
+  fp.pane = makeNode();
+  fp.tabId = "t1";
+  fp._downs = [];
+  fp._toast = () => {};
+  fp._dnSave = (name, chunks) =>
+    saved.push([name, chunks.reduce((n, c) => n + c.length, 0)]);
+  return {
+    fp, box, held, saved,
+    releaseAll() { auto = true; held.forEach((h) => h.release()); },
+  };
+}
+
+test("传输行文案三态：排队 / 比例 / 不定长 / 失败原因", () => {
+  const fn = FilePanel.prototype._trLabel;
+  const self = FilePanel.prototype;
+  assert.equal(fn.call(self, {state: "queued"}), "排队中");
+  assert.equal(fn.call(self, {state: "error", err: "boom"}), "boom");
+  assert.equal(fn.call(self, {state: "error"}), "失败");
+  assert.equal(fn.call(self, {state: "running", got: 3, total: 7}),
+    "42% · 3 B/7 B");
+  // 服务端没给 Content-Length：只报字节，不假装有百分比
+  assert.equal(fn.call(self, {state: "running", got: 2048, total: 0}),
+    "已收 2.0 KiB");
+});
+
+test("下载排队：最多 DL_MAX 个并发，其余排队，完成一个补一个", async () => {
+  const {fp, box, held, saved, releaseAll} = makeDlPanel();
+  for (let i = 0; i < 8; i++) fp.download(`f${i}.bin`, `/srv/f${i}.bin`);
+  await tick(6);
+  assert.equal(fp._downs.length, 8, "8 项全进队");
+  assert.equal(box.children.length, 8, "每项一行，不互相覆盖");
+  assert.equal(fp._downs.filter((d) => d.state === "running").length, 5,
+    "并发上限 5");
+  assert.equal(fp._downs.filter((d) => d.state === "queued").length, 3);
+  assert.equal(held.length, 5, "排队项不许发起请求");
+
+  releaseAll();
+  assert.ok(await until(() => saved.length === 8), "8 项都落盘");
+  assert.equal(fp._downs.filter((d) => d.state === "done").length, 8,
+    "排队项要补位跑完");
+  assert.equal(saved.reduce((n, s) => n + s[1], 0), 64, "字节不丢不重");
+  assert.equal(saved.map((s) => s[0]).join(","),
+    "f0.bin,f1.bin,f2.bin,f3.bin,f4.bin,f5.bin,f6.bin,f7.bin", "按入队顺序补位");
+});
+
+test("下载行进度跟 Content-Length 走；无长度时不定长只报字节", async () => {
+  const {fp, box, held} = makeDlPanel();
+  fp.download("a.bin", "/srv/a.bin");
+  fp.download("b.bin", "/srv/b.bin");
+  await tick(6);
+  const rows = box.children;
+  const pct = (row) => row.querySelector(".fp-up-pct").textContent;
+  const bar = (row) => row.querySelector(".fp-up-bar i").style.width;
+  assert.equal(pct(rows[0]), "已收 0 B", "响应没回来前不许编百分比");
+  assert.ok(rows[0].classList.contains("indet"));
+
+  const r0 = held[0].release({total: 8, size: 8, gated: true});
+  await tick(3);
+  assert.equal(pct(rows[0]), "0% · 0 B/8 B", "拿到 Content-Length 就有分母");
+  assert.equal(rows[0].classList.contains("indet"), false);
+
+  r0.feed();                              // 放第一个块（4 B）
+  await tick(3);
+  assert.equal(pct(rows[0]), "50% · 4 B/8 B");
+  assert.equal(bar(rows[0]), "50%");
+
+  r0.feed(2);                             // 放第二个块 + 收流
+  await tick(3);
+  assert.equal(pct(rows[0]), "100% · 8 B/8 B");
+
+  // 第二项：服务端没给长度 → 不定长，只报字节
+  held[1].release({total: 0, size: 12, gated: true});
+  await tick(3);
+  assert.ok(rows[1].classList.contains("indet"), "不定长走滑条动画");
+  assert.match(pct(rows[1]), /^已收 /, "没长度就只报字节");
+  assert.equal(bar(rows[1]), "40%", "不定长给滑条留一段来回走");
+});
+
+test("下载可取消：排队项直接移出，进行中 abort 且不落盘", async () => {
+  const {fp, held, saved, releaseAll} = makeDlPanel();
+  const names = ["a", "b", "c", "d", "e", "f", "g"];
+  names.forEach((n) => fp.download(`${n}.bin`, `/srv/${n}.bin`));
+  await tick(6);
+  assert.equal(held.length, 5, "5 项在跑，2 项排队");
+
+  fp._dnCancel(fp._downs[6]);             // 排队项 g：移出队列，不占槽位
+  assert.equal(fp._downs.length, 6);
+  assert.equal(held.length, 5);
+
+  fp._dnCancel(fp._downs[0]);             // 在跑项 a：abort
+  assert.ok(await until(() => !fp._downs.some((d) => d.name === "a.bin")),
+    "取消项就地撤行");
+
+  releaseAll();
+  assert.ok(await until(() =>
+    fp._downs.filter((d) => d.state === "done").length === 5),
+  "腾出的槽位要补位（f 顶上）");
+  assert.equal(fp._downs.filter((d) => d.state === "error").length, 0,
+    "取消不是失败，不许挂错误行");
+  assert.equal(saved.map((s) => s[0]).join(","),
+    "b.bin,c.bin,d.bin,e.bin,f.bin", "取消的不许落盘");
+});
+
+test("传输行撤场：出队 + 摘 DOM，空了整块收起", () => {
+  const {fp, box} = makeDlPanel();
+  const it = {name: "a.bin", path: "/srv/a.bin", dir: "down", queue: [],
+              state: "done", row: null, total: 8, got: 8};
+  it.queue.push(it);
+  fp._trRender(it);
+  assert.equal(box.children.length, 1);
+  assert.equal(box.hidden, false);
+  assert.equal(it.row.querySelector(".fp-up-name").textContent, "a.bin");
+  assert.equal(it.row.querySelector(".fp-up-dir").textContent, "📥");
+  fp._trRemove(it);
+  assert.equal(box.children.length, 0);
+  assert.equal(box.hidden, true, "传输列表空了就收起");
+  assert.equal(it.queue.length, 0, "出队不留尾巴");
+});
+
+test("传输行共用：上传项也走同一套行渲染（方向图标 📤）", () => {
+  const {fp} = makeDlPanel();
+  const file = {name: "u.bin", size: 8};
+  const it = {file, name: file.name, dir: "up", queue: [], state: "queued",
+              row: null, total: file.size, got: 0};
+  it.queue.push(it);
+  fp._trRender(it);
+  assert.equal(it.row.dataset.dir, "up");
+  assert.equal(it.row.querySelector(".fp-up-dir").textContent, "📤");
+  assert.equal(it.row.querySelector(".fp-up-x").title, "移出队列");
+
+  it.state = "running";                   // 进 running 就不该再写「排队中」
+  fp._upPaint(it, 0.5);                   // xhr 的比例折成字节交给共用行
+  assert.equal(it.row.querySelector(".fp-up-pct").textContent, "50% · 4 B/8 B");
+  assert.equal(it.row.querySelector(".fp-up-bar i").style.width, "50%");
+  assert.equal(it.row.querySelector(".fp-up-x").title, "取消上传");
+});
