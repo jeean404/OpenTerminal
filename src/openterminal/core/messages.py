@@ -80,12 +80,14 @@ class ServerMsg:
     index: int = 0                 # cmdset 当前行号（1 起；encode_server 省略 0）
     total: int = 0                 # cmdset 总行数
     auth_kind: str = ""            # ask_password：省略=主机认证；"cmdset"=命令集密码弹窗
+    policy_mode: str = ""          # 当前会话审批模式（ready/status 附带）：tiered | allow-all
 
 
 @dataclass
 class ClientMsg:
-    type: str                      # raw(键盘字节) | decision | auth | interrupt | mode | resize | change_model | close | submit | pad | boundary_settled | new_session
-    text: str = ""                 # mode: "ssh" | "agent"；auth: 密码文本；submit: 前端拦截的自然语言整行
+    type: str                      # raw(键盘字节) | decision | auth | interrupt | mode | resize | change_model | close | submit | pad | boundary_settled | new_session | set_policy_mode
+    text: str = ""                 # mode: "ssh" | "agent"；auth: 密码文本；submit: 前端拦截的自然语言整行；
+                                   # set_policy_mode: 目标审批模式 "tiered" | "allow-all"
     data: bytes = b""              # raw 按键字节（二进制帧整帧直发 PTY）
     decision: dict | None = None
     auth_kind: str = ""            # password | password_remember | password_cancel

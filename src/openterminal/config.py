@@ -194,7 +194,7 @@ class ShellConfig:
 
 @dataclass
 class PolicyConfig:
-    mode: str = "tiered"  # tiered | approve-all | deny-all
+    mode: str = "tiered"  # tiered | approve-all | deny-all | allow-all
     auto_extra: list[str] = field(default_factory=list)
     approve_extra: list[str] = field(default_factory=list)
     deny_extra: list[str] = field(default_factory=list)

@@ -646,7 +646,8 @@ class PipelineCore:
             distro=self.profile.distro or "",
             prompt=self._cur_prompt,
             model=self._model.model, models=self._models,
-            interactive=1 if self._interactive else 0))
+            interactive=1 if self._interactive else 0,
+            policy_mode=self.policy.mode))
         if self._interactive:
             hint = ("shell 集成已就绪：按键直达终端（Tab 补全 / ↑ 历史 / Ctrl+R 搜索"
                     "原生可用）；命令直接执行，自然语言交给 AI；? 前缀强制 AI，"
@@ -1000,6 +1001,17 @@ class PipelineCore:
             # 总结卡「开启新会话」：只重置模型上下文，不清屏不动 PTY
             #（界面等效回车，由前端发）；与 /clear 的区别就是没有清屏
             self._reset_context()
+        elif msg.type == "set_policy_mode":
+            # 底部审批按钮：仅作用于当前会话（不写回配置文件），
+            # 且只影响之后认颗的命令，已在等审批的卡不被补判。
+            mode = msg.text
+            if mode in ("tiered", "allow-all") and mode != self.policy.mode:
+                self.policy.mode = mode
+                label = ("全部允许（黑名单外免审批）" if mode == "allow-all"
+                         else "分级审批")
+                await self.emit_msg(ServerMsg(
+                    type="status", text=f"审批模式已切换为：{label}",
+                    policy_mode=mode))
 
     # --- 按键 / AI 取消 ---
     async def _on_keys(self, data: bytes) -> None:
@@ -1099,7 +1111,8 @@ class PipelineCore:
             type="ready", tab_id=self.tab_id, host=self._target_host,
             user=self._target_user, distro=self.profile.distro or "",
             prompt=self._cur_prompt,
-            interactive=1 if self._interactive else 0))
+            interactive=1 if self._interactive else 0,
+            policy_mode=self.policy.mode))
         self.pump.start()
         if self._interactive:
             await self.session.send_raw(b"\x0c")

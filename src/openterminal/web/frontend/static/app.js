@@ -335,6 +335,10 @@ class Session {
         <span class="status-text" id="status-${this.tabId}"></span>
         <span class="status-meta">
           <span class="status-cmdset" id="cs-${this.tabId}"></span>
+          <span class="policy-toggle" id="policy-${this.tabId}" role="tablist" title="${_t("命令审批模式（仅本会话生效，不影响其他会话/下次连接）")}">
+            <button data-policy="tiered" class="on" tabindex="-1">${_t("分级审批")}</button>
+            <button data-policy="allow-all" tabindex="-1">${_t("全部允许")}</button>
+          </span>
           <button class="run-text-btn" id="runtext-${this.tabId}" tabindex="-1" title="${_t("粘贴长文本并作为一条命令执行")}">${_t("执行长文本")}</button>
           <button class="status-newtask" id="newtask-${this.tabId}" tabindex="-1" title="${_t("开启新会话（/clear）：清掉本轮 AI 卡片与任务上下文")}">${_t("新会话")}</button>
           <button class="status-stop" id="stop-${this.tabId}" hidden tabindex="-1" title="${_t("停止当前任务（Ctrl+C）")}">⏹</button>
@@ -346,6 +350,9 @@ class Session {
       </div>`;
     document.getElementById("panes").appendChild(pane);
     pane.querySelector(".run-text-btn").onclick = runTextBtn;
+    pane.querySelectorAll(".policy-toggle button").forEach(btn => {
+      btn.onclick = () => this._setPolicyMode(btn.dataset.policy);
+    });
     this.paneEl = pane;
 
     this.filesPanel = new FilePanel(this);
@@ -3207,6 +3214,22 @@ if (inView) {
     this._taskStart = 0;
   }
 
+  // 底部「分级审批 / 全部允许」互斥按钮：仅切换当前会话的策略模式，不落盘、
+  // 不影响已在等待中的审批卡（只管之后新判的命令）。
+  _setPolicyMode(mode) {
+    if (mode !== "tiered" && mode !== "allow-all") return;
+    this.sendJson({type: "set_policy_mode", text: mode});
+    this._renderPolicyMode(mode);   // 乐观更新；服务端 status 回执会再次兜底同步
+  }
+
+  _renderPolicyMode(mode) {
+    const seg = document.getElementById(`policy-${this.tabId}`);
+    if (!seg) return;
+    seg.querySelectorAll("button").forEach(btn => {
+      btn.classList.toggle("on", btn.dataset.policy === mode);
+    });
+  }
+
   _renderModelSelect(models, current) {
     const sel = document.getElementById(`model-${this.tabId}`);
     if (!sel) return;
@@ -3327,6 +3350,7 @@ if (inView) {
         const hostEl = document.getElementById(`host-${this.tabId}`);
         if (hostEl) hostEl.textContent = msg.host || "";
         this._renderModelSelect(msg.models, msg.model);
+        this._renderPolicyMode(msg.policy_mode || "tiered");
         // 本机终端没有远程文件：知道会话类型后收掉 📁 入口（否则是个死按钮）
         if (this.filesPanel) this.filesPanel.probeSupport();
         // 集成失败回退 = 纯终端（无 AI），不显示模型信息
@@ -3351,6 +3375,7 @@ if (inView) {
         break;
       }
       case "status":
+        if (msg.policy_mode) this._renderPolicyMode(msg.policy_mode);
         if (this._awaitWelcome) {   // ready 后第一条 status = 横幅文案
           this._awaitWelcome = false;
           this._welcomeText = msg.text || "";

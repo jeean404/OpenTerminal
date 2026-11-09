@@ -1070,6 +1070,23 @@ body.sidebar-collapsed #btn-show-sidebar { display: block; }
 .statusbar .status-newtask:hover,
 .statusbar .run-text-btn:hover { color: var(--text); border-color: var(--muted); }
 
+/* --- 状态栏「分级审批 / 全部允许」互斥按钮：视觉上对齐 .seg 分段控件，
+   但用独立类名（不挂 .seg），避免被 pane-head 的 ".seg button" 批量绑定
+   选中、点击处理器被 setMode 覆盖（两套 .seg 都在同一个 pane 子树下）。 */
+.statusbar .policy-toggle {
+  display: flex; border: 1px solid var(--border); border-radius: 5px;
+  overflow: hidden; flex-shrink: 0;
+}
+.statusbar .policy-toggle button {
+  padding: 2px 9px; font-size: calc(12px * var(--fs)); font-family: var(--sans);
+  color: var(--muted); background: var(--panel2);
+}
+.statusbar .policy-toggle button + button { border-left: 1px solid var(--border); }
+.statusbar .policy-toggle button:hover { color: var(--text); }
+.statusbar .policy-toggle button.on {
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+}
+
 /* --- 状态栏 --- */
 .statusbar {
   display: flex; align-items: center; gap: 12px;

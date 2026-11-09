@@ -138,6 +138,16 @@ def test_extras_and_modes():
     assert Policy(mode="approve-all").classify("ls").level == "approve"
 
 
+def test_allow_all_skips_approval_but_preserves_deny_rules():
+    p = Policy(mode="allow-all", approve_extra=["git push"])
+    for cmd in ["rm file.txt", "git push", "somethingtotallyunknown --x"]:
+        assert p.classify(cmd).level == "auto", cmd
+    for cmd in ["shutdown -h now", "reboot", "rm -rf /", "mkfs.ext4 /dev/sda1"]:
+        assert p.classify(cmd).level == "deny", cmd
+    assert Policy(mode="allow-all", deny_extra=["git push"]).classify(
+        "git push").level == "deny"
+
+
 def test_decision_has_reason():
     d = Policy().classify("sudo rm x")
     assert d.level == "approve"

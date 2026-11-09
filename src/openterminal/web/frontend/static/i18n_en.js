@@ -296,6 +296,10 @@ I18N.en = {
   "命令集 {0}/{1}": "Command set {0}/{1}",
   "命令集执行完毕": "Command set finished",
   "命令集暂停：请在终端输入密码 ": "Command set paused: enter the password in the terminal ",
+  "分级审批": "Tiered approval",
+  "全部允许": "Allow all",
+  "命令审批模式（仅本会话生效，不影响其他会话/下次连接）":
+    "Command approval mode (applies to this session only; does not affect other sessions or future connections)",
   "终端当前在": "The terminal is currently in ",
   "连接状态": "Connection status",
   "已连接 {0}": "Connected to {0}",

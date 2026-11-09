@@ -323,7 +323,7 @@ class Policy:
             return Decision("deny", ["用户 deny_extra 规则"])
         if norm in self.auto_extra:
             return Decision("auto", [])
-        if norm in self.approve_extra:
+        if norm in self.approve_extra and self.mode != "allow-all":
             return Decision("approve", ["用户 approve_extra 规则"])
 
         if self.mode == "deny-all":
@@ -337,6 +337,10 @@ class Policy:
             d = _classify_segment(seg)
             if order[d.level] > order[worst.level]:
                 worst = d
+        # allow-all：免审批执行，但 deny 级（灾难性操作，如黑名单 4 命令/
+        # 递归删根/格式化/直写块设备/fork 炸弹）仍然拦截，不随模式放开。
+        if self.mode == "allow-all" and worst.level == "approve":
+            return Decision("auto", [])
         return worst
 
     # 审批理由中属「无害」的白名单：仅命中这些 → normal（蓝框），其余高危（红框）
