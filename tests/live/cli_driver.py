@@ -96,7 +96,7 @@ def make_scripted_runner(scenario: str, core: "CliCore") -> type:
 
     class ScriptedRunner:
         """事件形态与真实 TaskRunner 完全同形（见模块头侦查结论 1-6）。"""
-        def __init__(self, agent, thread_id, max_tool_turns: int = 10, *,
+        def __init__(self, agent, thread_id, max_tool_turns: int = 100, *,
                      on_event=None) -> None:
             self.agent = agent
             self.cfg = {"configurable": {"thread_id": thread_id}}

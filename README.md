@@ -94,7 +94,7 @@ Everything else goes in `~/.openterminal/config.toml`:
 [shell]
 timeout_default = 120        # per-command wait budget (seconds)
 max_output_bytes = 102400    # per-command output truncation
-max_tool_turns = 10          # agent tool-call turn budget
+max_tool_turns = 100         # agent tool-call turn budget
 
 [policy]
 mode = "tiered"              # tiered | approve-all | deny-all

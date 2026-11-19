@@ -189,7 +189,7 @@ class ModelConfig:
 class ShellConfig:
     timeout_default: int = 120
     max_output_bytes: int = 102_400
-    max_tool_turns: int = 10
+    max_tool_turns: int = 100
 
 
 @dataclass
@@ -304,7 +304,7 @@ class Config:
             shell=ShellConfig(
                 timeout_default=int(s.get("timeout_default", 120)),
                 max_output_bytes=int(s.get("max_output_bytes", 102_400)),
-                max_tool_turns=int(s.get("max_tool_turns", 10)),
+                max_tool_turns=int(s.get("max_tool_turns", 100)),
             ),
             policy=PolicyConfig(
                 mode=p.get("mode", "tiered"),

@@ -12,7 +12,7 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.model.model == "claude-sonnet-4-6"
     assert cfg.shell.timeout_default == 120
     assert cfg.shell.max_output_bytes == 102_400
-    assert cfg.shell.max_tool_turns == 10
+    assert cfg.shell.max_tool_turns == 100
     assert cfg.policy.mode == "tiered"
     assert cfg.targets["default"].mode == "local"
     assert app_dir() == tmp_path

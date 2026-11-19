@@ -103,7 +103,7 @@ class TaskRunner:
     """一次用户任务的执行器：处理流式事件、中断暴露、resume 与轮次预算。"""
 
     def __init__(
-        self, agent, thread_id: str, max_tool_turns: int = 10, *,
+        self, agent, thread_id: str, max_tool_turns: int = 100, *,
         on_event: Callable[[TaskEvent], None] | None = None,
     ) -> None:
         self.agent = agent
@@ -157,8 +157,10 @@ class TaskRunner:
         self.interrupt_payload = None
         # 偏离计划（最小）：langgraph 1.2.11 中 astream(recursion_limit=...)
         # 属于已废弃且被静默忽略的 kwarg（实测不会生效，图会跑到默认上限），
-        # 必须写进 config 顶层键才生效；实测每轮模型+工具约耗 3 个 superstep。
-        run_cfg = {**self.cfg, "recursion_limit": self.max_tool_turns * 2 + 4}
+        # 必须写进 config 顶层键才生效；实测每轮模型+工具约耗 3 个 superstep，
+        # 故按 3/轮 + 余量留够 recursion_limit，否则预算还没跑满就先撞图上限，
+        # 用户看到的「已达到工具调用预算（N 轮）」会小于 N。
+        run_cfg = {**self.cfg, "recursion_limit": self.max_tool_turns * 3 + 6}
         self._last_progress = time.monotonic()
         q: asyncio.Queue = asyncio.Queue()
         _dbg("drive: astream start")

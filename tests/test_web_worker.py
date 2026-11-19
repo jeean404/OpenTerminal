@@ -342,7 +342,7 @@ async def test_worker_presenter_queue_cleanup(monkeypatch):
 class FakeToolRunner(FakeRunner):
     """非 execute 工具调用：tool_start/tool_end 实时事件（工具卡通路）。"""
 
-    def __init__(self, agent, thread_id, *, max_tool_turns=10, on_event=None):
+    def __init__(self, agent, thread_id, *, max_tool_turns=100, on_event=None):
         self.on_event = on_event
 
     async def run(self, text):
@@ -1319,7 +1319,7 @@ class FakeExecRunner(FakeRunner):
     """execute 命令卡 + HITL 审批关联（Phase 2）：tool_start 带完整
     command/预判字段，interrupt_payload 按 (name,command) 认领对回命令卡。"""
 
-    def __init__(self, agent, thread_id, *, max_tool_turns=10, on_event=None):
+    def __init__(self, agent, thread_id, *, max_tool_turns=100, on_event=None):
         self.on_event = on_event
         self._claims = []      # (name, command, seq) 有序多重表（runner 同义）
         self.resumed = None

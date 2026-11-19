@@ -185,7 +185,7 @@ class FakeRunner:
     output_tokens = 45
     interrupt_payload = None
 
-    def __init__(self, agent, thread_id, *, max_tool_turns=10, on_event=None):
+    def __init__(self, agent, thread_id, *, max_tool_turns=100, on_event=None):
         self.on_event = on_event
 
     def claim_seq(self, name, command):

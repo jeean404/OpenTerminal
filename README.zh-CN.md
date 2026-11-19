@@ -93,7 +93,7 @@ pip install -e .
 [shell]
 timeout_default = 120        # 单条命令最长等待秒数
 max_output_bytes = 102400    # 单条命令输出截断
-max_tool_turns = 10          # Agent 工具调用轮次预算
+max_tool_turns = 100         # Agent 工具调用轮次预算
 
 [policy]
 mode = "tiered"              # tiered(分级) | approve-all | deny-all
