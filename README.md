@@ -86,7 +86,7 @@ pip install -e .
 
 ## Configuration
 
-Model gateways are managed under **Settings → Models**: pick the protocol, URL, model and API key, then enable it — newly opened tabs use it, existing ones don't switch. Profile metadata is stored in `~/.openterminal/connections.db` and API keys in the OS credential store, never in the project config. The CLI stays compatible with environment variables and `[model]` in `config.toml`.
+Model gateways are managed under **Settings → Models**: pick the protocol, URL, model and API key, then enable it — newly opened or continued tabs use it in preference to `.env`, while existing tabs don't switch. No separate `.env` model protocol configuration is required for an active profile. Profile metadata is stored in `~/.openterminal/connections.db` and API keys in the OS credential store, never in the project config. The CLI stays compatible with environment variables and `[model]` in `config.toml`.
 
 Everything else goes in `~/.openterminal/config.toml`:
 
@@ -124,6 +124,18 @@ The config directory can be moved with `OPENTERMINAL_HOME` (the test suite uses 
 | Shells | zsh and bash ≥ 4 are fully featured; bash 3.2 (still shipped by macOS) can't see `READLINE_LINE`, so the natural-language trigger doesn't work there |
 | Python | 3.11+ (needed for pipx / source installs; not for the pre-built binaries) |
 | Model gateways | Anthropic-compatible and OpenAI-compatible, multiple profiles |
+| Image input | Web accepts PNG / JPG / WebP uploads or paste (up to 4 images, 4 MB each / 8 MB total); the model must support vision |
+| Conversation history | Select a Web connection's history to restore its terminal/cards and continue with the full Agent state in the same record; records can also be deleted, and historical commands are never re-run. Close the terminal using a record before reopening or deleting it |
+
+Web conversation history is stored locally in `~/.openterminal/conversation_history.db`.
+The database may contain image data and command output and is not encrypted; protect
+the OpenTerminal home directory accordingly. Existing JSONL transcripts are not
+classified or imported into this new per-connection history. Older history entries
+without recorded interface events are reconstructed from messages and cannot
+fully reproduce the original layout.
+Records without a completed state can only be replayed read-only. Interrupted
+records with a completed state resume from the last completed conversation;
+the interrupted task is not automatically rerun.
 
 ## Architecture
 

@@ -52,11 +52,13 @@ def test_take_new_is_incremental_and_never_repeats():
     first = h.take_new()
     assert "docker ps" in first
     assert h.take_new() == "", "同一批命令不能一轮轮重复注入"
+    assert h.sent_sections() == [first]
 
     h.record("ls -la", 0, "")
     second = h.take_new()
     assert "ls -la" in second
     assert "docker ps" not in second, "只给增量，不重发旧的"
+    assert h.sent_sections() == [first, second]
 
 
 def test_success_keeps_short_tail_failure_keeps_long_tail():

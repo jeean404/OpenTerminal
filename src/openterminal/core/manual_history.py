@@ -81,6 +81,7 @@ class ManualHistory:
         self._items: deque[dict] = deque(maxlen=max(1, limit))
         self._seq = 0
         self._sent_seq = 0
+        self._sent_sections: list[str] = []
 
     def record(self, command: str, exit_code, output: bytes | str = b"",
                *, cwd: str | None = None) -> None:
@@ -111,10 +112,19 @@ class ManualHistory:
         if not fresh:
             return ""
         self._sent_seq = fresh[-1]["seq"]
-        return format_section(fresh)
+        section = format_section(fresh)
+        self._sent_sections.append(section)
+        return section
+
+    def sent_sections(self) -> list[str]:
+        """已真正交给模型的手动命令摘要（仅供完成态历史持久化）。"""
+        return list(self._sent_sections)
 
     def clear(self) -> None:
         self._items.clear()
+        self._sent_sections.clear()
+        self._seq = 0
+        self._sent_seq = 0
 
     def __len__(self) -> int:
         return len(self._items)

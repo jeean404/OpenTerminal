@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 
 from .connections.db import connect
 from .connections.secrets import (
@@ -13,7 +14,7 @@ from .connections.secrets import (
     load_model_api_key,
     store_model_api_key,
 )
-from .config import ModelConfig
+from .config import Config, ModelConfig, MODEL_PROTOCOL_CONFLICT, MODEL_PROTOCOL_MISSING
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS model_profiles(
@@ -214,4 +215,15 @@ def active_model_config(fallback: ModelConfig) -> ModelConfig:
         api_key=load_model_api_key(active_id),
         api_key_env="",
         models=[profile["model"]],
+    )
+
+
+def config_with_active_model(cfg: Config) -> Config:
+    model = active_model_config(cfg.model)
+    if model is cfg.model:
+        return cfg
+    return replace(
+        cfg, model=model,
+        errors=[error for error in cfg.errors
+                if error not in (MODEL_PROTOCOL_MISSING, MODEL_PROTOCOL_CONFLICT)],
     )

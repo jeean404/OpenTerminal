@@ -38,7 +38,8 @@ function modalShell(title, bodyHtml, buttons, opts = {}) {
   const my = ++_modalSeq;
   delete root.dataset.pw;   // 新模态顶掉密码模态标记：代关只认密码模态
   const btns = buttons.map((b, i) =>
-    `<button class="${b.primary ? "primary" : ""}" data-i="${i}">` +
+    `<button class="${b.primary ? "primary" : b.danger ? "danger" : ""}"` +
+    ` data-i="${i}"${b.disabled ? " disabled" : ""}>` +
     `${_esc(b.label)}</button>`).join("");
   root.innerHTML = `
     <div class="modal">

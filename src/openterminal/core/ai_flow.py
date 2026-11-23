@@ -60,7 +60,7 @@ class AiFlow:
         for name, val in (
             ("_ai_task", None),         # 在跑的 AI 任务（None = 空闲）
             ("_ai_ping_at", 0.0),       # AI 任务最近一次有产出（僵尸判据）
-            ("_ai_queue", []),          # AI 忙时排队 (line, hooked)
+            ("_ai_queue", []),          # AI 忙时排队 (line, hooked[, images])
             ("_suppress_ai_report", None),  # 兜底已启动后迟到的重复上报
             ("_fallback_task", None),   # _submit_fallback 句柄（测试/关闭可取消）
             ("_rescue_open", False),    # 救援卡待决策（最多一张，防连败刷屏）
@@ -105,7 +105,45 @@ class AiFlow:
     async def _rebuild_agent(self) -> None:
         """重建 agent 并刷新 MCP 工具（换模型 / 换系统方言 / 改工具开关）。"""
         tools = await self._gather_tools()
-        await asyncio.to_thread(self._build_agent_now, tools)
+        previous = (self.core.agent, self.core.allowed, self.core.backend)
+        try:
+            await asyncio.to_thread(self._build_agent_now, tools)
+            if getattr(self.core, "_last_completed_values", None) is not None:
+                self.core._pending_history_manual = list(
+                    getattr(self.core, "_history_manual_sections", []))
+            await self._restore_agent_context()
+        except Exception:
+            self.core.agent, self.core.allowed, self.core.backend = previous
+            raise
+
+    async def _restore_agent_context(self) -> None:
+        history = getattr(self.core, "_history", None)
+        if history is None:
+            return
+        from .conversation_history import restore_completed
+
+        values = getattr(self.core, "_last_completed_values", None)
+        loaded_history = False
+        if values is None and not self.core._history_restore_loaded:
+            resume_id = self.core._history_resume_id
+            if resume_id is not None:
+                values, manual = await asyncio.to_thread(
+                    history.load_snapshot, resume_id)
+                self.core._history_base_manual_sections = manual
+                self.core._history_manual_sections = manual
+                self.core._pending_history_manual = list(manual)
+                loaded_history = True
+            else:
+                self.core._history_restore_loaded = True
+        if values is not None:
+            await restore_completed(
+                self.core.agent,
+                {"configurable": {
+                    "thread_id": f"{self.core.tab_id}#c{self.core._ctx_epoch}"}},
+                values)
+            if loaded_history:
+                self.core._last_completed_values = values
+                self.core._history_restore_loaded = True
 
     async def _ensure_agent(self) -> None:
         """首个 AI 任务时构建 agent，已建则复用。self.core.agent/backend 从 None
@@ -140,22 +178,29 @@ class AiFlow:
             pass
 
     # --- 命令历史长期记忆（SQLite）---
-    def _start_ai(self, line: str, hooked: bool = False) -> None:
+    def _start_ai(self, line: str, hooked: bool = False,
+                  images: list[str] | None = None) -> None:
         self.core._ai_ping_at = time.monotonic()   # 僵尸回收基准：任务起点即有锚
         # 任务起跑未走 hook 上报（外部触发链）→ _run_task 必有重注入在途：
         # _shell_pad 的 60s 节流补注入对本次任务冗余（pad ack 不必等它）
         self.core._reinject_pending = not hooked
-        self.core._ai_task = asyncio.create_task(self._ai_flow(line, hooked))
-    async def _ai_flow(self, line: str, hooked: bool = False) -> None:
+        flow = (self._ai_flow(line, hooked) if images is None
+                else self._ai_flow(line, hooked, images))
+        self.core._ai_task = asyncio.create_task(flow)
+    async def _ai_flow(self, line: str, hooked: bool = False,
+                       images: list[str] | None = None) -> None:
         try:
-            if line.startswith("/"):
+            if images is None and line.startswith("/"):
                 if await self._handle_slash(line.strip()):
                     return
                 # 未知斜杠命令（/clearn 打错字、无 +x 的 /x.sh）：不静默吞——
                 # 落回正常任务（与 CLI 语义一致：未知 / 交 LLM 判定），否则
                 # hook 蓝色重绘后用户零反馈（真机：以为终端卡死）
             text = line.lstrip("?").strip() or line
-            await self._run_task(text, hooked)
+            if images is None:
+                await self._run_task(text, hooked)
+            else:
+                await self._run_task(text, hooked, images)
         except asyncio.CancelledError:
             # 用户中止（Ctrl+C/⏹）语义发 interrupt（不是 error）：前端按
             # 「中止」收束——流式未渲染完毕的卡整卡移除，不留下半截卡
@@ -174,9 +219,13 @@ class AiFlow:
                 _dbg("curtain opened")
             except Exception:                # noqa: BLE001 - 收尾放行不能盖错误
                 pass
+            await self._persist_history_ui()
             if self.core._ai_queue and not self.core._closed:
                 _q = self.core._ai_queue.pop(0)
-                self._start_ai(_q[0], _q[1] if len(_q) > 1 else False)
+                if len(_q) > 2:
+                    self._start_ai(_q[0], _q[1], _q[2])
+                else:
+                    self._start_ai(_q[0], _q[1] if len(_q) > 1 else False)
             _dbg("ai_flow done")
 
     # --- Agent/Shell 显示模式切换 ---
@@ -185,6 +234,40 @@ class AiFlow:
             self.core._ai_queue.append((line, hooked))   # 忙：排队，结束后依序回放
             return
         self._start_ai(line, hooked)
+
+    async def _on_image_submit(self, text: str, images: object) -> None:
+        """Start a Web image prompt without sending its text through the shell."""
+        from ..web.protocol import validate_image_data_urls
+
+        if not isinstance(text, str):
+            await self.core.emit_msg(ServerMsg(
+                type="status", text="图片问题文本格式无效。"))
+            return
+        try:
+            validated = validate_image_data_urls(images)
+        except ValueError as exc:
+            await self.core.emit_msg(ServerMsg(
+                type="status", text=f"图片输入无效：{exc}"))
+            return
+        if self.core.session is None:
+            await self.core.emit_msg(ServerMsg(
+                type="status", text="终端尚未连接，无法提交图片。"))
+            return
+        if not self.core._interactive:
+            await self.core.emit_msg(ServerMsg(
+                type="status", text="当前终端未启用 AI 集成，无法提交图片。"))
+            return
+        if self.core._display != "agent":
+            await self.core.emit_msg(ServerMsg(
+                type="status", text="请切换到 Agent 模式后再提交图片。"))
+            return
+        prompt = text.strip() or "请描述这张图片。"
+        if self.core._ai_task is not None:
+            self.core._ai_queue.append((prompt, True, validated))
+            await self.core.emit_msg(ServerMsg(
+                type="status", text="图片问题已排队，将在当前 AI 任务结束后处理。"))
+            return
+        self._start_ai(prompt, hooked=True, images=validated)
     async def _on_frontend_line(self, text: str, dirty: bool = False,
                                 typed: bool = True) -> None:
         """外部触发链：前端在 agent 模式拦下的整行。
@@ -486,7 +569,28 @@ class AiFlow:
                 "tokens_in": ((r.input_tokens or r.est_input_tokens) if r else 0),
                 "tokens_out": ((r.output_tokens or r.est_output_tokens) if r else 0)}))
 
-    async def _run_task(self, text: str, hooked: bool = False) -> None:
+    async def _run_task(self, text: str, hooked: bool = False,
+                        images: list[str] | None = None) -> None:
+        history = getattr(self.core, "_history", None)
+        try:
+            if history is not None and self.core._history_conversation_id is None:
+                if self.core._history_resume_id is not None:
+                    self.core._history_conversation_id = self.core._history_resume_id
+                else:
+                    self.core._history_conversation_id = await asyncio.to_thread(
+                        history.start,
+                        target_key=self.core._history_target_key,
+                        target_name=self.core.target_name,
+                        title=text[:80],
+                        model=self.core._model.model)
+            if history is not None:
+                await asyncio.to_thread(
+                    history.mark_interrupted, self.core._history_conversation_id)
+        except Exception as exc:  # noqa: BLE001 - 保存失败提示，当前对话仍可继续
+            await self.core.emit_msg(ServerMsg(
+                type="status",
+                text=f"对话历史初始化失败：{type(exc).__name__}: {exc}"))
+            self.core._history = None
         self.core.transcript.append("user", text=text)
         self.core._task_cmd_started = False
         self.core._tool_idx_map = {}   # 跨任务残留的局部 index 映射作废（序号不回绕）
@@ -598,9 +702,22 @@ class AiFlow:
             on_event=_live,
         )
         self._seg.runner = runner   # 心跳读 token 计数
+        model_text = text
+        pending_manual = list(getattr(self.core, "_pending_history_manual", []))
+        manual_source = getattr(self.core, "manual_history", None)
+        manual_start = (
+            len(manual_source.sent_sections())
+            if pending_manual and manual_source is not None else 0)
+        if pending_manual:
+            model_text += "\n\n" + "\n\n".join(pending_manual)
         try:
-            events = await runner.run(text)
+            events = (await runner.run(model_text, images=images) if images
+                      else await runner.run(model_text))
             await self._handle_events(runner, events)
+            self.core._pending_history_manual = []
+            await self._persist_completed_history(
+                runner, consume_base=bool(pending_manual),
+                manual_start=manual_start)
         except Exception as e:  # noqa: BLE001 - 任务异常发 error 事件让前端收尾
             # 不能只靠 _run 兜底的 status——前端靠 error/final 停计时、收卡片
             self._flush_seg(failed=True)   # 残段落格标失败（非中断留痕）
@@ -632,6 +749,52 @@ class AiFlow:
                 type="usage", tokens_in=self.core._tokens_in,
                 tokens_out=self.core._tokens_out,
                 estimated=not (runner.input_tokens or runner.output_tokens)))
+        await self._persist_history_ui()
+
+    async def _persist_completed_history(
+            self, runner, *, consume_base: bool = False,
+            manual_start: int = 0) -> None:
+        history = getattr(self.core, "_history", None)
+        conversation_id = getattr(self.core, "_history_conversation_id", None)
+        if history is None or conversation_id is None:
+            return
+        snapshot = await self.core.agent.aget_state(runner.cfg)
+        if snapshot.next:
+            await self._persist_history_ui()
+            return
+        manual = ([] if consume_base else list(
+            getattr(self.core, "_history_base_manual_sections", [])))
+        source = getattr(self.core, "manual_history", None)
+        if source is not None:
+            sections = source.sent_sections()
+            manual.extend(sections[manual_start:] if consume_base else sections)
+        try:
+            await asyncio.to_thread(
+                history.save_complete, conversation_id, snapshot.values,
+                manual, model=self.core._model.model)
+        except Exception as exc:  # noqa: BLE001 - 保存失败必须对用户可见
+            await self.core.emit_msg(ServerMsg(
+                type="status",
+                text=f"对话历史保存失败：{type(exc).__name__}: {exc}"))
+            return
+        self.core._last_completed_values = snapshot.values
+        self.core._history_manual_sections = manual
+        self.core._history_base_manual_sections = []
+
+    async def _persist_history_ui(self) -> None:
+        history = getattr(self.core, "_history", None)
+        conversation_id = getattr(self.core, "_history_conversation_id", None)
+        if history is None or conversation_id is None:
+            return
+        frames = list(getattr(self.core, "_history_ui_frames", []))
+        try:
+            await asyncio.to_thread(
+                history.save_ui_frames, conversation_id, frames)
+        except Exception as exc:  # noqa: BLE001 - 回放保存失败必须对用户可见
+            await self.core.emit_msg(ServerMsg(
+                type="status",
+                text=f"界面回放保存失败：{type(exc).__name__}: {exc}"))
+
     async def _change_model(self, model_id: str) -> None:
         """运行时切换模型：记录新 ModelConfig；agent 已建则重建（保留 profile/session）。"""
         if not model_id or model_id == self.core._model.model:

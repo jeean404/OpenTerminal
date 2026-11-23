@@ -485,7 +485,7 @@ class PipelineCore:
         elif msg.type == "boundary_settled":
             # 前端流底卡结账垫满：放行等待中的命令注入（见 _boundary_gate）
             self._boundary_ack.set()
-        elif msg.type == "submit":
+        elif msg.type in ("submit", "image_submit"):
             # 外部触发链：前端拦截的自然语言整行（不再经 shell hook 分类，
             # su - 等 login shell 重置 hook 后依然可用）。
             # 必须走 _inbox 与按键保序：此前内联处理会在 _dispatch 泵的两个
@@ -987,6 +987,8 @@ class PipelineCore:
             # 与按键同队列保序（feed_msg 只入队）：半行 \r 截断中文的根因修复
             if self.session is not None and msg.text:
                 await self.ai._on_frontend_line(msg.text, msg.dirty)
+        elif msg.type == "image_submit":
+            await self.ai._on_image_submit(msg.text, msg.images)
         elif msg.type == "mode":
             await self.ai._switch_display(msg.text)
         elif msg.type == "resize":
@@ -1074,6 +1076,16 @@ class PipelineCore:
         不碰 PTY——清屏与否由调用方决定（/clear 清屏，new_session 不清）。"""
         self._ctx_epoch += 1
         self.transcript = open_transcript(self.tab_id)
+        if hasattr(self, "_history"):
+            self._history_conversation_id = None
+            self._history_resume_id = None
+            self._history_restore_loaded = True
+            self._last_completed_values = None
+            self._history_manual_sections = []
+            self._history_base_manual_sections = []
+            self._pending_history_manual = []
+            self._history_ui_frames = []
+            self.manual_history.clear()
 
 
     async def _switch_target(self, line: str) -> None:

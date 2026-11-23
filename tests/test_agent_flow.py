@@ -13,7 +13,7 @@ from langgraph.errors import GraphRecursionError
 from openterminal.agent.build import build_agent
 from openterminal.agent.middleware import DenyMiddleware
 from openterminal.agent.prompt import build_system_prompt
-from openterminal.agent.runner import TaskRunner
+from openterminal.agent.runner import TaskRunner, _user_message
 from openterminal.config import Config
 from openterminal.session.local_posix import LocalPtySession
 from openterminal.policy import Policy
@@ -58,6 +58,17 @@ async def test_success_flow():
     assert "tool_call" in kinds and "final" in kinds
     assert any("hello" in e.text for e in events if e.kind == "final")
     await session.close()
+
+
+def test_image_prompt_is_sent_as_multimodal_user_message():
+    image = "data:image/png;base64,iVBORw0KGgo="
+    assert _user_message("描述图片", [image]) == {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "描述图片"},
+            {"type": "image_url", "image_url": {"url": image}},
+        ],
+    }
 
 
 async def test_deny_blocks_and_model_pivots():

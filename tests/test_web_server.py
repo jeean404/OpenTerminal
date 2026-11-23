@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from openterminal.config import Config, TargetConfig
@@ -31,6 +32,110 @@ def test_api_targets_payload():
         assert data["local"] is True
         assert [t["name"] for t in data["direct"]] == ["web01", "prod"]
         assert "jumps" not in data
+
+
+def test_history_api_is_connection_scoped_and_resumes_same_record(monkeypatch, tmp_path):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from openterminal.core.conversation_history import (
+        ConversationHistory, connection_key,
+    )
+    import openterminal.web.server as web_server
+
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    save_saved_targets([TargetConfig(
+        name="web01", mode="ssh", host="10.0.0.20", user="root")])
+    cfg = Config.load()
+    store = ConversationHistory()
+    target = cfg.targets.get("web01") or find_saved_target("web01")
+    history_id = store.start(
+        target_key=connection_key("web01", target),
+        target_name="web01", title="previous task")
+    store.save_complete(history_id, {
+        "messages": [
+            HumanMessage(content="hello"),
+            AIMessage(content="completed"),
+        ],
+    }, ["manual context"], model="test-model")
+    store.save_ui_frames(history_id, [
+        {"kind": "json", "data": {
+            "type": "event",
+            "event": {"kind": "task_start", "text": "hello"}}},
+        {"kind": "bytes", "data": "Y29tbWFuZCBvdXRwdXQ="},
+        {"kind": "json", "data": {
+            "type": "event", "event": {"kind": "task_end"}}},
+    ])
+    store.mark_interrupted(history_id)
+    incomplete_id = store.start(
+        target_key=connection_key("web01", target),
+        target_name="web01", title="incomplete task")
+
+    created = []
+
+    class FakeWorker:
+        tab_id = "history-tab"
+
+        def __init__(self, worker_cfg, target_name):
+            created.append((worker_cfg, target_name, self))
+
+        def enable_history(self, target, *, resume_id=None):
+            self.history = (target, resume_id)
+            self._history_resume_id = resume_id
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(web_server, "TabWorker", FakeWorker)
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        listed = client.get("/api/history", params={"target": "web01"})
+        assert listed.status_code == 200
+        assert {item["id"] for item in listed.json()["items"]} == {
+            history_id, incomplete_id}
+        detail = client.get(
+            f"/api/history/{history_id}", params={"target": "web01"})
+        assert detail.status_code == 200
+        assert detail.json()["status"] == "interrupted"
+        assert detail.json()["continuable"] is True
+        assert detail.json()["messages"][-1]["content"] == "completed"
+        assert detail.json()["ui_frames"][1] == {
+            "kind": "bytes", "data": "Y29tbWFuZCBvdXRwdXQ="}
+        assert client.get(
+            f"/api/history/{history_id}",
+            params={"target": "local"}).status_code == 404
+        assert client.post(
+            f"/api/history/{history_id}/continue",
+            json={"target": "local"}).status_code == 404
+        assert client.post(
+            f"/api/history/{incomplete_id}/continue",
+            json={"target": "web01"}).status_code == 409
+        assert not created
+        continued = client.post(
+            f"/api/history/{history_id}/continue",
+            json={"target": "web01"})
+        assert continued.status_code == 200
+        assert created[-1][2].history[1] == history_id
+        assert created[-1][2]._history_ui_frames == detail.json()["ui_frames"]
+        assert client.post(
+            f"/api/history/{history_id}/continue",
+            json={"target": "web01"}).status_code == 409
+        assert client.delete(
+            f"/api/history/{history_id}", params={"target": "web01"}
+        ).status_code == 409
+        assert client.post("/api/tabs/history-tab/close").status_code == 200
+        store.save_ui_frames(history_id, [])
+        assert client.post(
+            f"/api/history/{history_id}/continue",
+            json={"target": "web01"}).status_code == 200
+        assert created[-1][2]._history_ui_frames == [{
+            "kind": "messages", "data": detail.json()["messages"]}]
+        assert client.post("/api/tabs/history-tab/close").status_code == 200
+        deleted = client.delete(
+            f"/api/history/{history_id}", params={"target": "web01"})
+        assert deleted.status_code == 200
+        assert client.get(
+            f"/api/history/{history_id}",
+            params={"target": "web01"}).status_code == 404
 
 
 def test_saved_password_for_edit_form_prefill(monkeypatch):
@@ -122,6 +227,82 @@ def test_model_profile_crud_and_activation(monkeypatch, tmp_path):
         ).status_code == 200
         assert keys == {}
         assert client.get("/api/model-profiles").json()["active_id"] is None
+
+
+@pytest.mark.parametrize("env", [
+    {},
+    {
+        "ANTHROPIC_BASE_URL": "https://anthropic.example",
+        "ANTHROPIC_API_KEY": "anthropic-key",
+        "OPENAI_BASE_URL": "https://openai.example",
+        "OPENAI_API_KEY": "openai-key",
+    },
+])
+def test_active_profile_replaces_env_warnings_for_new_and_continued_tabs(
+        monkeypatch, tmp_path, env):
+    import openterminal.model_profiles as profiles
+    import openterminal.web.server as web_server
+    from openterminal.config import model_from_env
+    from openterminal.core.conversation_history import (
+        ConversationHistory, connection_key,
+    )
+
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    keys = {}
+    monkeypatch.setattr(
+        profiles, "store_model_api_key",
+        lambda profile_id, key: keys.__setitem__(profile_id, key) or True)
+    monkeypatch.setattr(profiles, "load_model_api_key", keys.get)
+    monkeypatch.setattr(profiles, "delete_model_api_key",
+                        lambda profile_id: keys.pop(profile_id, None) is not None)
+    _, model_errors = model_from_env(env)
+    cfg = Config(errors=model_errors + ["其他配置错误"])
+    target = "root@10.0.0.20"
+    target_cfg = TargetConfig(mode="ssh", host="10.0.0.20", user="root")
+    history = ConversationHistory()
+    history_id = history.start(
+        target_key=connection_key("10.0.0.20", target_cfg),
+        target_name="10.0.0.20", title="previous")
+    history.save_complete(history_id, {"messages": []}, [])
+    created = []
+
+    class FakeWorker:
+        tab_id = "fake-tab"
+
+        def __init__(self, worker_cfg, target_name):
+            created.append((worker_cfg, target_name))
+
+        def enable_history(self, target_cfg, *, resume_id=None):
+            pass
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(web_server, "TabWorker", FakeWorker)
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        assert client.post("/api/tabs", json={"target": target}).status_code == 200
+        assert created[-1][0].errors == cfg.errors
+        profile = client.post("/api/model-profiles", json={
+            "name": "active", "provider": "openai", "base_url": "",
+            "model": "chosen-model", "api_key": "test-key",
+        }).json()
+        assert client.post(
+            f"/api/model-profiles/{profile['id']}/activate").status_code == 200
+        assert client.post("/api/tabs", json={"target": target}).status_code == 200
+        assert client.post(
+            f"/api/history/{history_id}/continue",
+            json={"target": target}).status_code == 200
+        for worker_cfg, target_name in created[-2:]:
+            assert target_name == "10.0.0.20"
+            assert worker_cfg.model.model == "chosen-model"
+            assert worker_cfg.model.api_key == "test-key"
+            assert worker_cfg.errors == ["其他配置错误"]
+        assert cfg.errors == model_errors + ["其他配置错误"]
+        assert client.delete(
+            f"/api/model-profiles/{profile['id']}").status_code == 200
+        assert client.post("/api/tabs", json={"target": target}).status_code == 200
+        assert created[-1][0].errors == cfg.errors
 
 
 def test_model_profile_validation_and_token(monkeypatch, tmp_path):

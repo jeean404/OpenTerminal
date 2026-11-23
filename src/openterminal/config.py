@@ -50,6 +50,12 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 _ANTHROPIC_KEY_ENVS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 _OPENAI_KEY_ENVS = ("OPENAI_API_KEY", "OPENAI_AUTH_TOKEN")
 _ALL_KEY_ENVS = _ANTHROPIC_KEY_ENVS + _OPENAI_KEY_ENVS
+MODEL_PROTOCOL_CONFLICT = "模型协议冲突：ANTHROPIC_* 与 OPENAI_* 同时配置，只能配一个"
+MODEL_PROTOCOL_MISSING = (
+    "未配置模型协议：请在项目 .env 或 ~/.openterminal/.env 配置 "
+    "ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY 或 "
+    "OPENAI_BASE_URL+OPENAI_API_KEY"
+)
 
 
 def _pick_key(env: dict[str, str], names: tuple[str, ...]) -> str | None:
@@ -93,7 +99,7 @@ def model_from_env(env: dict[str, str]) -> tuple[dict, list[str]]:
     ant = bool(ant_url) and bool(ant_key_env)
     oai = bool(oai_url) and bool(oai_key_env)
     if ant and oai:
-        return {}, ["模型协议冲突：ANTHROPIC_* 与 OPENAI_* 同时配置，只能配一个"]
+        return {}, [MODEL_PROTOCOL_CONFLICT]
     if ant:
         return {"provider": "anthropic",
                 "base_url": ant_url,
@@ -104,9 +110,7 @@ def model_from_env(env: dict[str, str]) -> tuple[dict, list[str]]:
                 "base_url": oai_url,
                 "api_key": env[oai_key_env],
                 "model": env.get("OPENAI_MODEL") or env.get("MODEL_ID", "")}, []
-    return {}, ["未配置模型协议：请在项目 .env 或 ~/.openterminal/.env 配置 "
-                "ANTHROPIC_BASE_URL+ANTHROPIC_API_KEY 或 "
-                "OPENAI_BASE_URL+OPENAI_API_KEY"]
+    return {}, [MODEL_PROTOCOL_MISSING]
 
 
 _DEFAULT_MODELS = [

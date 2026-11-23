@@ -1,7 +1,7 @@
 import json
 
 from openterminal.web.protocol import (
-    ClientMsg, ServerMsg, encode_server, parse_client,
+    ClientMsg, ServerMsg, encode_server, parse_client, validate_image_data_urls,
 )
 
 
@@ -70,6 +70,29 @@ def test_parse_submit_dirty_flag():
     assert m.type == "submit" and m.text == "帮我查询" and m.dirty is True
     m2 = parse_client('{"type":"submit","text":"帮我查询"}')
     assert m2.dirty is False
+
+
+def test_parse_image_submit():
+    m = parse_client(
+        '{"type":"image_submit","text":"描述图片","images":["data:image/png;base64,abc"]}')
+    assert m.type == "image_submit"
+    assert m.text == "描述图片"
+    assert m.images == ["data:image/png;base64,abc"]
+
+
+def test_validate_image_data_urls_checks_type_and_content():
+    import base64
+    import pytest
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+    image = f"data:image/png;base64,{png}"
+    assert validate_image_data_urls([image]) == [image]
+    with pytest.raises(ValueError, match="内容与文件格式不匹配"):
+        validate_image_data_urls(["data:image/jpeg;base64," + png])
+    with pytest.raises(ValueError, match="仅支持"):
+        validate_image_data_urls(["data:image/gif;base64," + png])
+    with pytest.raises(ValueError, match="数量"):
+        validate_image_data_urls([])
 
 
 def test_encode_event_kinds():

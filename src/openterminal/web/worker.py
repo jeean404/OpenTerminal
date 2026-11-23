@@ -9,7 +9,11 @@ CMDSET_* 等 28 处），实现搬去 core 后测试保持一行不改（阶段�
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import sys
+from contextlib import suppress
 
 from .. import core as _core  # noqa: F401 —— _PatchBridge 转发目标
 # Task 9：改组件模块直连（不再经 core 包再导出）。测试 monkeypatch 打在
@@ -37,17 +41,69 @@ from .protocol import encode_server
 class TabWorker(PipelineCore):
     paced_display = True   # Web：AI 文本攒到段边界一次性下发（ai_result）+ 心跳
 
+    def enable_history(self, target, *, resume_id: str | None = None) -> None:
+        from ..core.conversation_history import ConversationHistory, connection_key
+
+        self._history = ConversationHistory()
+        self._history_target_key = connection_key(self.target_name, target)
+        self._history_resume_id = resume_id
+        self._history_conversation_id = None
+        self._history_restore_loaded = False
+        self._last_completed_values = None
+        self._history_manual_sections: list[str] = []
+        self._history_base_manual_sections: list[str] = []
+        self._pending_history_manual: list[str] = []
+        self._history_ui_frames: list[dict] = []
+
+    def _record_history_frame(self, frame: str | bytes) -> None:
+        if getattr(self, "_history_conversation_id", None) is None:
+            return
+        frames = self._history_ui_frames
+        if isinstance(frame, bytes):
+            frames.append({
+                "kind": "bytes",
+                "data": base64.b64encode(frame).decode("ascii"),
+            })
+        else:
+            try:
+                message = json.loads(frame)
+            except (TypeError, ValueError):
+                return
+            if message.get("type") == "approval":
+                return
+            frames.append({"kind": "json", "data": message})
+
     async def emit_msg(self, msg: ServerMsg) -> None:
-        await self._outbox.put(("json", encode_server(msg)))
+        encoded = encode_server(msg)
+        self._record_history_frame(encoded)
+        await self._outbox.put(("json", encoded))
 
     async def emit_bytes(self, data: bytes) -> None:
+        self._record_history_frame(data)
         await self._outbox.put(("bytes", data))
 
     def _emit_nowait(self, msg: ServerMsg) -> None:
-        self._outbox.put_nowait(("json", encode_server(msg)))
+        encoded = encode_server(msg)
+        self._record_history_frame(encoded)
+        self._outbox.put_nowait(("json", encoded))
 
     async def handle_client(self, msg: ClientMsg) -> None:
         await self.feed_msg(msg)
+
+    async def close(self) -> None:
+        history = getattr(self, "_history", None)
+        task = self._ai_task
+        try:
+            await super().close()
+        finally:
+            if task is not None and task is not asyncio.current_task():
+                with suppress(asyncio.CancelledError):
+                    await task
+            conversation_id = getattr(self, "_history_conversation_id", None)
+            if history is not None and conversation_id is not None:
+                await asyncio.to_thread(
+                    history.save_ui_frames, conversation_id,
+                    list(self._history_ui_frames))
 
 
 class _PatchBridge(type(sys.modules[__name__])):

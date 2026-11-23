@@ -27,6 +27,16 @@ class _Stalled(Exception):
     """流静默超时：转成 TaskEvent(error) 收尾，不外抛给 core。"""
 
 
+def _user_message(text: str, images: list[str] | None = None) -> dict:
+    content: str | list[dict] = text
+    if images:
+        content = [{"type": "text", "text": text}]
+        content.extend(
+            {"type": "image_url", "image_url": {"url": image}}
+            for image in images)
+    return {"role": "user", "content": content}
+
+
 @dataclass
 class TaskEvent:
     kind: str
@@ -141,10 +151,11 @@ class TaskRunner:
         # 每个模型+工具往返约消耗 2 个 superstep，加固定余量
         return self.cfg
 
-    async def run(self, text: str) -> list[TaskEvent]:
+    async def run(self, text: str, *,
+                  images: list[str] | None = None) -> list[TaskEvent]:
         self._est_in.append(text)
         return await self._drive(
-            {"messages": [{"role": "user", "content": text}]}
+            {"messages": [_user_message(text, images)]}
         )
 
     async def resume(self, decisions: list[dict]) -> list[TaskEvent]:

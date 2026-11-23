@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from openterminal.config import Config
 from openterminal.web.protocol import ClientMsg
 from openterminal.web.worker import TabWorker
+from openterminal.core.messages import ServerMsg
 
 from tests.web_fakes import (
     FakeRunner, FakeSession, FakeSink, PassthroughSession,
@@ -16,6 +17,45 @@ from tests.web_fakes import (
     _configured_env, _make_worker, _profile, _run_failed_user_cmd, _sink_bytes,
     _skip_reintegrate, _submit, _wait, _wait_json, _wire_presenter,
 )
+
+
+async def test_history_close_persists_interrupt_after_cancelling_task(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENTERMINAL_HOME", str(tmp_path))
+    cfg = Config.load()
+    worker = TabWorker(cfg, "local")
+    worker.enable_history(cfg.targets["default"])
+    history_id = worker._history.start(
+        target_key=worker._history_target_key, target_name="local", title="task")
+    worker._history_conversation_id = history_id
+    await worker.emit_msg(ServerMsg(
+        type="event", event={"kind": "task_start", "text": "task"}))
+    await worker.emit_bytes(b"terminal output")
+    started = asyncio.Event()
+
+    async def running_task():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await worker.emit_msg(ServerMsg(
+                type="event", event={"kind": "interrupt", "text": "stopped"}))
+
+    worker._ai_task = asyncio.create_task(running_task())
+    await started.wait()
+    await worker.close()
+
+    item = worker._history.get(history_id)
+    assert item["status"] == "interrupted"
+    frames = [frame for frame in item["ui_frames"]
+              if frame["kind"] == "bytes" or frame["data"]["type"] == "event"]
+    assert frames == [
+        {"kind": "json", "data": {
+            "type": "event", "event": {"kind": "task_start", "text": "task"}}},
+        {"kind": "bytes", "data": "dGVybWluYWwgb3V0cHV0"},
+        {"kind": "json", "data": {
+            "type": "event", "event": {"kind": "interrupt", "text": "stopped"}}},
+    ]
+
 
 async def test_worker_connects_and_ready(monkeypatch):
     # FakeSession 探测输出无 shell 标记 → 回退直通，ready.interactive 省略

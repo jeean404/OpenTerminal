@@ -129,9 +129,11 @@ function modalConfirm(title, message, onOk, yesLabel = _t("信任"), noLabel = _
 
 // --- 单个会话：唯一全屏 xterm（PTY 字节直写）+ 卡片层 React island（纯 overlay）---
 class Session {
-  constructor(tabId, name) {
+  constructor(tabId, name, opts = {}) {
     this.tabId = tabId;
     this.name = name;
+    this._historyOnly = !!opts.historyOnly;
+    this._historyData = opts.historyData || null;
     this.baseName = name;       // 原始目标名（保留：未来 Tab 标签动态化用）
     this.mode = "agent";        // 'ssh' | 'agent'（仅切换后端 hook 开关，显示不再分叉）
     this._lineBuf = "";         // 半行缓冲（外部分类触发链，见 _feedLineBuf）
@@ -315,6 +317,7 @@ class Session {
 
     const pane = document.createElement("div");
     pane.className = "pane";
+    if (this._historyOnly) pane.classList.add("history-only");
     pane.id = `pane-${this.tabId}`;
     pane.innerHTML = `
       <div class="pane-head">
@@ -323,6 +326,14 @@ class Session {
           <button data-mode="agent" class="on">Agent</button>
         </div>
         <div class="pane-host" id="host-${this.tabId}"></div>
+        ${this._historyData ? `
+        <div class="history-pane-actions">
+          <button class="history-delete">${_t("删除")}</button>
+        </div>` : ""}
+        <button class="image-input-btn" id="imagebtn-${this.tabId}" disabled
+                title="${_t("上传图片并提问")}">${_t("🖼 图片")}</button>
+        <input class="image-input" id="imageinput-${this.tabId}" type="file"
+               accept="image/png,image/jpeg,image/webp" multiple hidden>
         <button class="files-toggle" id="filesbtn-${this.tabId}" tabindex="-1" title="${_t("远程文件：登录该主机的家目录（上传/下载）")}">${_t("📁 文件")}</button>
       </div>
       <div class="ot-stage" id="stage-${this.tabId}">
@@ -347,16 +358,62 @@ class Session {
           <span class="status-time" id="time-${this.tabId}" title="${_t("任务耗时")}"></span>
           <span class="status-size" id="size-${this.tabId}"></span>
         </span>
+      </div>
+      <div class="connect-overlay" id="connov-${this.tabId}">
+        <div class="connect-overlay-card">
+          <i class="cspin"></i>
+          <div class="connect-overlay-copy">
+            <span class="ctext">${_t("连接中")}</span>
+            <span class="connect-overlay-detail">${_t("正在建立终端连接，请稍候")}</span>
+          </div>
+        </div>
       </div>`;
     document.getElementById("panes").appendChild(pane);
     pane.querySelector(".run-text-btn").onclick = runTextBtn;
     pane.querySelectorAll(".policy-toggle button").forEach(btn => {
       btn.onclick = () => this._setPolicyMode(btn.dataset.policy);
     });
+    const imageInput = pane.querySelector(`#imageinput-${this.tabId}`);
+    pane.querySelector(`#imagebtn-${this.tabId}`).onclick = () => {
+      if (!this.interactive || this.mode !== "agent") {
+        this.setStatus(this.status, _t("图片提问需要已连接的 Agent 模式"));
+        return;
+      }
+      imageInput.click();
+    };
+    imageInput.onchange = () => {
+      this._openImagePrompt(imageInput.files);
+      imageInput.value = "";
+    };
+    pane.addEventListener("paste", ev => {
+      const items = Array.from(ev.clipboardData?.items || []);
+      const images = items
+        .filter(item => item.kind === "file" && item.type.startsWith("image/"))
+        .map(item => item.getAsFile())
+        .filter(Boolean);
+      if (!images.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      this._openImagePrompt(images);
+    }, true);
     this.paneEl = pane;
 
     this.filesPanel = new FilePanel(this);
     document.getElementById(`filesbtn-${this.tabId}`).onclick = () => this.filesPanel.toggle();
+    const historyDelete = pane.querySelector(".history-delete");
+    if (historyDelete) {
+      historyDelete.onclick = () => modalConfirm(
+        _t("删除历史对话"), _t("删除后无法恢复。确定删除这条记录？"),
+        async ok => {
+          if (!ok) return;
+          try {
+            await deleteHistory(this.name, this._historyData.id, false);
+            closeTab(this.tabId);
+          } catch (err) {
+            showReplayError(err);
+          }
+        }, _t("删除"), _t("取消"));
+    }
 
     pane.querySelectorAll(".seg button").forEach(btn => {
       btn.onclick = () => this.setMode(btn.dataset.mode);
@@ -415,20 +472,13 @@ class Session {
         if (sel) this._copyText(sel);
       }
     });
-    // 连接中浮层：盖在终端区中央，两阶段文案（连接中 → 初始化 Agent，由
-    // worker 的 stage 事件切换），ready/closed/error 即撤（setStatus 统一
-    // 切换）；须在 term.open 之后插入，xterm 接管容器
-    const termEl = this.paneEl.querySelector(`#term-${this.tabId}`);
-    termEl.insertAdjacentHTML("beforeend",
-      `<div class="connect-overlay" id="connov-${this.tabId}">` +
-      `<i class="cspin"></i><span class="ctext">${_t("连接中")}</span>` +
-      `<span class="cdots"></span></div>`);
     // 键盘字节直发 PTY（契约：input 保留）。外部分类触发链：agent 模式下
     // 整行带自然语言特征（CJK/? 前缀）时不发回车，改送 submit 让 worker 直接
     // 起任务——触发不再依赖 shell hook（sudo su - 等 login shell 重置后仍可用）；
     // 其余按键原样透传，命令执行/英文自然语言仍由 shell hook 分类（行为不变）。
     // 全屏应用（vim/htop 走 alternate buffer）不拦截，Enter 照常送达。
     term.onData(d => {
+      if (this._historyOnly || this._replaying) return;
       if (d.includes("\r")) {
         term.scrollToBottom();
         this._followLiveTail(true);
@@ -714,6 +764,64 @@ class Session {
     if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(obj));
   }
 
+  async _openImagePrompt(fileList) {
+    if (!this.interactive || this.mode !== "agent") {
+      this.setStatus(this.status, _t("图片提问需要已连接的 Agent 模式"));
+      return;
+    }
+    const files = Array.from(fileList || []);
+    const allowed = new Set(["image/png", "image/jpeg", "image/webp"]);
+    const maxFileBytes = 4 * 1024 * 1024;
+    const maxTotalBytes = 8 * 1024 * 1024;
+    const totalBytes = files.reduce((total, file) => total + file.size, 0);
+    if (!files.length || files.length > 4) {
+      this.setStatus(this.status, _t("一次最多选择 4 张图片"));
+      return;
+    }
+    if (files.some(file => !allowed.has(file.type))) {
+      this.setStatus(this.status, _t("仅支持 PNG、JPG 和 WebP 图片"));
+      return;
+    }
+    if (files.some(file => file.size > maxFileBytes) || totalBytes > maxTotalBytes) {
+      this.setStatus(this.status, _t("单张图片不能超过 4 MB，图片总大小不能超过 8 MB"));
+      return;
+    }
+    try {
+      const dataUrls = await Promise.all(files.map(file => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+        reader.readAsDataURL(file);
+      })));
+      const names = files.map(file => esc(file.name)).join("、");
+      modalShell(_t("图片提问"),
+        `<p>${_t("图片将发送给当前模型服务；请确认该模型支持图片输入。")}</p>` +
+        `<p class="image-prompt-files">${names}</p>` +
+        `<textarea id="image-prompt" class="image-prompt" rows="4" ` +
+        `placeholder="${_t("想让 AI 如何分析这些图片？")}"></textarea>`,
+        [{label: _t("发送给 AI"), primary: true, onClick: () => {
+          if (!this.interactive || this.mode !== "agent") {
+            this.setStatus(this.status, _t("图片提问需要已连接的 Agent 模式"));
+            return false;
+          }
+          if (!this.ws || this.ws.readyState !== 1) {
+            this.setStatus(this.status, _t("连接未就绪，图片尚未发送"));
+            return false;
+          }
+          this.sendJson({
+            type: "image_submit",
+            text: document.getElementById("image-prompt").value,
+            images: dataUrls,
+          });
+          return true;
+        }}]);
+      document.getElementById("image-prompt").focus();
+    } catch (error) {
+      console.error("image read failed", error);
+      this.setStatus(this.status, _t("读取图片失败"));
+    }
+  }
+
   // --- 字节扣流（临界区）---
   // 挂载/补差期间扣住 PTY 二进制帧，防止输出插进 pad 预留区。
   // 嵌套计数：welcome 与 card 临界区可叠加；归零才放行。
@@ -969,6 +1077,11 @@ class Session {
     this.focusCursor();
   }
 
+  _refreshImageInput() {
+    const btn = document.getElementById(`imagebtn-${this.tabId}`);
+    if (btn) btn.disabled = !this.interactive || this.mode !== "agent";
+  }
+
   _execCopy() {
     try { document.execCommand("copy"); } catch (e) {}
   }
@@ -1069,6 +1182,7 @@ class Session {
         }
         this._feed = mod.createFeed({
           onDecision: (decision, stateText, command, cardId) => {
+            if (this._historyOnly || this._replaying) return;
             this.setStatus(this.status, stateText + " " + (command || ""));
             this._approvalOpen = false;   // 决策完成：思考徽标接管执行空隙期
             this._approvalCmd = null;
@@ -1079,11 +1193,13 @@ class Session {
             this.focusCursor();   // 卡内 mousedown 不冒泡：焦点显式还给终端
           },
           onRescue: accept => {
+            if (this._historyOnly || this._replaying) return;
             // 失败救援卡决策回传（true = 交给 AI）
             this.sendJson({type: "rescue", accept});
             this.focusCursor();
           },
           onNewSession: cardId => {
+            if (this._historyOnly || this._replaying) return;
             // 总结卡「开启新会话」：后端只重置模型上下文（不清屏）；PTY 发
             // 一个回车等效换行出新鲜提示符——界面上就像按了一下 Enter
             this.sendJson({type: "new_session"});
@@ -3153,6 +3269,7 @@ if (inView) {
     this.mode = mode;
     this._lineBuf = "";
     this._lineCur = 0;
+    this._refreshImageInput();
     if (this.interactive) this.sendJson({type: "mode", text: mode});
     this.paneEl.querySelectorAll(".seg button").forEach(b =>
       b.classList.toggle("on", b.dataset.mode === mode));
@@ -3160,16 +3277,25 @@ if (inView) {
   }
 
   setStatus(state, text) {
+    const wasConnecting = this.status === "connecting";
     this.status = state;
     if (text != null) this.statusText = text;
     const el = document.getElementById(`status-${this.tabId}`);
     if (el) el.textContent = this.statusText;
-    // 连接中徽标+终端区浮层：ready/closed/error 一到即撤（浮层在 term.open
-    // 后插入，初始 connecting 应显示）
+    // 玻璃遮罩只覆盖连接生命周期：成功和失败都立即撤掉加载遮罩；
+    // 失败再弹独立失败卡片，终端界面不留半透明 loading 悬浮。
     const conn = document.getElementById(`conn-${this.tabId}`);
     if (conn) conn.hidden = state !== "connecting";
     const ov = document.getElementById(`connov-${this.tabId}`);
     if (ov) ov.hidden = state !== "connecting";
+    if (state === "closed" && wasConnecting && text &&
+        text !== _t("连接已取消") &&
+        (text.includes("失败") || /failed/i.test(text) || /error/i.test(text)) &&
+        !text.includes("PasswordCancelled") &&
+        !this._connectionFailureShown) {
+      this._connectionFailureShown = true;
+      queueMicrotask(() => this._showConnectionFailure(text));
+    }
     // tab 标签页上的状态点（每 tab 独立）：绿=已连接、红=断开、黄闪=连接中
     const td = this.tabEl && this.tabEl.querySelector(".tab-dot");
     if (td) td.className = "dot tab-dot " + state;
@@ -3180,7 +3306,36 @@ if (inView) {
     const ov = document.getElementById(`connov-${this.tabId}`);
     if (!ov) return;
     const t = ov.querySelector(".ctext");
-    if (t) t.textContent = stage === "agent_init" ? _t("初始化 Agent") : _t("连接中");
+    const detail = ov.querySelector(".connect-overlay-detail");
+    if (stage === "agent_init") {
+      if (t) t.textContent = _t("初始化 Agent");
+      if (detail) detail.textContent = _t("正在探测 Shell 能力并准备工具");
+    } else {
+      if (t) t.textContent = _t("连接中");
+      if (detail) detail.textContent = _t("正在建立终端连接，请稍候");
+    }
+  }
+
+  _showConnectionFailure(text) {
+    if (this._dead) return;
+    modalShell(_t("连接失败"), `
+      <div class="connection-failure-card">
+        <div class="connection-failure-icon">!</div>
+        <p class="mp-error">${esc(text)}</p>
+        <p>${_t("可检查主机地址、网络或认证信息后重试。")}</p>
+      </div>`,
+      [
+        {
+          label: _t("重试"),
+          primary: true,
+          onClick: () => {
+            const target = this.name;
+            closeTab(this.tabId);
+            setTimeout(() => openTab(target), 0);
+          },
+        },
+        {label: _t("关闭")},
+      ]);
   }
 
   _fmtDuration(ms) {
@@ -3225,6 +3380,7 @@ if (inView) {
   _renderPolicyMode(mode) {
     const seg = document.getElementById(`policy-${this.tabId}`);
     if (!seg) return;
+    if (typeof seg.querySelectorAll !== "function") return;
     seg.querySelectorAll("button").forEach(btn => {
       btn.classList.toggle("on", btn.dataset.policy === mode);
     });
@@ -3340,6 +3496,7 @@ if (inView) {
         this.setStatus("connected",
           _t("已连接 {0}{1}", msg.host, msg.distro ? "（" + msg.distro + "）" : ""));
         this.interactive = !!msg.interactive;
+        this._refreshImageInput();
         // 欢迎横幅：紧随 ready 的第一条 status 是横幅文案；落点锚在首个
         // 提示符文本上（OSC 133 标记被后端消费，不会到达前端）
         this._awaitWelcome = msg.interactive ? true : false;
@@ -3454,6 +3611,7 @@ if (inView) {
         // 后端 hook 开关确认
         if (msg.text === "ssh" || msg.text === "agent") {
           this.mode = msg.text;
+          this._refreshImageInput();
           this.paneEl.querySelectorAll(".seg button").forEach(b =>
             b.classList.toggle("on", b.dataset.mode === this.mode));
         }
@@ -3551,7 +3709,9 @@ if (inView) {
     this._hideGhost();
     this._destroySlots();
     if (this._feed) { try { this._feed.destroy(); } catch (e) {} this._feed = null; }
-    authFetch(`/api/tabs/${this.tabId}/close`, {method: "POST"}).catch(() => {});
+    if (!this._historyOnly) {
+      authFetch(`/api/tabs/${this.tabId}/close`, {method: "POST"}).catch(() => {});
+    }
     if (this.ws) { try { this.ws.onclose = null; this.ws.close(); } catch (e) {} }
     this._stopTimer();
     try { this.term.dispose(); } catch (e) {}
@@ -3559,16 +3719,62 @@ if (inView) {
     this.paneEl.remove();
     delete sessions[this.tabId];
   }
+
+  async replayFrames(frames) {
+    const allowed = new Set([
+      "task_start", "ai_result", "ai_tool", "term_open", "term_close",
+      "final", "ai_card", "task_end", "interrupt", "denied", "limit",
+      "error", "alert",
+    ]);
+    this._replaying = true;
+    try {
+      if (!await this._ensureFeed()) throw new Error(_t("卡片层加载失败"));
+      const replay = frames.flatMap(frame => frame.kind === "messages"
+        ? historyMessageFrames(frame.data || []) : [frame]);
+      for (const frame of replay) {
+        if (this._dead) return;
+        if (frame.kind === "input" || frame.kind === "text") {
+          this._writeTerm(new TextEncoder().encode(
+            (frame.kind === "input" ? "\r\n" : "") +
+            String(frame.data || "") + "\r\n"));
+          await this._flushWrites();
+        } else if (frame.kind === "bytes" && typeof frame.data === "string") {
+          const binary = atob(frame.data);
+          const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+          this._ingestBytes(bytes);
+          await this._flushWrites();
+        } else if (frame.kind === "json" && frame.data) {
+          const event = frame.data.type === "event" ? frame.data.event : null;
+          if (!event || !allowed.has(event.kind)) continue;
+          this.handleEvent(event.kind === "ai_tool" && event.phase === "start"
+            ? {...event, needs_approval: false} : event);
+          await Promise.resolve();
+          await this._cardReady;
+          if (this._mountQ) await this._mountQ;
+          if (this._outOpQ) await this._outOpQ;
+          if (this._sweepQ) await this._sweepQ;
+        }
+      }
+      this._followBottom();
+    } finally {
+      this._replaying = false;
+    }
+  }
 }
 
 // --- tab / pane 管理 ---
 function openTab(targetName) {
-  authFetch("/api/tabs", {
+  _openTabRequest(targetName, authFetch("/api/tabs", {
     method: "POST",
     body: JSON.stringify({target: targetName}),
-  })
+  }));
+}
+
+function _openTabRequest(targetName, request) {
+  request
     .then(r => r.json())
     .then(({tab_id}) => {
+      if (!tab_id) throw new Error("missing tab_id");
       const s = new Session(tab_id, targetName);
       sessions[tab_id] = s;
       activateTab(tab_id);
@@ -3578,6 +3784,61 @@ function openTab(targetName) {
       s.connectWS();
     })
     .catch(err => console.error("openTab failed", err));
+}
+
+async function openHistoryReplay(target, data, continueChat = false) {
+  const recordedFrames = data.ui_frames || [];
+  const legacy = !recordedFrames.length;
+  const frames = legacy ? historyMessageFrames(data.messages || [])
+                        : recordedFrames.slice();
+  if (!frames.length) throw new Error(_t("这条记录没有可回放的内容"));
+  if (!legacy && frames[0]?.data?.event?.kind === "task_start") {
+    const text = frames[0].data.event.text;
+    if (text) frames.unshift({kind: "input", data: text});
+  }
+  let tabId = `history-${data.id}`;
+  if (continueChat) {
+    const created = await historyJSON(
+      `/api/history/${encodeURIComponent(data.id)}/continue`,
+      {method: "POST", body: JSON.stringify({target})});
+    if (!created.tab_id) throw new Error(_t("续聊会话创建失败"));
+    tabId = created.tab_id;
+  }
+  const existing = sessions[tabId];
+  if (existing) {
+    activateTab(tabId);
+    return;
+  }
+  const session = new Session(tabId, target, {
+    historyOnly: !continueChat,
+    historyData: continueChat ? null : data,
+  });
+  sessions[tabId] = session;
+  activateTab(tabId);
+  if (typeof closeSettings === "function") closeSettings();
+  try {
+    await session.replayFrames(frames);
+    if (session._dead) return;
+    if (continueChat) {
+      session.connectWS();
+      const notices = [];
+      if (data.status === "interrupted")
+        notices.push(_t("任务已中断，将从最近一次已完成的对话继续；中断的任务不会自动重跑"));
+      if (legacy)
+        notices.push(_t("旧记录仅保存了对话内容，无法还原原始界面"));
+      if (notices.length) modalShell(_t("历史对话"),
+        notices.map(text => `<p>${esc(text)}</p>`).join(""),
+        [{label: _t("关闭")}]);
+    } else {
+      const notice = _t("没有已完成的对话可继承，仅能只读回放");
+      session.setStatus("connected", legacy
+        ? `${notice} · ${_t("旧记录仅保存了对话内容，无法还原原始界面")}`
+        : notice);
+    }
+  } catch (error) {
+    closeTab(tabId);
+    throw error;
+  }
 }
 
 function activateTab(tabId) {
@@ -3651,6 +3912,7 @@ function entry(t) {
     (sub.replace(/[@:]/g, "") ? `<span class="t-sub">${esc(sub)}</span>` : "") +
     "</span>" +
     '<span class="t-actions">' +
+    `<button data-a="history" title="${_t("对话历史")}">◷</button>` +
     `<button data-a="copy" title="${_t("复制为新的连接")}">⧉</button>` +
     `<button data-a="edit" title="${_t("编辑")}">✎</button>` +
     `<button data-a="del" title="${_t("删除")}">✕</button></span>`;
@@ -3660,6 +3922,9 @@ function entry(t) {
   };
   b.querySelector('[data-a="copy"]').onclick = ev => {
     ev.stopPropagation(); connForm({copy: t});
+  };
+  b.querySelector('[data-a="history"]').onclick = ev => {
+    ev.stopPropagation(); showHistory(t.name);
   };
   b.querySelector('[data-a="edit"]').onclick = ev => {
     ev.stopPropagation(); connForm({edit: t});
@@ -3676,9 +3941,140 @@ function localEntry() {
   b.dataset.name = "local";
   b.innerHTML =
     '<span class="t-main"><span class="t-label">local</span>' +
-    `<span class="t-sub">${_t("本机终端")}</span></span>`;
-  b.onclick = () => openTab("local");
+    `<span class="t-sub">${_t("本机终端")}</span></span>` +
+    `<span class="t-actions"><button title="${_t("对话历史")}">◷</button></span>`;
+  b.onclick = ev => {
+    if (ev.target.closest(".t-actions")) return;
+    openTab("local");
+  };
+  b.querySelector(".t-actions button").onclick = ev => {
+    ev.stopPropagation(); showHistory("local");
+  };
   return b;
+}
+
+function historyTime(epoch) {
+  if (!epoch) return "";
+  return new Date(epoch * 1000).toLocaleString();
+}
+
+function historyMessageText(content) {
+  if (!Array.isArray(content)) return String(content || "");
+  return content.map(part => {
+    if (typeof part === "string") return part;
+    if (part && part.type === "image") return _t("[图片]");
+    return "";
+  }).filter(Boolean).join("\n");
+}
+
+function historyMessageFrames(messages) {
+  const frames = [];
+  const tools = new Map();
+  let taskOpen = false;
+  let toolId = 0;
+  const event = data => frames.push({kind: "json", data: {type: "event", event: data}});
+  for (const message of messages) {
+    const text = historyMessageText(message.content);
+    if (message.role === "user") {
+      if (taskOpen) event({kind: "task_end"});
+      frames.push({kind: "input", data: text});
+      event({kind: "task_start", text});
+      taskOpen = true;
+    } else if (message.role === "assistant") {
+      const calls = message.tool_calls || [];
+      if (text) event({kind: calls.length ? "ai_result" : "final", text});
+      for (const call of calls) {
+        const id = ++toolId;
+        const command = call.name === "execute" ? String(call.args?.command || "") : "";
+        tools.set(call.id, {id, command});
+        event({kind: "ai_tool", phase: "start", id, name: call.name || "",
+          command, args: command || JSON.stringify(call.args || {})});
+      }
+      if (!calls.length) {
+        event({kind: "task_end"});
+        taskOpen = false;
+      }
+    } else if (message.role === "tool") {
+      const tool = tools.get(message.tool_call_id);
+      if (tool && tool.command) event({kind: "term_open", command: tool.command});
+      if (text) frames.push({kind: "text", data: text});
+      if (tool && tool.command) event({kind: "term_close", command: tool.command});
+      if (tool) event({kind: "ai_tool", phase: "end", id: tool.id});
+    }
+  }
+  if (taskOpen) event({kind: "task_end"});
+  return frames;
+}
+
+async function historyJSON(url, opts) {
+  const response = await authFetch(url, opts);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail ? _t(data.detail) : _t("请求失败"));
+  return data;
+}
+
+async function showHistory(target) {
+  try {
+    const data = await historyJSON(`/api/history?target=${encodeURIComponent(target)}`);
+    const rows = (data.items || []).map(item =>
+      `<div class="history-list-item"><button class="history-row" data-id="${esc(item.id)}">` +
+      `<span class="history-title">${esc(item.title)}</span>` +
+      `<span class="history-meta">${esc(historyTime(item.updated_at))}` +
+      ` · ${item.status === "completed" ? _t("已完成") : _t("已中断")}</span></button>` +
+      `<button class="history-list-delete" data-id="${esc(item.id)}" ` +
+      `aria-label="${esc(_t("删除历史对话"))}">${esc(_t("删除"))}</button></div>`
+    ).join("");
+    const closeList = modalShell(_t("{0} 的对话历史", target),
+      `<div class="history-list">${rows || `<p>${_t("暂无对话历史")}</p>`}</div>`,
+      [{label: _t("关闭")}]);
+    document.querySelectorAll(".history-row").forEach(row => {
+      row.onclick = async () => {
+        row.disabled = true;
+        try {
+          const detail = await historyJSON(
+            `/api/history/${encodeURIComponent(row.dataset.id)}` +
+            `?target=${encodeURIComponent(target)}`);
+          closeList();
+          await openHistoryReplay(target, detail, !!detail.continuable);
+        } catch (err) {
+          closeList();
+          showReplayError(err);
+        } finally {
+          row.disabled = false;
+        }
+      };
+    });
+    document.querySelectorAll(".history-list-delete").forEach(button => {
+      button.onclick = () => modalConfirm(
+        _t("删除历史对话"), _t("删除后无法恢复。确定删除这条记录？"),
+        async ok => {
+          if (!ok) { await showHistory(target); return; }
+          try {
+            await deleteHistory(target, button.dataset.id);
+          } catch (err) {
+            showReplayError(err);
+          }
+        }, _t("删除"), _t("取消"));
+    });
+  } catch (err) {
+    modalShell(_t("读取历史失败"), `<p class="mp-error">${esc(err.message)}</p>`,
+      [{label: _t("关闭")}]);
+  }
+
+}
+
+function showReplayError(err) {
+  modalShell(_t("读取历史失败"),
+    `<p class="mp-error">${esc(err && err.message ? err.message : err)}</p>`,
+    [{label: _t("关闭")}]);
+}
+
+async function deleteHistory(target, conversationId, reopenList = true) {
+  await historyJSON(
+    `/api/history/${encodeURIComponent(conversationId)}` +
+    `?target=${encodeURIComponent(target)}`,
+    {method: "DELETE"});
+  if (reopenList) await showHistory(target);
 }
 
 // 连接表单：远程机器的新增与编辑；

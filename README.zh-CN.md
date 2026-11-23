@@ -85,7 +85,7 @@ pip install -e .
 
 ## 配置方式
 
-模型网关在 **设置 → 模型** 里配：填协议、URL、模型和 API Key，启用后新建的终端才使用它，已打开的不受切换影响。配置元数据存 `~/.openterminal/connections.db`，API Key 存操作系统凭据库，不写进项目配置文件。CLI 仍兼容环境变量和 `config.toml` 的 `[model]`。
+模型网关在 **设置 → 模型** 里配：填协议、URL、模型和 API Key，启用后新建或继续的终端会优先使用它，已打开的不受切换影响，无须另在 `.env` 中配置模型协议。配置元数据存 `~/.openterminal/connections.db`，API Key 存操作系统凭据库，不写进项目配置文件。CLI 仍兼容环境变量和 `config.toml` 的 `[model]`。
 
 其余设置写 `~/.openterminal/config.toml`：
 
@@ -123,6 +123,15 @@ commands = [
 | 兼容 shell | zsh 与 bash ≥ 4 全功能；bash 3.2（macOS 自带）拿不到 `READLINE_LINE`，自然语言触发链不可用 |
 | Python | 3.11+（pipx / 源码安装时需要；预编译二进制不需要） |
 | 模型网关 | Anthropic 兼容与 OpenAI 兼容，可配多组 |
+| 图片输入 | Web 端可上传/粘贴 PNG / JPG / WebP（最多 4 张，单张 4 MB / 总计 8 MB）；模型需支持视觉输入 |
+| 对话历史 | 点击 Web 连接的历史记录，还原终端与 AI 卡片并继承完整 Agent 状态继续聊天，续聊保存在原记录中；也可删除记录，不会重跑历史命令。同一记录使用中需先关闭对应终端，才能再次打开或删除 |
+
+Web 对话历史保存在本机 `~/.openterminal/conversation_history.db`。数据库可能
+包含图片数据与命令输出，默认不加密，请妥善保护 OpenTerminal 主目录。旧 JSONL
+会话记录不会被强行归类或导入到这个新历史库。较早的历史记录如果只保存了
+模型消息而未保存界面事件，将按消息重建内容，并提示无法完整还原原始界面。
+没有已完成状态的记录只能只读回放；中断的记录若有已完成状态，则从最近一次
+完成的对话继续，不会自动重跑中断的任务。
 
 ## 系统架构
 

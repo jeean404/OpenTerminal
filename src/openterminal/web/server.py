@@ -8,7 +8,6 @@ import json
 import time
 import webbrowser
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -27,10 +26,11 @@ from ..connections.secrets import (
     delete_password, load_password_alias, store_password,
 )
 from ..model_profiles import (
-    activate_profile, active_model_config, check_connection, delete_profile,
+    activate_profile, check_connection, config_with_active_model, delete_profile,
     list_profiles, save_profile, update_profile,
 )
 from ..frontend.render import console
+from ..core.conversation_history import ConversationHistory, connection_key
 from .files_api import install_files_errors, make_files_router
 from .skills_api import make_skills_router
 from .tools_api import make_tools_router
@@ -99,10 +99,37 @@ def _resolve_target_name(cfg: Config, text: str) -> str:
 
 def create_app(cfg: Config, *, token: str = "") -> FastAPI:
     tabs: dict[str, TabWorker] = {}
+    history = ConversationHistory()
+    history_reservations: set[str] = set()
     # 断线回收任务：浏览器刷新/断网后 ws 关闭，但 PTY/远端 shell 还活着；
     # 给一段宽限期（可重连），到点仍无人挂上就真正回收
     reapers: dict[str, asyncio.Task] = {}
     _REAPER_GRACE = 300.0   # 5 分钟
+
+    def _history_in_use(conversation_id: str) -> bool:
+        return conversation_id in history_reservations or any(
+            conversation_id in (
+                getattr(worker, "_history_conversation_id", None),
+                getattr(worker, "_history_resume_id", None),
+            )
+            for worker in tabs.values()
+        )
+
+    async def _close_worker(tab_id: str) -> None:
+        worker = tabs.pop(tab_id, None)
+        if worker is None:
+            return
+        history_ids = {
+            value for value in (
+                getattr(worker, "_history_conversation_id", None),
+                getattr(worker, "_history_resume_id", None),
+            ) if value is not None
+        }
+        history_reservations.update(history_ids)
+        try:
+            await worker.close()
+        finally:
+            history_reservations.difference_update(history_ids)
 
     async def _reap_later(tab_id: str) -> None:
         first_check = True
@@ -117,8 +144,7 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
             if _has_active_file_upload(worker):
                 continue
             reapers.pop(tab_id, None)
-            tabs.pop(tab_id, None)
-            await worker.close()
+            await _close_worker(tab_id)
             return
 
     def _cancel_reaper(tab_id: str) -> None:
@@ -231,18 +257,94 @@ def create_app(cfg: Config, *, token: str = "") -> FastAPI:
         if not target:
             raise HTTPException(400, "target required")
         name = _resolve_target_name(cfg, target)
-        worker_cfg = replace(
-            cfg, model=await asyncio.to_thread(active_model_config, cfg.model))
+        worker_cfg = await asyncio.to_thread(config_with_active_model, cfg)
         worker = TabWorker(worker_cfg, name)
+        target_cfg = worker_cfg.targets.get(
+            name, worker_cfg.targets["default"])
+        if hasattr(worker, "enable_history"):
+            worker.enable_history(target_cfg)
         tabs[worker.tab_id] = worker
         return {"tab_id": worker.tab_id}
+
+    @app.get("/api/history")
+    async def list_history(request: Request, target: str):
+        _check_token(request.headers)
+        name = _resolve_target_name(cfg, target)
+        target_cfg = cfg.targets.get(name, cfg.targets["default"])
+        try:
+            items = await asyncio.to_thread(
+                history.list, connection_key(name, target_cfg))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, f"历史记录读取失败：{exc}") from exc
+        return {"items": items}
+
+    @app.get("/api/history/{conversation_id}")
+    async def read_history(request: Request, conversation_id: str, target: str):
+        _check_token(request.headers)
+        name = _resolve_target_name(cfg, target)
+        target_cfg = cfg.targets.get(name, cfg.targets["default"])
+        item = await asyncio.to_thread(history.get, conversation_id)
+        if item is None:
+            raise HTTPException(404, "历史记录不存在")
+        if item["target_key"] != connection_key(name, target_cfg):
+            raise HTTPException(404, "历史记录不属于当前连接")
+        return item
+
+    @app.delete("/api/history/{conversation_id}")
+    async def delete_history(
+            request: Request, conversation_id: str, target: str):
+        _check_token(request.headers)
+        name = _resolve_target_name(cfg, target)
+        target_cfg = cfg.targets.get(name, cfg.targets["default"])
+        if _history_in_use(conversation_id):
+            raise HTTPException(409, "该历史会话正在使用，请先关闭对应终端")
+        history_reservations.add(conversation_id)
+        try:
+            item = await asyncio.to_thread(history.get, conversation_id)
+            if item is None or item["target_key"] != connection_key(name, target_cfg):
+                raise HTTPException(404, "历史记录不属于当前连接")
+            if not await asyncio.to_thread(history.delete, conversation_id):
+                raise HTTPException(404, "历史记录不存在")
+            return {"ok": True}
+        finally:
+            history_reservations.discard(conversation_id)
+
+    @app.post("/api/history/{conversation_id}/continue")
+    async def continue_history(
+            request: Request, conversation_id: str, payload: dict):
+        _check_token(request.headers)
+        target = str(payload.get("target") or "")
+        if not target:
+            raise HTTPException(400, "target required")
+        name = _resolve_target_name(cfg, target)
+        target_cfg = cfg.targets.get(name, cfg.targets["default"])
+        if _history_in_use(conversation_id):
+            raise HTTPException(409, "该历史会话正在使用，请先关闭对应终端")
+        history_reservations.add(conversation_id)
+        try:
+            item = await asyncio.to_thread(history.get, conversation_id)
+            if item is None or item["target_key"] != connection_key(name, target_cfg):
+                raise HTTPException(404, "历史记录不属于当前连接")
+            if not item["continuable"]:
+                raise HTTPException(409, "该记录没有可恢复的完成态")
+            worker_cfg = await asyncio.to_thread(config_with_active_model, cfg)
+            worker = TabWorker(worker_cfg, name)
+            if hasattr(worker, "enable_history"):
+                worker.enable_history(target_cfg, resume_id=conversation_id)
+                worker._history_ui_frames = list(item["ui_frames"])
+                if not worker._history_ui_frames and item["messages"]:
+                    worker._history_ui_frames.append({
+                        "kind": "messages", "data": item["messages"],
+                    })
+            tabs[worker.tab_id] = worker
+            return {"tab_id": worker.tab_id}
+        finally:
+            history_reservations.discard(conversation_id)
 
     @app.post("/api/tabs/{tab_id}/close")
     async def close_tab(request: Request, tab_id: str):
         _check_token(request.headers)
-        worker = tabs.pop(tab_id, None)
-        if worker is not None:
-            await worker.close()   # 释放钩子（文件面板连接）在 close() 内统一跑
+        await _close_worker(tab_id)
         return {"ok": True}
 
     @app.get("/api/saved/{name}/password")

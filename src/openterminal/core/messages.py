@@ -85,7 +85,7 @@ class ServerMsg:
 
 @dataclass
 class ClientMsg:
-    type: str                      # raw(键盘字节) | decision | auth | interrupt | mode | resize | change_model | close | submit | pad | boundary_settled | new_session | set_policy_mode
+    type: str                      # raw | decision | auth | interrupt | mode | resize | change_model | close | submit | image_submit | pad | boundary_settled | new_session | set_policy_mode
     text: str = ""                 # mode: "ssh" | "agent"；auth: 密码文本；submit: 前端拦截的自然语言整行；
                                    # set_policy_mode: 目标审批模式 "tiered" | "allow-all"
     data: bytes = b""              # raw 按键字节（二进制帧整帧直发 PTY）
@@ -103,6 +103,7 @@ class ClientMsg:
     dirty: bool = False            # submit：半行缓冲被转义/控制键清过（历史召回
                                    # 后镜像不可信）→ worker 走 \x03 安全路径不补 \r
     accept: bool = False           # rescue：失败救援卡决策（true = 交给 AI）
+    images: object = None          # image_submit：未信任的图片 data URL 列表，由 AI 入口校验
 
 
 class InteractiveRunner:
@@ -192,4 +193,3 @@ class InteractiveRunner:
         except Exception:  # noqa: BLE001 - 重注入失败即通道不可用
             return False
         return w.hook._hook_ok()
-
